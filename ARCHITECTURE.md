@@ -77,6 +77,14 @@ chegar com outra moeda e é persistida como `REJECTED` (`CURRENCY_MISMATCH`) —
 quem barra a operação é o domínio, sob lock. Ver
 [ADR 0001](docs/adr/0001-mikroorm-7-com-invariantes-no-schema.md).
 
+**Validação na entrada:** `amount` com até 15 dígitos inteiros e exatamente 2 casas
+(máximo `"999999999999999.99"`), o que deixa duas ordens de grandeza de folga até a
+coluna; moeda no formato `^[A-Z]{3}$`, sem lista ISO completa. Nada é arredondado:
+mais de 2 casas é recusado (`INVALID_PAYLOAD`) — é a leitura adotada para o
+"arredondamento" do §13. Piso por tipo: `BET`, `WIN`, `REFUND` e `ROLLBACK` maiores
+que zero; `LOSS` e `initialBalance` zero ou mais; o `CHECK` do banco repete as
+regras.
+
 ## Estratégia transacional
 
 Cada use case abre a própria unidade de trabalho por uma porta `UnitOfWork`; a
@@ -104,12 +112,12 @@ carteira. Worker morto: o lease expira e outra instância assume. Ver
 
 | Tabela | Garantias |
 |---|---|
-| `wallets` | `CHECK (balance_amount >= 0)`, `CHECK (version >= 1)`, `CHECK (currency = balance_currency)`; `UNIQUE (player_id, currency)`; `UNIQUE (id, currency)` (alvo da FK de moeda) |
-| `wager_transactions` | `UNIQUE (provider_id, idempotency_key)`; `UNIQUE (provider_id, external_transaction_id)`; FK `wallet_id NOT NULL`; FK `reference_transaction_id` na própria tabela; índice único parcial da reversão; `CHECK`s de coerência (tipo dependente ⇔ referência externa; `PROCESSED` ⇔ `processed_at`; `REJECTED`/`FAILED` ⇔ `failure_code`; `status <> 'PENDING'`); `amount > 0`, exceto `LOSS` (`>= 0`); índice parcial `WHERE status = 'PENDING_REFERENCE'` |
+| `wallets` | `CHECK (balance_amount >= 0)`, `CHECK (version >= 1)`, `CHECK (currency = balance_currency)`; `UNIQUE (player_id, currency)`; `UNIQUE (id, currency)` (alvo da FK de moeda); `UNIQUE (creation_idempotency_key)` (anulável) e `CHECK` de chave e hash da criação ambos nulos ou ambos preenchidos; `initial_balance` |
+| `wager_transactions` | `UNIQUE (provider_id, idempotency_key)`; `UNIQUE (provider_id, external_transaction_id)`; FK `wallet_id NOT NULL`; FK `reference_transaction_id` na própria tabela; índice único parcial da reversão; `CHECK`s de coerência (`REFUND`/`ROLLBACK` ⇒ referência externa preenchida, `BET`/`LOSS`/`OPENING` ⇒ nula, `WIN` livre; `PENDING_REFERENCE` só para `REFUND`, `ROLLBACK` e `WIN`; `PROCESSED` ⇔ `processed_at`; `REJECTED`/`FAILED` ⇔ `failure_code`; `PROCESSED`/`REJECTED` ⇔ `balance_after` e `wallet_version_observed` preenchidos; `status <> 'PENDING'`); `amount > 0`, exceto `LOSS` (`>= 0`); `correlation_id NOT NULL`; índice parcial `WHERE status = 'PENDING_REFERENCE'` |
 | `wallet_ledger_entries` | `UNIQUE (transaction_id, wallet_id)`; `UNIQUE (wallet_id, wallet_version)`; FK composta e `CHECK` de moeda; `amount > 0`; `CHECK` da aritmética (`balance_after = balance_before ± amount` pela `direction`, saldos `>= 0`) |
 | `inbox_messages` | PK `(consumer_name, message_id)` |
-| `outbox_messages` | índice parcial `WHERE published_at IS NULL` em `next_attempt_at` |
-| `rejected_submissions` | append-only, sem FK nem unicidade |
+| `outbox_messages` | `wallet_id NOT NULL` (o `MessageGroupId`); índice parcial `WHERE published_at IS NULL` em `next_attempt_at` |
+| `rejected_submissions` | append-only, sem FK nem unicidade; `correlation_id` anulável |
 
 **Triggers:**
 
@@ -121,7 +129,13 @@ carteira. Worker morto: o lease expira e outra instância assume. Ver
   [ADR 0003](docs/adr/0003-versao-da-carteira-como-sequencia-do-livro-razao.md).
 - **Transação terminal imutável:** em `wager_transactions`, linha em `PROCESSED`,
   `REJECTED` ou `FAILED` não muda; colunas de identidade (chave, hash, valor, tipo,
-  carteira…) não mudam em estado nenhum; nenhuma linha é apagada.
+  carteira, `correlation_id`…) não mudam em estado nenhum; nenhuma linha é apagada.
+  O único `UPDATE` de status aceito parte de `PENDING_REFERENCE`.
+- **Identidade da carteira imutável:** em `wallets`, `player_id`, `currency`,
+  `initial_balance` e chave e hash da criação não mudam.
+
+Tempos que dependem de relógio — TTL das pendentes e leases dos workers — usam o
+`now()` do banco, nunca o relógio da instância.
 
 Unicidade da reversão: índice único parcial em `reference_transaction_id` com
 `WHERE status = 'PROCESSED' AND kind IN ('REFUND', 'ROLLBACK')` — ver
@@ -134,14 +148,25 @@ Unicidade da reversão: índice único parcial em `reference_transaction_id` com
   `internal`, chave `opening:<walletId>`) já `PROCESSED`, com lançamento `CREDIT`
   e os eventos `WagerTransactionProcessed` e `WalletBalanceChanged`, na mesma
   transação SQL.
+- **Criação idempotente, com header opcional:** o `POST /wallets` aceita
+  `Idempotency-Key`. Mesma chave e mesmo hash (`playerId` e `initialBalance`, pela
+  mesma função canônica) → replay da resposta original (201, saldo inicial, `version`
+  1, `idempotentReplay: true`); hash diferente → 409 `IDEMPOTENCY_CONFLICT`. Sem o
+  header, vale o contrato do §9 sem mudança — obrigatório, um cliente que segue o
+  enunciado receberia 400. Em qualquer caso, carteira já existente para jogador e
+  moeda → 409 `WALLET_ALREADY_EXISTS` **com o `walletId`**, para que o provedor que
+  perdeu o 201 descubra a carteira. A chave da criação é global, porque a carteira não
+  tem provedor (limitação; com autenticação, seria por provedor).
 - **Sequência:** cada lançamento guarda a versão da carteira depois dele; as
   versões são contínuas até a atual, começando em 1 com abertura e em 2 sem ela.
   Ver [ADR 0003](docs/adr/0003-versao-da-carteira-como-sequencia-do-livro-razao.md).
 - **Paginação:** ordem crescente, cursor opaco
   `base64url("v1:<walletId>:<wallet_version>")`; `limit` padrão 50, máximo 200.
-  Cursor malformado ou de outra carteira → 400 `INVALID_CURSOR`. Resposta
-  `{ items, nextCursor }`, com `nextCursor` nulo na última página. Páginas já
-  servidas nunca mudam.
+  Cursor malformado ou de outra carteira → 400 `INVALID_CURSOR`; `limit` fora de
+  1..200 ou não numérico → 400 `INVALID_PAYLOAD`. Resposta `{ items, nextCursor }`,
+  com `nextCursor` nulo na última página; cada item traz `id`, `transactionId`,
+  `direction`, `money`, `balanceBefore`, `balanceAfter`, `walletVersion` e
+  `createdAt`. Páginas já servidas nunca mudam.
 - **Reconciliação** (`POST /wallets/:walletId/reconciliation`): só leitura, sem
   lock, numa única consulta (snapshot consistente) — saldo, soma com sinal dos
   lançamentos, contagem e buracos na sequência. A resposta do §9 ganha
@@ -161,6 +186,63 @@ Consequência, aceita: na sequência `BET` → `REFUND` → `ROLLBACK` do `REFUN
 aposta volta a valer, mas não pode mais ser reembolsada nem revertida — ela já foi
 desfeita uma vez.
 
+**Referência do ganho.** O `WIN` pode citar a `BET` da rodada (§7). Quando cita, a
+referência é resolvida como a de uma transação dependente — tem de ser uma `BET`
+`PROCESSED` do mesmo provedor, jogador, carteira, moeda e rodada, e, ausente, o
+`WIN` fica `PENDING_REFERENCE` à espera do worker. Mas o `WIN` não é transação
+dependente: o valor é livre (o prêmio não iguala a aposta) e citar não é desfazer —
+vários `WIN` podem citar a mesma `BET`, fora do índice de reversão única. A `LOSS`
+não aceita referência.
+
+| | `REFUND` | `ROLLBACK` | `WIN` |
+|---|---|---|---|
+| referência | obrigatória | obrigatória | opcional |
+| tipo aceito | `BET` | `BET`, `WIN`, `REFUND` | `BET` |
+| valor igual ao da referência | sim | sim | não |
+| conta como desfazer (uma vez) | sim | sim | não |
+
+**Rodada sem máquina de estados** (interpretação adotada): `WIN` sem `BET`, ou `WIN`
+e `LOSS` na mesma rodada, são aceitos; a rodada só entra na coerência da referência.
+
+## Transições da transação de aposta
+
+| De | Para | Quando |
+|---|---|---|
+| *(create)* | `PENDING` | em memória; nunca persistido |
+| `PENDING` | `PROCESSED` / `REJECTED` | a regra de negócio passa / recusa |
+| `PENDING` | `PENDING_REFERENCE` | a referência ainda não existe (`REFUND`, `ROLLBACK`, `WIN` com referência) |
+| `PENDING` | `FAILED` | erro permanente, gravado na segunda unidade de trabalho |
+| `PENDING_REFERENCE` | `PROCESSED` / `REJECTED` | o worker resolve, ou o TTL expira (`REFERENCE_NOT_FOUND`) |
+| `PENDING_REFERENCE` | `FAILED` | erro permanente durante a resolução |
+| `PROCESSED`, `REJECTED`, `FAILED` | — | `InvalidTransactionStateError`: erro de programação |
+
+A primeira gravação já sai em `PROCESSED`, `REJECTED`, `PENDING_REFERENCE` ou
+`FAILED`. `markPendingReference` só parte de `PENDING`: a pendente que continua
+esperando só é reagendada, sem mudar de estado. A abertura segue `create` →
+`markProcessed`.
+
+## Ordem das validações
+
+Com mais de uma violação, prevalece a primeira, na mesma ordem nos dois canais:
+
+1. Chave ausente → `MISSING_IDEMPOTENCY_KEY` (na fila, `INVALID_PAYLOAD`).
+2. Forma do payload (campo desconhecido, `Money` inválido, `kind` fora do enum,
+   referência obrigatória ausente ou proibida presente) → `INVALID_PAYLOAD`;
+   `OPENING` bem formado → `INTERNAL_KIND_NOT_ALLOWED`.
+3. Hash do payload.
+4. Idempotência por provedor e chave, sem lock → replay ou `IDEMPOTENCY_CONFLICT`.
+   Vem antes da carteira: chave reusada com carteira inexistente é conflito.
+5. Id externo com outra chave → `EXTERNAL_ID_CONFLICT`.
+6. Lock da carteira; inexistente → `WALLET_NOT_FOUND`.
+7. Passos 4 e 5 de novo, sob lock — uma concorrente pode ter confirmado.
+8. Domínio: `WALLET_PLAYER_MISMATCH`; `CURRENCY_MISMATCH`; referência (ausente ou
+   ela mesma pendente → espera; `REFERENCE_NOT_PROCESSED`;
+   `REFERENCE_KIND_NOT_ALLOWED`; `REFERENCE_MISMATCH`, citando o primeiro campo
+   divergente na ordem provedor, jogador, carteira, moeda, rodada;
+   `REFERENCE_AMOUNT_MISMATCH`, exceto no `WIN`; `REFERENCE_ALREADY_REVERSED`, só na
+   transação dependente); saldo (`INSUFFICIENT_FUNDS` ou
+   `REVERSAL_INSUFFICIENT_FUNDS`).
+
 ## Idempotência e deduplicação
 
 - **A chave de idempotência é única por provedor:**
@@ -176,7 +258,12 @@ desfeita uma vez.
   redelivery da fila; a chave de idempotência protege contra o reenvio do provedor,
   por qualquer canal.
 - **Replay** (mesma chave, mesmo hash) devolve o resultado original, com o mesmo
-  código HTTP e `idempotentReplay: true`. Para transação ainda
+  código HTTP e `idempotentReplay: true`. O saldo observado vem de
+  `wager_transactions.balance_after`, gravado com o saldo lido sob lock em todo
+  desfecho `PROCESSED` ou `REJECTED` — inclusive `LOSS` e rejeições, que não têm
+  lançamento, e `CURRENCY_MISMATCH`, em que é o saldo na moeda da carteira; junto,
+  `wallet_version_observed`. Os dois ficam nulos em `PENDING_REFERENCE` e
+  `FAILED`. Para transação ainda
   `PENDING_REFERENCE`, devolve o **estado atual** — se o worker já a resolveu, o
   desfecho final. **Conflito** (mesma chave, hash diferente) → 409.
 
@@ -196,17 +283,29 @@ comum às duas entradas.
 
 Toda submissão que **não vira transação de aposta** é gravada numa tabela própria,
 append-only e sem FK: payload inválido (HTTP ou fila), carteira inexistente,
-`OPENING` vindo de fora, conflito de idempotência e `EXTERNAL_ID_CONFLICT`. Colunas:
-`provider_id`, `idempotency_key`, `external_transaction_id`, `payload_hash`, código
-de falha, canal, `message_id` (quando houver) e `received_at` — o que der para
+`OPENING` vindo de fora, conflito de idempotência, `EXTERNAL_ID_CONFLICT` e, na
+fila, `MESSAGE_ID_CONFLICT`. Colunas: `provider_id`, `idempotency_key`,
+`external_transaction_id`, `payload_hash`, código de falha, canal, `message_id`
+(quando houver), `correlation_id` e `received_at` — o que der para
 extrair, já que um payload inválido pode não ter chave. O insert roda numa unidade
 de trabalho própria, no ponto da recusa; sem unicidade (cada tentativa é uma linha).
 Replays não entram: são métrica.
 
 Com isso, `wager_transactions.wallet_id` mantém a FK `NOT NULL`: a carteira
-inexistente responde `WALLET_NOT_FOUND` (HTTP 422; na fila, `ack`), sem evento e
-sem `transactionId`, e um reenvio depois que a carteira existir é processado
-normalmente. Carteira de outro jogador é outra coisa: a FK é satisfeita, e a
+inexistente responde `WALLET_NOT_FOUND` (HTTP 422), sem evento e sem
+`transactionId`, e um reenvio depois que a carteira existir é processado
+normalmente.
+
+**Na fila, toda submissão não admitida termina na DLQ** — o canal de "precisa de
+atenção" desse caminho, já que a fila não tem resposta. `WALLET_NOT_FOUND` é
+tratado antes como transitório (sem `ack`, mesmo backoff): cobre a corrida em que o
+provedor cria a carteira por HTTP e manda a primeira `BET` pela fila; esgotados os 5
+recebimentos (~30 s), envio explícito à DLQ, sem `FAILED`. Conflitos de idempotência
+e de id externo e `OPENING` de fora vão direto à DLQ, como o payload inválido e o
+`MESSAGE_ID_CONFLICT`. Todo envio à DLQ leva o atributo `failureCode` e uma linha
+de submissão não admitida (no envio final, não a cada recebimento). O `ack` puro
+fica para os desfechos de transação, que emitem evento: o "erro de negócio → `ack`"
+do §10 vale para a rejeição, e a submissão não admitida não é rejeição. Carteira de outro jogador é outra coisa: a FK é satisfeita, e a
 transação é `REJECTED` (`WALLET_PLAYER_MISMATCH`), com evento.
 
 ## Status HTTP
@@ -228,7 +327,10 @@ mesma chave.
 
 Desfechos de transação respondem com o resultado da transação (`transactionId`,
 `status`, `failureCode`, saldo, `idempotentReplay`); erros sem transação respondem
-`{ failureCode, message }`.
+`{ failureCode, message }` — o 409 `WALLET_ALREADY_EXISTS` acrescenta o `walletId`.
+O `GET` de transação devolve o mesmo corpo do desfecho, mais os campos de
+identidade, sem `idempotentReplay`. O 503 leva `Retry-After: 1` (segundos,
+configurável).
 
 ## Códigos de falha
 
@@ -253,7 +355,7 @@ Enum fechado em `shared/domain`.
 | `IDEMPOTENCY_CONFLICT` | não admitida (409) | usa uma chave nova para um payload novo |
 | `EXTERNAL_ID_CONFLICT` | não admitida (409) | o id externo já tem outra chave; corrige |
 | `WALLET_ALREADY_EXISTS` | não admitida (409) | usa a carteira existente |
-| `WALLET_NOT_FOUND` | não admitida (422) | cria a carteira e reenvia |
+| `WALLET_NOT_FOUND` | não admitida (422; fila: retry, depois DLQ) | cria a carteira e reenvia |
 | `MESSAGE_ID_CONFLICT` | não admitida (fila → DLQ) | não reusa `messageId` com outro conteúdo |
 | `NOT_FOUND` | consulta (404) | — |
 | `INFRA_RETRIES_EXHAUSTED` | falha (500) | reenvia com chave nova depois de normalizado |
@@ -274,13 +376,18 @@ legítimo; se o lock a serializa, o domínio teria visto antes, e é bug.
 
 | Constraint | Categoria |
 |---|---|
-| `wallets (player_id, currency)` | conflito → 409 `WALLET_ALREADY_EXISTS` |
+| `wallets (player_id, currency)` | conflito → 409 `WALLET_ALREADY_EXISTS`, com `walletId` |
+| `wallets (creation_idempotency_key)` | relê e compara o hash → replay ou conflito |
 | `(provider_id, idempotency_key)` | relê e compara o hash → replay ou conflito |
 | `(provider_id, external_transaction_id)` | conflito → `EXTERNAL_ID_CONFLICT` |
 | `inbox (consumer_name, message_id)` | redelivery → `ack` sem efeito |
 | reversão única por referência | bug → permanente (`FAILED`, alerta) |
 | lançamento `(transaction_id, wallet_id)` | bug → permanente (`FAILED`, alerta) |
 | lançamento `(wallet_id, wallet_version)` | bug → permanente (`FAILED`, alerta) |
+
+Estouro numérico (`22003`) também é permanente (`INFRA_INVARIANT_VIOLATION`,
+alerta): com o teto de entrada, só um saldo acumulado além de `numeric(19,2)` o
+dispara.
 
 **Quem grava `FAILED`: o use case**, nas duas entradas. Como a transação SQL do
 erro permanente já sofreu rollback, uma **segunda unidade de trabalho** grava a
@@ -309,7 +416,8 @@ falhar, a redelivery é reconhecida pelo inbox).
   envelope (não o `MessageId` do SQS); `payloadHash` pela mesma função do hash do
   payload, sobre `data`. Gravado na transação SQL de todo desfecho. Mesmo
   `messageId` com hash diferente → DLQ, `MESSAGE_ID_CONFLICT`. Submissões não
-  admitidas não gravam inbox: `ack` e linha em `rejected_submissions`.
+  admitidas não gravam inbox: terminam na DLQ, com linha em `rejected_submissions`
+  (ver [Submissões não admitidas](#submissões-não-admitidas)).
 - `ack` (`DeleteMessage`) só depois do commit.
 - **`SIGTERM`:** para o polling e as reivindicações dos workers; espera as
   mensagens em andamento por até 20 s (`stop_grace_period` de 30 s no Compose);
@@ -330,6 +438,27 @@ falhar, a redelivery é reconhecida pelo inbox).
   alerta.
 - **Outbox lag** = `now() − min(occurred_at)` das linhas não publicadas.
 
+### Eventos de integração
+
+Envelope do §11, `version` 1, valores em `MoneyProps`. `aggregateId` é o
+`transactionId` nos eventos de transação e o `walletId` no `WalletBalanceChanged`; a
+outbox guarda `wallet_id` para o `MessageGroupId`. O `correlationId` vem de
+`wager_transactions.correlation_id`, gravado na primeira inserção — é o que permite
+ao worker, minutos depois, emitir a pendente resolvida com o contexto original;
+`causationId` = `transactionId`.
+
+| Evento | `data`, além de `transactionId`, `providerId`, `externalTransactionId`, `walletId`, `playerId`, `roundId`, `gameId`, `kind`, `money` e `referenceExternalTransactionId` (quando houver) |
+|---|---|
+| `WagerTransactionProcessed` | `referenceTransactionId` (se houver), `balanceAfter`, `walletVersion`, `processedAt` |
+| `WagerTransactionRejected` | `failureCode`, `balanceAfter`, `walletVersion`, `rejectedAt` |
+| `WagerTransactionPendingReference` | `expiresAt` (criação + TTL) |
+| `WalletBalanceChanged` | o `data` do §11 (só `walletId`, `transactionId`, `direction`, `money`, `balanceBefore`, `balanceAfter`, `walletVersion`) |
+
+O `WalletBalanceChanged` sai com o `Processed` só quando o saldo muda; a `LOSS`
+emite só o `Processed`. `FAILED` não emite evento: não está nos mínimos e é falha
+nossa, não fato de negócio — o sinal é o log de alerta e a métrica. A rejeição de
+uma pendente (TTL ou referência inválida) emite `Rejected`.
+
 ## Referências fora de ordem
 
 Só o worker resolve uma transação `PENDING_REFERENCE`, reivindicada por lease (ver
@@ -348,6 +477,16 @@ latência da pendente é limitada pelo intervalo do worker.
   `REFERENCE_NOT_PROCESSED` na hora; outro jogador, carteira, moeda, rodada ou tipo
   errado → rejeição com o código específico, na hora; já desfeita →
   `REFERENCE_ALREADY_REVERSED`.
+- **A referência é procurada antes do TTL:** se chegou, a pendente é resolvida
+  mesmo com o TTL vencido — uma referência que chegou durante uma queda do banco não
+  é rejeitada injustamente. Só referência ausente com TTL vencido dá
+  `REFERENCE_NOT_FOUND`.
+- **Erros:** transitório reagenda com o mesmo backoff e conta nos retries do
+  worker, sem limite de tentativas — o TTL já limita a vida da pendente; permanente
+  grava `FAILED` (`INFRA_INVARIANT_VIOLATION` ou `INFRA_UNEXPECTED`) numa segunda
+  unidade de trabalho, com alerta. O desfecho é gravado na transação SQL que trava a
+  carteira, e o item é relido sob lock: se outro worker já o resolveu, sai sem
+  efeito.
 
 ## Autenticação
 
@@ -365,10 +504,11 @@ Keycloak.
   `status` e `failureCode` — nunca valores nem payload; `redact` do pino como rede.
 - **Métricas:** prom-client em `GET /metrics`, aberto: transações por
   `kind`/`status`/canal, replays, conflitos de idempotência, duplicatas do inbox,
-  retries por componente, DLQ por motivo, conflitos de lock (`lock_timeout`,
-  deadlock), `outbox_lag_seconds` e `outbox_pending` (lidos do banco), latência
-  por canal e tipo, divergências de reconciliação e submissões não admitidas por
-  código.
+  retries por componente, DLQ por motivo (envios da aplicação) e profundidade da DLQ
+  (`ApproximateNumberOfMessages` no scrape, que cobre o redrive), conflitos de lock
+  (`lock_timeout`, deadlock), `outbox_lag_seconds` e `outbox_pending` (lidos do
+  banco), latência por canal e tipo, divergências de reconciliação e submissões não
+  admitidas por código.
 - **Health:** `/health/live` responde enquanto o processo vive; `/health/ready`
   checa `SELECT 1` e `GetQueueAttributes`, com timeout de 1 s cada.
 
@@ -379,7 +519,8 @@ Keycloak.
   integration.
 - Isolamento sem limpeza: banco de teste recriado por execução, ids próprios por
   teste, filas com sufixo aleatório.
-- ≥ 3 instâncias são processos reais (`Bun.spawn`). Crashes no ponto exato (depois
+- ≥ 3 instâncias são processos reais (`Bun.spawn`); no Compose, `--scale app=3`,
+  documentado no `README.md`. Crashes no ponto exato (depois
   do commit e antes do `ack`; entre o envio e o `published_at`) vêm de uma porta
   `FaultInjector`, no-op por padrão e ativada só por variável de ambiente nos
   testes.
@@ -416,3 +557,7 @@ Keycloak.
   concorrentes; o consumidor ordena por `walletVersion`/`occurredAt`.
 - Eventos são publicados pelo menos uma vez; duplicatas carregam o mesmo `eventId`.
 - Linhas publicadas da outbox não são expurgadas.
+- A chave de idempotência da criação de carteira é global, não por provedor: a
+  carteira não tem provedor e a autenticação está fora do escopo.
+- Saldo acumulado além de `numeric(19,2)` vira `FAILED`
+  (`INFRA_INVARIANT_VIOLATION`), não rejeição — inalcançável com o teto de entrada.
