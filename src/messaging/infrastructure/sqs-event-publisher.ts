@@ -36,8 +36,17 @@ export class SqsEventPublisher implements EventPublisher {
     );
     const messageAt = (entryId: string | undefined): OutboxMessage | undefined => messages[Number(entryId)];
     const published = (response.Successful ?? []).flatMap((entry) => messageAt(entry.Id)?.id ?? []);
+    const refused = new Map(
+      (response.Failed ?? []).flatMap((entry) => {
+        const id = messageAt(entry.Id)?.id;
+        return id === undefined ? [] : [[id, `${entry.Code}: ${entry.Message ?? 'no message'}`] as const];
+      }),
+    );
     const sent = new Set(published);
-    return { published, failed: messages.map((message) => message.id).filter((id) => !sent.has(id)) };
+    const failed = messages
+      .filter((message) => !sent.has(message.id))
+      .map((message) => ({ id: message.id, reason: refused.get(message.id) ?? 'not acknowledged by the queue' }));
+    return { published, failed };
   }
 
   private async resolveQueueUrl(): Promise<string> {

@@ -5,6 +5,9 @@
  * `published_at` for the sent ones, `scheduleRetry` for the others. None of
  * them touches a wallet, so the lock order of ADR 0002 holds.
  *
+ * A failed send is never silent: it is logged with its reason, so a
+ * misconfigured queue shows up while the committed events wait in the outbox.
+ *
  * At-least-once: a publisher that dies after the send and before recording it
  * leaves the messages leased; when the lease expires, another publisher sends
  * them again, with the same `eventId`.
@@ -25,11 +28,17 @@ export interface PublishOutboxOptions {
   backoff: RetryBackoff;
 }
 
+/** Where the publisher reports the sends that failed. */
+export interface PublicationLog {
+  warn(message: string): void;
+}
+
 export class PublishOutbox {
   constructor(
     private readonly unitOfWork: UnitOfWork<OutboxRepositories & FaultInjection>,
     private readonly publisher: EventPublisher,
     private readonly options: PublishOutboxOptions,
+    private readonly log: PublicationLog,
     private readonly now: () => Date = () => new Date(),
   ) {}
 
@@ -65,10 +74,18 @@ export class PublishOutbox {
 
   /** A batch that could not be sent at all fails every message in it. */
   private async send(messages: readonly OutboxMessage[]): Promise<PublishResult> {
+    let result: PublishResult;
     try {
-      return await this.publisher.publish(messages);
-    } catch {
-      return { published: [], failed: messages.map((message) => message.id) };
+      result = await this.publisher.publish(messages);
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      this.log.warn(`outbox batch of ${messages.length} could not be sent, rescheduled: ${reason}`);
+      return { published: [], failed: messages.map((message) => ({ id: message.id, reason })) };
     }
+    if (result.failed.length > 0) {
+      const reasons = result.failed.map((failure) => `${failure.id} (${failure.reason})`).join(', ');
+      this.log.warn(`outbox messages refused by the queue, rescheduled: ${reasons}`);
+    }
+    return result;
   }
 }

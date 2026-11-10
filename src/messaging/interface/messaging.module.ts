@@ -4,7 +4,7 @@
  *
  * @packageDocumentation
  */
-import { Inject, Module, type DynamicModule, type OnApplicationShutdown } from '@nestjs/common';
+import { Inject, Logger, Module, type DynamicModule, type OnApplicationShutdown } from '@nestjs/common';
 import { SQSClient } from '@aws-sdk/client-sqs';
 import type { AppConfig } from '../../config.ts';
 import type { FaultInjection } from '../../shared/application/fault-injector.ts';
@@ -49,10 +49,15 @@ export class MessagingModule implements OnApplicationShutdown {
           provide: PublishOutbox,
           inject: [UNIT_OF_WORK, EVENT_PUBLISHER],
           useFactory: (unitOfWork: UnitOfWork<OutboxRepositories & FaultInjection>, publisher: EventPublisher) =>
-            new PublishOutbox(unitOfWork, publisher, {
-              leaseMs: outboxPublisher.leaseMs,
-              backoff: { baseMs: outboxPublisher.retryBaseMs, maxMs: outboxPublisher.retryMaxMs },
-            }),
+            new PublishOutbox(
+              unitOfWork,
+              publisher,
+              {
+                leaseMs: outboxPublisher.leaseMs,
+                backoff: { baseMs: outboxPublisher.retryBaseMs, maxMs: outboxPublisher.retryMaxMs },
+              },
+              new Logger('OutboxPublisher'),
+            ),
         },
         {
           provide: OutboxPublisherWorker,

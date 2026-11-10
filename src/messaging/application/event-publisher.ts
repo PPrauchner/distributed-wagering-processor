@@ -6,10 +6,16 @@
  */
 import type { OutboxMessage } from '../domain/outbox-message.ts';
 
+/** A message the queue did not accept, and why. */
+export interface PublishFailure {
+  id: string;
+  reason: string;
+}
+
 /** The outcome of each message of a batch, by message id. */
 export interface PublishResult {
   published: string[];
-  failed: string[];
+  failed: PublishFailure[];
 }
 
 export interface EventPublisher {
