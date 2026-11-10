@@ -23,6 +23,9 @@ try {
 
 baseUrl.pathname = `/${testDatabase}`;
 process.env.DATABASE_URL = baseUrl.toString();
+// The apps the tests start run no outbox publisher unless a test turns one on,
+// with a queue of its own: nothing reaches the development queues.
+process.env.OUTBOX_PUBLISHER_ENABLED = 'false';
 
 const orm = await MikroORM.init(createOrmConfig(process.env.DATABASE_URL));
 try {
