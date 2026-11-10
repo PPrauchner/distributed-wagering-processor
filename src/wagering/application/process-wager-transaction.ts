@@ -1,8 +1,10 @@
 /**
  * Processes a wager transaction submitted by a provider, whatever the channel:
  * validates it, deduplicates it by idempotency key and external id, locks its
- * wallet and records the outcome — transaction, balance and ledger entry — in
- * one unit of work, so in one SQL transaction. Checks run in the documented
+ * wallet and records the outcome — transaction, balance, ledger entry and the
+ * outcome's integration events in the outbox — in one unit of work, so in one
+ * SQL transaction; the outbox publisher publishes them after the commit, never
+ * this use case. Checks run in the documented
  * order, and the first violation decides (`ARCHITECTURE.md` § Ordem das
  * validações). This slice settles `BET`.
  *
@@ -13,12 +15,18 @@
  *
  * @packageDocumentation
  */
+import type { OutboxRepositories, OutboxRepository } from '../../messaging/application/outbox-repository.ts';
+import { OutboxMessage } from '../../messaging/domain/outbox-message.ts';
 import { FaultPoint, type FaultInjection } from '../../shared/application/fault-injector.ts';
 import { PermanentFailureError, type PermanentFailureCode } from '../../shared/application/infrastructure-failures.ts';
 import type { UnitOfWork } from '../../shared/application/unit-of-work.ts';
 import { Money, type MoneyProps } from '../../shared/domain/money.ts';
 import type { WalletRepositories } from '../../wallet/application/wallet-repository.ts';
+import type { Wallet } from '../../wallet/domain/wallet.ts';
+import { WalletBalanceChanged } from '../../wallet/domain/wallet-balance-changed.ts';
+import type { WalletLedgerEntry } from '../../wallet/domain/wallet-ledger-entry.ts';
 import { applyBet } from '../domain/bet.ts';
+import { WagerTransactionProcessed, WagerTransactionRejected } from '../domain/wager-transaction-events.ts';
 import {
   InvalidWagerTransactionError,
   WagerTransaction,
@@ -65,7 +73,9 @@ const KINDS = new Set<string>(Object.values(WagerTransactionKind));
 
 export class ProcessWagerTransaction {
   constructor(
-    private readonly unitOfWork: UnitOfWork<WalletRepositories & WageringRepositories & FaultInjection>,
+    private readonly unitOfWork: UnitOfWork<
+      WalletRepositories & WageringRepositories & OutboxRepositories & FaultInjection
+    >,
     private readonly generateId: () => string,
   ) {}
 
@@ -119,7 +129,7 @@ export class ProcessWagerTransaction {
 
   /** Steps 4 to 8 of the order, in one unit of work. */
   private record(submitted: WagerTransaction): Promise<WagerTransactionOutcome> {
-    return this.unitOfWork.run(async ({ wallets, ledger, transactions, faults }) => {
+    return this.unitOfWork.run(async ({ wallets, ledger, transactions, outbox, faults }) => {
       const earlier = await findEarlier(transactions, submitted);
       if (earlier) return earlier;
 
@@ -132,9 +142,33 @@ export class ProcessWagerTransaction {
       const entry = applyBet(submitted, wallet, { entryId: this.generateId() });
       transactions.add(submitted);
       if (entry) ledger.add(entry);
+      this.enqueueEvents(outbox, submitted, wallet, entry);
       await faults.inject(FaultPoint.InvariantViolationBeforeCommit, { transactionId: submitted.id });
       return { transaction: submitted, idempotentReplay: false };
     });
+  }
+
+  /**
+   * The outcome's integration events: processed with its balance change, or
+   * rejected. Added before anything that may still fail in the unit of work, so
+   * they are committed or rolled back with the outcome.
+   */
+  private enqueueEvents(
+    outbox: OutboxRepository,
+    transaction: WagerTransaction,
+    wallet: Wallet,
+    entry: WalletLedgerEntry | undefined,
+  ): void {
+    const context = { correlationId: transaction.correlationId, causationId: transaction.id };
+    if (entry === undefined) {
+      const rejected = WagerTransactionRejected.from(transaction, context, { eventId: this.generateId(), at: new Date() });
+      outbox.add(OutboxMessage.enqueue(rejected));
+      return;
+    }
+    const processed = WagerTransactionProcessed.from(transaction, context, { eventId: this.generateId() });
+    const changed = WalletBalanceChanged.from(wallet, entry, context, { eventId: this.generateId() });
+    outbox.add(OutboxMessage.enqueue(processed));
+    outbox.add(OutboxMessage.enqueue(changed));
   }
 
   /** The second unit of work: `FAILED`, with nothing observed and no ledger entry. */
