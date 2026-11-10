@@ -20,6 +20,8 @@ import {
 import { hashWagerPayload, type WagerPayload } from './wager-payload.ts';
 import type { WagerTransactionRepository, WageringRepositories } from './wager-transaction-repository.ts';
 import {
+  DuplicateExternalIdError,
+  DuplicateIdempotencyKeyError,
   ExternalIdConflictError,
   IdempotencyConflictError,
   InternalKindNotAllowedError,
@@ -73,10 +75,26 @@ export class ProcessWagerTransaction {
    * @throws {@link ExternalIdConflictError} If the provider used the external id
    *   with another key.
    * @throws {@link SubmissionWalletNotFoundError} If the wallet does not exist.
+   * @throws {@link TransientFailureError} If the wallet stayed locked too long
+   *   or the database is unavailable: nothing was recorded.
    */
   async execute(command: SubmitWagerTransactionCommand): Promise<WagerTransactionOutcome> {
     const submitted = this.validated(command);
 
+    try {
+      return await this.record(submitted);
+    } catch (error) {
+      if (error instanceof DuplicateExternalIdError) {
+        throw new ExternalIdConflictError(submitted.providerId, submitted.externalTransactionId);
+      }
+      // A concurrent submission of the same key committed first, outside the lock.
+      if (error instanceof DuplicateIdempotencyKeyError) return this.readBack(submitted);
+      throw error;
+    }
+  }
+
+  /** Steps 4 to 8 of the order, in one unit of work. */
+  private record(submitted: WagerTransaction): Promise<WagerTransactionOutcome> {
     return this.unitOfWork.run(async ({ wallets, ledger, transactions }) => {
       const earlier = await findEarlier(transactions, submitted);
       if (earlier) return earlier;
@@ -92,6 +110,13 @@ export class ProcessWagerTransaction {
       if (entry) ledger.add(entry);
       return { transaction: submitted, idempotentReplay: false };
     });
+  }
+
+  /** The transaction a concurrent submission recorded under the key: replay or conflict. */
+  private async readBack(submitted: WagerTransaction): Promise<WagerTransactionOutcome> {
+    const earlier = await this.unitOfWork.run(({ transactions }) => findEarlier(transactions, submitted));
+    if (!earlier) throw new Error('unique violation reported, but no transaction found');
+    return earlier;
   }
 
   /** Steps 2 and 3 of the order: the payload's shape, then its hash. */

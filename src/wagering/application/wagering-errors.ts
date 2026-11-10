@@ -53,6 +53,23 @@ export class ExternalIdConflictError extends Error {
   }
 }
 
+/**
+ * Raised by the unit of work when the commit hits the provider's idempotency
+ * key: a concurrent submission of the same key won the race, outside the
+ * wallet lock. The use case reads it back — replay or conflict.
+ */
+export class DuplicateIdempotencyKeyError extends Error {
+  override readonly name = 'DuplicateIdempotencyKeyError';
+}
+
+/**
+ * Raised by the unit of work when the commit hits the provider's external id: a
+ * concurrent submission on another wallet won the race. It is a conflict.
+ */
+export class DuplicateExternalIdError extends Error {
+  override readonly name = 'DuplicateExternalIdError';
+}
+
 /** The wallet a submission names does not exist; no transaction is created. */
 export class SubmissionWalletNotFoundError extends Error {
   override readonly name = 'SubmissionWalletNotFoundError';
