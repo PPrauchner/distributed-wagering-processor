@@ -87,7 +87,8 @@ saldo.
 _Avoid_: derrota
 
 **Aguardando referência** (`PENDING_REFERENCE`):
-Situação da transação dependente cuja referência ainda não chegou.
+Situação da transação cuja referência ainda não chegou — uma transação dependente,
+ou um ganho que cita sua aposta.
 _Avoid_: órfã, pendente (sozinho)
 
 **Reembolso** (`REFUND`):
@@ -104,8 +105,10 @@ Transação de aposta que exige uma referência — o reembolso e a reversão.
 _Avoid_: transação de reversão, estorno
 
 **Referência** (`referenceExternalTransactionId`):
-A transação de aposta que uma transação dependente desfaz. Uma referência só pode
-ser desfeita uma vez, qualquer que seja o tipo da transação dependente.
+A transação de aposta que outra cita: a que uma transação dependente desfaz, ou a
+aposta da rodada que um ganho cita, opcionalmente. Uma referência só pode ser
+desfeita uma vez, qualquer que seja o tipo da transação dependente; citá-la num
+ganho não a desfaz.
 _Avoid_: transação original, transação pai
 
 ### Identidade e idempotência
