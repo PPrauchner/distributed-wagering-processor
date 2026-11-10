@@ -46,7 +46,7 @@ seguro (§5.7). O spike do ADR 0001 provou o mecanismo: duas apostas de 80.00 so
   própria unidade de trabalho, que começa pelo lock da carteira e relê o item para
   confirmar o estado. Se o worker morre, o lease expira e outra instância assume.
   Vale para o worker de referências pendentes e, por consistência, para o
-  publicador da outbox.
+  publicador da outbox (corrigido pela emenda abaixo).
 - **A transação pendente só é resolvida pelo worker**, nunca na chegada da
   referência: resolver na hora seria seguro com a regra acima, mas é escopo extra; a
   latência fica limitada pelo intervalo do worker.
@@ -56,3 +56,18 @@ seguro (§5.7). O spike do ADR 0001 provou o mecanismo: duas apostas de 80.00 so
 - A espera pelo lock serializa as transações de uma mesma carteira: a vazão de uma
   carteira isolada é limitada pela duração da transação, que por isso não faz I/O
   externo (a publicação de eventos sai pela outbox, depois do commit).
+
+## Emenda — o publicador da outbox não trava a carteira
+
+O trecho acima que diz que o publicador da outbox, "por consistência", processa
+cada item numa unidade de trabalho que começa pelo lock da carteira não vale. O
+publicador reivindica um lote por lease (`FOR UPDATE SKIP LOCKED` +
+`next_attempt_at = now() + lease`, no relógio do banco) numa transação SQL curta
+e, depois do envio ao SQS, grava `published_at` (ou reagenda) noutra transação
+SQL curta. **Nenhuma das duas toca `wallets`**: ele não move saldo, não precisa
+do lock e não o toma. A regra de ordem continua valendo — o lock da carteira é o
+primeiro lock de toda transação SQL que toca uma carteira —, porque as transações
+do publicador não tocam carteira nenhuma, e as transações que tocam a carteira
+só inserem na outbox, sem travar linhas que o publicador segure. O worker de
+referências pendentes segue como descrito acima: ele move saldo e começa pela
+carteira.
