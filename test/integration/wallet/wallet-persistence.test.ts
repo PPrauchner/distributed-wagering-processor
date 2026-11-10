@@ -63,8 +63,9 @@ const ALL_MIGRATIONS = [
   'Migration0003WalletLedger',
   'Migration0004WalletIdentity',
   'Migration0005WagerTransactionInvariants',
+  'Migration0006RejectedSubmissions',
 ];
-const TABLES = ['wallets', 'wager_transactions', 'wallet_ledger_entries'];
+const TABLES = ['wallets', 'wager_transactions', 'wallet_ledger_entries', 'rejected_submissions'];
 
 /** Tables and functions of the public schema: what the migrations create. */
 async function schemaObjects(): Promise<string[]> {
