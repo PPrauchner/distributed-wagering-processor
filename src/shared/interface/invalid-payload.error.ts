@@ -9,11 +9,13 @@ export class InvalidPayloadError extends Error {
 }
 
 /**
- * Narrows `value` to a plain object holding exactly `allowedKeys`, all present.
+ * Narrows `value` to a plain object holding exactly `allowedKeys` — all of them
+ * present, except the optional ones.
  *
  * @param value - The untrusted value.
- * @param allowedKeys - The only keys the object may and must have.
+ * @param allowedKeys - The only keys the object may have; required unless optional.
  * @param path - Where the value sits in the body, for the error message.
+ * @param optionalKeys - The allowed keys that may be absent.
  * @returns The value as a record.
  * @throws {@link InvalidPayloadError} If it is not an object, misses a key or has an unknown one.
  */
@@ -21,6 +23,7 @@ export function expectExactObject(
   value: unknown,
   allowedKeys: readonly string[],
   path: string,
+  optionalKeys: readonly string[] = [],
 ): Record<string, unknown> {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
     throw new InvalidPayloadError(`${path} must be an object`);
@@ -30,7 +33,7 @@ export function expectExactObject(
   if (unknownKey !== undefined) {
     throw new InvalidPayloadError(`${path}.${unknownKey} is not a known field`);
   }
-  const missingKey = allowedKeys.find((key) => !(key in record));
+  const missingKey = allowedKeys.find((key) => !optionalKeys.includes(key) && !(key in record));
   if (missingKey !== undefined) {
     throw new InvalidPayloadError(`${path}.${missingKey} is required`);
   }
