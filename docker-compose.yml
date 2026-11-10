@@ -13,6 +13,32 @@ services:
       timeout: 3s
       retries: 30
 
+  # Migrations num serviço de execução única: com várias instâncias do app, elas
+  # rodam uma vez só, antes de qualquer instância subir.
+  migrate:
+    build: .
+    image: distributed-wagering-processor:local
+    command: ["bun", "src/database/migrate.ts", "up"]
+    environment:
+      DATABASE_URL: postgresql://wagering:wagering@postgres:5432/wagering
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  app:
+    build: .
+    image: distributed-wagering-processor:local
+    environment:
+      DATABASE_URL: postgresql://wagering:wagering@postgres:5432/wagering
+      PORT: "3000"
+    ports:
+      - "3000:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
   localstack:
     # 4.14.0 é a última versão que roda sem conta/token (ver CLAUDE.md).
     image: localstack/localstack:4.14.0
