@@ -66,10 +66,10 @@ async function newWallet(playerId: string = Bun.randomUUIDv7()): Promise<Wallet>
 /** A `FAILED` bet on the wallet — coherent with the schema, and moving nothing. */
 function failedBet(
   walletId: string,
-  ids: { key?: string; externalId?: string; roundId?: string } = {},
+  ids: { id?: string; key?: string; externalId?: string; roundId?: string } = {},
 ): WagerTransaction {
   const transaction = WagerTransaction.create({
-    id: Bun.randomUUIDv7(),
+    id: ids.id ?? Bun.randomUUIDv7(),
     providerId: 'provider-a',
     externalTransactionId: ids.externalId ?? Bun.randomUUIDv7(),
     idempotencyKey: ids.key ?? Bun.randomUUIDv7(),
@@ -195,6 +195,26 @@ describe('23505, by constraint', () => {
     });
 
     expect(result).toEqual(invariantViolation);
+  });
+
+  test('any other unique constraint: a duplicate primary key → INFRA_UNEXPECTED', async () => {
+    const wallet = await newWallet();
+    const transaction = failedBet(wallet.id);
+    await commit((em) => em.persist(transaction));
+
+    let thrown: unknown;
+    try {
+      await orm.em.fork().transactional(async (em) => {
+        em.persist(failedBet(wallet.id, { id: transaction.id }));
+      });
+    } catch (error) {
+      thrown = error;
+    }
+
+    // The constraint, so the row is reached by an unmapped unique and not by another.
+    expect(Reflect.get(thrown as object, 'code')).toBe('23505');
+    expect(Reflect.get(thrown as object, 'constraint')).toBe('wager_transactions_pkey');
+    expect(classifyDatabaseError(thrown)).toEqual({ category: 'permanent', failureCode: FailureCode.InfraUnexpected });
   });
 });
 
