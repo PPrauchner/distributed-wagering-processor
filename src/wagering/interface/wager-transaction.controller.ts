@@ -18,7 +18,10 @@ interface HttpResponse {
   status(code: number): unknown;
 }
 
-@Controller('wagering/transactions')
+/** The route of the submission endpoint. */
+export const WAGER_TRANSACTIONS_PATH = 'wagering/transactions';
+
+@Controller(WAGER_TRANSACTIONS_PATH)
 export class WagerTransactionController {
   constructor(private readonly processWagerTransaction: ProcessWagerTransaction) {}
 
