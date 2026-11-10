@@ -6,7 +6,12 @@
  * @packageDocumentation
  */
 import type { EntityManager } from '@mikro-orm/postgresql';
-import { FaultPoint, type FaultContext, type FaultInjector } from '../shared/application/fault-injector.ts';
+import {
+  FaultPoint,
+  SimulatedCrashError,
+  type FaultContext,
+  type FaultInjector,
+} from '../shared/application/fault-injector.ts';
 
 export class SqlFaultInjector implements FaultInjector {
   constructor(
@@ -17,7 +22,10 @@ export class SqlFaultInjector implements FaultInjector {
   async inject(point: FaultPoint, context: FaultContext): Promise<void> {
     if (!this.enabled.has(point)) return;
     if (point === FaultPoint.InvariantViolationBeforeCommit) await this.violateInvariant(context);
-    // The crash points belong to the queue consumer and the outbox publisher.
+    // The process dies there: whatever the caller would do next never happens,
+    // and the SQL transaction it runs in rolls back.
+    if (point === FaultPoint.CrashAfterSend) throw new SimulatedCrashError(point);
+    // `crash-after-commit` belongs to the queue consumer.
   }
 
   /**
