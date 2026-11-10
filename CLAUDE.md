@@ -22,9 +22,17 @@ está em `docs/Desafio.md`. Ele é a especificação: em dúvida, vale o que est
 
 ## Comandos
 
-Ainda não há scaffold. Instalação de dependências: `bun install --frozen-lockfile`.
-Os demais comandos (dev, testes de unidade/integração/concorrência, `test:load`,
-migrations) entram aqui quando forem criados.
+```bash
+bun install --frozen-lockfile   # dependências
+docker compose up -d --wait     # PostgreSQL (127.0.0.1:55432) e LocalStack (:4566)
+bun run typecheck               # tsc --noEmit (TypeScript 6.0)
+bun run spike                   # testes do spike do ADR 0001, contra o banco real
+bun run spike:migrate up|down   # migrations do spike, sem o CLI do MikroORM
+```
+
+A conexão com o banco usa `127.0.0.1`, nunca `localhost` (ver ADR 0001). Os demais
+comandos (dev, testes de unidade/integração/concorrência, `test:load`) entram aqui
+quando forem criados.
 
 ## Estrutura
 
