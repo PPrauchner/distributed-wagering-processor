@@ -47,6 +47,23 @@ chave de idempotência persistentes, e workers que reivindicam itens com lease e
 `interface/`, com dependência apontando só para dentro. O domínio não importa ORM
 nem NestJS.
 
+Fora dos módulos fica, de propósito, a **raiz de composição**: o código que conhece
+todos os módulos para montá-los, e que por isso não cabe em nenhum deles.
+
+- `main.ts`, `app.ts` e `config.ts` — entrada, montagem do app NestJS e leitura do
+  ambiente;
+- `database/` — configuração do MikroORM com as entidades e migrations de cada
+  módulo registradas explicitamente, a implementação da `UnitOfWork` que entrega os
+  repositórios de cada módulo, o runner de migrations e a tradução dos erros do
+  banco para os erros de cada módulo;
+- `http/` — o filtro de erros, que traduz os erros de todos os módulos nas
+  respostas HTTP.
+
+Colocá-los em `shared/` faria `shared` depender de `wallet` (e, depois, de
+`wagering` e `messaging`), invertendo a direção da dependência: `shared` é a base
+que os módulos importam, nunca o contrário. A raiz de composição pode importar
+qualquer módulo; nenhum módulo a importa.
+
 ## Persistência e ORM
 
 **MikroORM 7**, com as classes de domínio mapeadas por `defineEntity` na

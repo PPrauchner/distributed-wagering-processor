@@ -49,6 +49,11 @@ comandos (testes de concorrência, `test:load`) entram aqui quando forem criados
 e `interface/` (controllers HTTP e handlers da fila). A dependência aponta só para
 dentro.
 
+Fora dos módulos fica só a raiz de composição — `main.ts`, `app.ts`, `config.ts`,
+`database/` (MikroORM, `UnitOfWork`, migrations, tradução de erros do banco) e
+`http/` (filtro de erros) —, que importa os módulos e nunca é importada por eles.
+Ver `ARCHITECTURE.md` § Organização do código.
+
 Entregáveis exigidos na raiz: `README.md` (setup e comandos) e `ARCHITECTURE.md`
 (decisões, trade-offs, limitações).
 
