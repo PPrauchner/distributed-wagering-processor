@@ -12,8 +12,18 @@ import {
   type ArgumentsHost,
   type ExceptionFilter,
 } from '@nestjs/common';
+import { FailureCode } from '../shared/domain/failure-code.ts';
 import { CurrencyMismatchError, InvalidMoneyError } from '../shared/domain/money.ts';
 import { InvalidPayloadError } from '../shared/interface/invalid-payload.error.ts';
+import {
+  ExternalIdConflictError,
+  IdempotencyConflictError,
+  InternalKindNotAllowedError,
+  MissingIdempotencyKeyError,
+  SubmissionWalletNotFoundError,
+  UnsupportedKindError,
+} from '../wagering/application/wagering-errors.ts';
+import { InvalidWagerTransactionError } from '../wagering/domain/wager-transaction.ts';
 import { InvalidWalletError } from '../wallet/domain/wallet.ts';
 import { WalletAlreadyExistsError, WalletNotFoundError } from '../wallet/application/wallet-errors.ts';
 
@@ -32,6 +42,17 @@ const INVALID_PAYLOAD_ERRORS = [
   InvalidMoneyError,
   CurrencyMismatchError,
   InvalidWalletError,
+  InvalidWagerTransactionError,
+  UnsupportedKindError,
+];
+
+// Refused submissions: a fixed status and failure code, and the error's message.
+const REFUSED_SUBMISSIONS: [new (...args: never[]) => Error, number, FailureCode][] = [
+  [MissingIdempotencyKeyError, HttpStatus.BAD_REQUEST, FailureCode.MissingIdempotencyKey],
+  [InternalKindNotAllowedError, HttpStatus.BAD_REQUEST, FailureCode.InternalKindNotAllowed],
+  [IdempotencyConflictError, HttpStatus.CONFLICT, FailureCode.IdempotencyConflict],
+  [ExternalIdConflictError, HttpStatus.CONFLICT, FailureCode.ExternalIdConflict],
+  [SubmissionWalletNotFoundError, HttpStatus.UNPROCESSABLE_ENTITY, FailureCode.WalletNotFound],
 ];
 
 @Catch()
@@ -46,6 +67,11 @@ export class HttpErrorFilter implements ExceptionFilter {
   private toResponse(error: unknown): ErrorResponse {
     if (INVALID_PAYLOAD_ERRORS.some((type) => error instanceof type)) {
       return invalidPayload((error as Error).message);
+    }
+    const refused = REFUSED_SUBMISSIONS.find(([type]) => error instanceof type);
+    if (refused) {
+      const [, status, failureCode] = refused;
+      return { status, body: { failureCode, message: (error as Error).message } };
     }
     if (error instanceof WalletAlreadyExistsError) {
       return {

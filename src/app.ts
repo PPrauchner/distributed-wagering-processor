@@ -10,6 +10,7 @@ import { NestFactory } from '@nestjs/core';
 import type { AppConfig } from './config.ts';
 import { DatabaseModule } from './database/database.module.ts';
 import { HttpErrorFilter } from './http/http-error.filter.ts';
+import { WageringModule } from './wagering/interface/wagering.module.ts';
 import { WalletModule } from './wallet/interface/wallet.module.ts';
 
 @Module({})
@@ -17,7 +18,7 @@ class AppModule {
   static forConfig(config: AppConfig): DynamicModule {
     return {
       module: AppModule,
-      imports: [DatabaseModule.forRoot(config.databaseUrl), WalletModule],
+      imports: [DatabaseModule.forRoot(config.databaseUrl), WalletModule, WageringModule],
     };
   }
 }
