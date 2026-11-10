@@ -1,10 +1,11 @@
 /**
- * `WalletRepository` port and the repositories the wallet use cases need from a
- * unit of work.
+ * `WalletRepository` and `WalletLedgerRepository` ports, and the repositories
+ * the wallet use cases need from a unit of work.
  *
  * @packageDocumentation
  */
 import type { Wallet } from '../domain/wallet.ts';
+import type { WalletLedgerEntry } from '../domain/wallet-ledger-entry.ts';
 
 export interface WalletRepository {
   findById(id: string): Promise<Wallet | null>;
@@ -13,6 +14,12 @@ export interface WalletRepository {
   add(wallet: Wallet): void;
 }
 
+export interface WalletLedgerRepository {
+  /** Registers a new entry; it is written when the unit of work commits. */
+  add(entry: WalletLedgerEntry): void;
+}
+
 export interface WalletRepositories {
   wallets: WalletRepository;
+  ledger: WalletLedgerRepository;
 }
