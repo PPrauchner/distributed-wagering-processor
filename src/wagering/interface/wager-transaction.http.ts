@@ -40,6 +40,7 @@ const STRING_FIELDS = FIELDS.filter((field) => field !== 'money' && field !== 'r
 const STATUS_CODES: Partial<Record<WagerTransactionStatus, number>> = {
   [WagerTransactionStatus.Processed]: HttpStatus.OK,
   [WagerTransactionStatus.Rejected]: HttpStatus.UNPROCESSABLE_ENTITY,
+  [WagerTransactionStatus.Failed]: HttpStatus.INTERNAL_SERVER_ERROR,
 };
 
 /**
@@ -79,8 +80,8 @@ export function parseSubmitWagerTransactionRequest(
 
 /**
  * @param outcome - The transaction a submission ended in.
- * @returns The HTTP status of its outcome — 200 `PROCESSED`, 422 `REJECTED` —
- *   and the response body.
+ * @returns The HTTP status of its outcome — 200 `PROCESSED`, 422 `REJECTED`,
+ *   500 `FAILED` — and the response body.
  * @throws {@link Error} If the transaction is in a status this slice never ends in.
  */
 export function toWagerTransactionResponse(outcome: WagerTransactionOutcome): {
