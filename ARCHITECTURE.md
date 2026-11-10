@@ -54,10 +54,11 @@ todos os módulos para montá-los, e que por isso não cabe em nenhum deles.
   ambiente;
 - `database/` — configuração do MikroORM com as entidades e migrations de cada
   módulo registradas explicitamente, a implementação da `UnitOfWork` que entrega os
-  repositórios de cada módulo, o runner de migrations e a tradução dos erros do
-  banco para os erros de cada módulo;
+  repositórios de cada módulo, o runner de migrations, o classificador único dos
+  erros do banco e a tradução deles para os erros de cada módulo, e o
+  `FaultInjector` ligado à transação SQL;
 - `http/` — o filtro de erros, que traduz os erros de todos os módulos nas
-  respostas HTTP.
+  respostas HTTP e reporta as recusas à auditoria das submissões não admitidas.
 
 Colocá-los em `shared/` faria `shared` depender de `wallet` (e, depois, de
 `wagering` e `messaging`), invertendo a direção da dependência: `shared` é a base
@@ -114,8 +115,11 @@ transação SQL. Vale igual para HTTP, fila e workers. Ver
 
 Lock pessimista na linha da carteira (`SELECT … FOR UPDATE`), primeiro passo de
 cada unidade de trabalho que move saldo; uma carteira por transação, sem lock
-global. `lock_timeout` de 2 s: estourar é erro transitório e conta como conflito de
-lock. `version` é contador monotônico, não lock otimista.
+global. `lock_timeout` de 2 s, por `SET LOCAL` logo antes do `SELECT … FOR UPDATE`
+— vale para a transação SQL que trava a carteira, nunca para a conexão, e cobre
+toda espera de lock depois dela: estourar é erro transitório
+(`TRANSIENT_LOCK_TIMEOUT`) e conta como conflito de lock. `version` é contador
+monotônico, não lock otimista.
 
 Não há deadlock por uma regra de ordem: **o lock da carteira é o primeiro lock de
 toda transação SQL que toca uma carteira**. Por isso os workers (referências
@@ -134,7 +138,7 @@ carteira. Worker morto: o lease expira e outra instância assume. Ver
 | `wallet_ledger_entries` | `UNIQUE (transaction_id, wallet_id)`; `UNIQUE (wallet_id, wallet_version)`; FK composta e `CHECK` de moeda; `amount > 0`; `CHECK` da aritmética (`balance_after = balance_before ± amount` pela `direction`, saldos `>= 0`) |
 | `inbox_messages` | PK `(consumer_name, message_id)` |
 | `outbox_messages` | `wallet_id NOT NULL` (o `MessageGroupId`); índice parcial `WHERE published_at IS NULL` em `next_attempt_at` |
-| `rejected_submissions` | append-only, sem FK nem unicidade; `correlation_id` anulável |
+| `rejected_submissions` | append-only, sem FK nem unicidade (a PK é um UUID substituto); só `failure_code`, `channel` (`HTTP` ou `QUEUE`, por `CHECK`) e `received_at` obrigatórios — `correlation_id` e o resto anuláveis |
 
 **Triggers:**
 
@@ -150,6 +154,8 @@ carteira. Worker morto: o lease expira e outra instância assume. Ver
   O único `UPDATE` de status aceito parte de `PENDING_REFERENCE`.
 - **Identidade da carteira imutável:** em `wallets`, `player_id`, `currency`,
   `initial_balance` e chave e hash da criação não mudam.
+- **Auditoria append-only:** `UPDATE`, `DELETE` e `TRUNCATE` em
+  `rejected_submissions` são recusados.
 
 Tempos que dependem de relógio — TTL das pendentes e leases dos workers — usam o
 `now()` do banco, nunca o relógio da instância.
@@ -309,6 +315,17 @@ extrair, já que um payload inválido pode não ter chave. O insert roda numa un
 de trabalho própria, no ponto da recusa; sem unicidade (cada tentativa é uma linha).
 Replays não entram: são métrica.
 
+**No HTTP, o ponto da recusa é o filtro global de erros:** é o único por onde passa
+toda recusa — o JSON malformado nem chega ao controller. Antes de responder, ele
+reporta a recusa à auditoria do endpoint de submissão
+(`RejectedSubmissionAudit`), que grava só as submissões não admitidas de
+`POST /wagering/transactions`: `provider_id` e `external_transaction_id` do corpo,
+quando é um objeto e os traz como texto; `idempotency_key` e `correlation_id` dos
+headers; `payload_hash` quando a recusa veio depois do hash (`OPENING`, conflitos,
+carteira inexistente). A resposta não muda. A auditoria é de melhor esforço: se o
+insert falhar, o erro é logado e a recusa é respondida igual. As recusas da criação
+de carteira e das consultas não entram.
+
 Com isso, `wager_transactions.wallet_id` mantém a FK `NOT NULL`: a carteira
 inexistente responde `WALLET_NOT_FOUND` (HTTP 422), sem evento e sem
 `transactionId`, e um reenvio depois que a carteira existir é processado
@@ -348,7 +365,10 @@ Desfechos de transação respondem com o resultado da transação (`transactionI
 `{ failureCode, message }` — o 409 `WALLET_ALREADY_EXISTS` acrescenta o `walletId`.
 O `GET` de transação devolve o mesmo corpo do desfecho, mais os campos de
 identidade, sem `idempotentReplay`. O 503 leva `Retry-After: 1` (segundos,
-configurável).
+configurável por `RETRY_AFTER_SECONDS`). Um erro permanente fora de uma transação
+de aposta (na criação de carteira, por exemplo) responde 500 com o código
+(`INFRA_INVARIANT_VIOLATION` ou `INFRA_UNEXPECTED`), sem `transactionId`; um erro
+que nem vem do banco é `INFRA_UNEXPECTED`.
 
 ## Códigos de falha
 
@@ -384,24 +404,38 @@ Enum fechado em `shared/domain`.
 
 ## Classificação de falhas
 
-Erros do banco passam por um classificador único, por SQLSTATE e nome da
-constraint: lock e serialização são transitórios; violação de `CHECK`, FK de moeda
-ou trigger é permanente (`FAILED`, `INFRA_INVARIANT_VIOLATION`). `REJECTED` vem só
-do domínio. Ver [ADR 0001](docs/adr/0001-mikroorm-7-com-invariantes-no-schema.md).
+Erros do banco passam por um classificador único (`database/`), por SQLSTATE e
+nome da constraint; a unidade de trabalho traduz só os erros que vêm do banco ou da
+conexão (os que trazem um SQLSTATE ou um código de rede), e os da aplicação passam
+intactos. `REJECTED` vem só do domínio, nunca do classificador. Ver
+[ADR 0001](docs/adr/0001-mikroorm-7-com-invariantes-no-schema.md).
+
+| Erro | Categoria |
+|---|---|
+| `55P03` (`lock_timeout`; o MikroORM não o mapeia, é reconhecido pelo código), `40P01`, `40001` | transitório → 503 `TRANSIENT_LOCK_TIMEOUT` |
+| queda ou recusa de conexão (`ECONNREFUSED` e afins, classe `08`, `53300`, `57P01`–`57P03`) | transitório → 503 `TRANSIENT_UNAVAILABLE` |
+| `23505` | pela constraint, tabela abaixo |
+| `23514` (`CHECK`), `23503` (FK de moeda), `23502`, `23000` (os triggers do schema) e `22003` | permanente → `FAILED`, `INFRA_INVARIANT_VIOLATION` |
+| qualquer outro | permanente → `FAILED`, `INFRA_UNEXPECTED` |
 
 Unicidade violada (`23505`): se a disputa escapa do lock da carteira, é desfecho
 legítimo; se o lock a serializa, o domínio teria visto antes, e é bug.
 
 | Constraint | Categoria |
 |---|---|
-| `wallets (player_id, currency)` | conflito → 409 `WALLET_ALREADY_EXISTS`, com `walletId` |
-| `wallets (creation_idempotency_key)` | relê e compara o hash → replay ou conflito |
-| `(provider_id, idempotency_key)` | relê e compara o hash → replay ou conflito |
-| `(provider_id, external_transaction_id)` | conflito → `EXTERNAL_ID_CONFLICT` |
-| `inbox (consumer_name, message_id)` | redelivery → `ack` sem efeito |
-| reversão única por referência | bug → permanente (`FAILED`, alerta) |
-| lançamento `(transaction_id, wallet_id)` | bug → permanente (`FAILED`, alerta) |
-| lançamento `(wallet_id, wallet_version)` | bug → permanente (`FAILED`, alerta) |
+| `wallets (player_id, currency)` — `wallets_player_currency_unique` | conflito → 409 `WALLET_ALREADY_EXISTS`, com `walletId` |
+| `wallets (creation_idempotency_key)` — `wallets_creation_idempotency_key_unique` | relê e compara o hash → replay ou conflito |
+| `(provider_id, idempotency_key)` — `wager_transactions_provider_idempotency_key_unique` | relê e compara o hash → replay ou conflito |
+| `(provider_id, external_transaction_id)` — `wager_transactions_provider_external_id_unique` | conflito → `EXTERNAL_ID_CONFLICT` |
+| `inbox (consumer_name, message_id)` — `inbox_messages_pkey` | redelivery → `ack` sem efeito |
+| reversão única por referência — `wager_transactions_single_reversal_unique` | bug → permanente (`FAILED`, alerta) |
+| lançamento `(transaction_id, wallet_id)` — `wallet_ledger_entries_transaction_wallet_unique` | bug → permanente (`FAILED`, alerta) |
+| lançamento `(wallet_id, wallet_version)` — `wallet_ledger_entries_wallet_version_unique` | bug → permanente (`FAILED`, alerta) |
+| outra | permanente (`FAILED`, `INFRA_UNEXPECTED`) |
+
+As linhas do inbox, da reversão única e da chave da criação já estão no
+classificador, embora as constraints ainda não existam: o nome é o contrato que as
+fatias que as criam seguem.
 
 Estouro numérico (`22003`) também é permanente (`INFRA_INVARIANT_VIOLATION`,
 alerta): com o teto de entrada, só um saldo acumulado além de `numeric(19,2)` o
@@ -410,8 +444,13 @@ dispara.
 **Quem grava `FAILED`: o use case**, nas duas entradas. Como a transação SQL do
 erro permanente já sofreu rollback, uma **segunda unidade de trabalho** grava a
 transação de aposta como `FAILED`, com o código de falha (e o inbox, quando a
-entrada é a fila), pela chave de idempotência. No HTTP, a resposta é 500 com
-`transactionId` e `failureCode`, e o replay devolve o mesmo 500. Na fila, a
+entrada é a fila), pela chave de idempotência — sem saldo observado, sem lançamento
+e sem evento. No HTTP, a resposta é 500 com `transactionId`, `status: FAILED` e
+`failureCode`, e o replay (mesma chave e hash) devolve o mesmo 500 com
+`idempotentReplay: true`; hash diferente → 409 `IDEMPOTENCY_CONFLICT`. A segunda
+unidade de trabalho relê a chave antes de gravar: se um concorrente já a gravou, ou
+se ela cai no `23505` da chave, responde como replay ou conflito; se falha de forma
+transitória, 503 sem gravar nada. Na fila, a
 mensagem é enviada explicitamente à DLQ e apagada da fila principal (se a remoção
 falhar, a redelivery é reconhecida pelo inbox).
 
@@ -538,10 +577,15 @@ Keycloak.
 - Isolamento sem limpeza: banco de teste recriado por execução, ids próprios por
   teste, filas com sufixo aleatório.
 - ≥ 3 instâncias são processos reais (`Bun.spawn`); no Compose, `--scale app=3`,
-  documentado no `README.md`. Crashes no ponto exato (depois
-  do commit e antes do `ack`; entre o envio e o `published_at`) vêm de uma porta
-  `FaultInjector`, no-op por padrão e ativada só por variável de ambiente nos
-  testes.
+  documentado no `README.md`. Falhas no ponto exato vêm da porta `FaultInjector`
+  (`shared/application`), oferecida pela unidade de trabalho: no-op por padrão,
+  ativada só por `FAULT_INJECTION` (nomes de pontos separados por vírgula; nome
+  desconhecido e `NODE_ENV=production` são recusados na partida). Pontos:
+  `invariant-violation-before-commit` — dentro da unidade de trabalho, antes do
+  commit, altera a transação de aposta terminal recém-gravada, que o trigger
+  recusa, para o erro verdadeiro passar pelo classificador —; e, reservados para o
+  consumidor e a outbox, `crash-after-commit` (depois do commit, antes do `ack`) e
+  `crash-after-send` (entre o envio e o `published_at`).
 - Todo teste de integração e de concorrência termina verificando que o saldo é igual
   ao saldo reconstruído e que a sequência de versões não tem buracos.
 - Sem `sleep` fixo: espera por condição com timeout.
@@ -579,3 +623,5 @@ Keycloak.
   carteira não tem provedor e a autenticação está fora do escopo.
 - Saldo acumulado além de `numeric(19,2)` vira `FAILED`
   (`INFRA_INVARIANT_VIOLATION`), não rejeição — inalcançável com o teto de entrada.
+- A auditoria das submissões não admitidas é de melhor esforço: com o banco fora do
+  ar, a recusa é respondida igual e a linha se perde (o erro é logado).
