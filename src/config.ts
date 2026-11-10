@@ -3,12 +3,15 @@
  *
  * @packageDocumentation
  */
+import { FaultPoint } from './shared/application/fault-injector.ts';
 
 export interface AppConfig {
   databaseUrl: string;
   port: number;
   /** The `Retry-After` of a transient failure's 503, in seconds. */
   retryAfterSeconds: number;
+  /** The enabled fault points; empty — no fault — unless `FAULT_INJECTION` says so. */
+  faultPoints: FaultPoint[];
 }
 
 // 127.0.0.1 and never localhost: on Windows localhost tries IPv6 first and each
@@ -22,7 +25,8 @@ const DEFAULT_RETRY_AFTER_SECONDS = 1;
  * @param env - Environment variables; the process environment by default.
  * @returns The configuration, with local-development defaults.
  * @throws {@link Error} If `PORT` is not a valid port number, or
- *   `RETRY_AFTER_SECONDS` is not a positive integer.
+ *   `RETRY_AFTER_SECONDS` is not a positive integer, or `FAULT_INJECTION`
+ *   names an unknown point or is set in production.
  */
 export function loadConfig(env: Record<string, string | undefined> = process.env): AppConfig {
   const port = env.PORT === undefined ? DEFAULT_PORT : Number(env.PORT);
@@ -34,5 +38,22 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
   if (!Number.isInteger(retryAfterSeconds) || retryAfterSeconds < 1) {
     throw new Error(`RETRY_AFTER_SECONDS must be a positive integer, got "${env.RETRY_AFTER_SECONDS}"`);
   }
-  return { databaseUrl: env.DATABASE_URL ?? DEFAULT_DATABASE_URL, port, retryAfterSeconds };
+  return {
+    databaseUrl: env.DATABASE_URL ?? DEFAULT_DATABASE_URL,
+    port,
+    retryAfterSeconds,
+    faultPoints: faultPointsOf(env),
+  };
+}
+
+const FAULT_POINTS = new Set<string>(Object.values(FaultPoint));
+
+// `FAULT_INJECTION`: comma-separated fault point names, for the tests only.
+function faultPointsOf(env: Record<string, string | undefined>): FaultPoint[] {
+  const names = (env.FAULT_INJECTION ?? '').split(',').map((name) => name.trim()).filter(Boolean);
+  if (names.length === 0) return [];
+  if (env.NODE_ENV === 'production') throw new Error('FAULT_INJECTION is not allowed in production');
+  const unknown = names.find((name) => !FAULT_POINTS.has(name));
+  if (unknown !== undefined) throw new Error(`FAULT_INJECTION names an unknown fault point: "${unknown}"`);
+  return names as FaultPoint[];
 }
