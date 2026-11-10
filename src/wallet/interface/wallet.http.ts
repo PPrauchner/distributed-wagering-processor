@@ -19,11 +19,13 @@ export interface WalletResponse {
 
 /**
  * @param body - The untrusted request body.
+ * @param correlationId - The `X-Correlation-Id` header; empty counts as absent,
+ *   and the use case generates one.
  * @returns The create-wallet command.
  * @throws {@link InvalidPayloadError} If the body has a wrong shape, a wrong type
  *   or any unknown field, at any level.
  */
-export function parseCreateWalletRequest(body: unknown): CreateWalletCommand {
+export function parseCreateWalletRequest(body: unknown, correlationId?: string): CreateWalletCommand {
   const request = expectExactObject(body, ['playerId', 'initialBalance'], 'body');
   const balance = expectExactObject(
     request.initialBalance,
@@ -36,6 +38,7 @@ export function parseCreateWalletRequest(body: unknown): CreateWalletCommand {
       amount: expectString(balance.amount, 'body.initialBalance.amount'),
       currency: expectString(balance.currency, 'body.initialBalance.currency'),
     },
+    correlationId: correlationId || undefined,
   };
 }
 

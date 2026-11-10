@@ -8,6 +8,7 @@ import { Module } from '@nestjs/common';
 import { UNIT_OF_WORK, type UnitOfWork } from '../../shared/application/unit-of-work.ts';
 import { CreateWallet } from '../application/create-wallet.ts';
 import { GetWallet } from '../application/get-wallet.ts';
+import type { WageringRepositories } from '../../wagering/application/wager-transaction-repository.ts';
 import type { WalletRepositories } from '../application/wallet-repository.ts';
 import { WalletController } from './wallet.controller.ts';
 
@@ -17,7 +18,7 @@ import { WalletController } from './wallet.controller.ts';
     {
       provide: CreateWallet,
       inject: [UNIT_OF_WORK],
-      useFactory: (unitOfWork: UnitOfWork<WalletRepositories>) =>
+      useFactory: (unitOfWork: UnitOfWork<WalletRepositories & WageringRepositories>) =>
         new CreateWallet(unitOfWork, () => Bun.randomUUIDv7()),
     },
     {

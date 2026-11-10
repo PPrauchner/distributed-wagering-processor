@@ -4,7 +4,7 @@
  *
  * @packageDocumentation
  */
-import { Body, Controller, Get, HttpCode, Param, Post } from '@nestjs/common';
+import { Body, Controller, Get, Headers, HttpCode, Param, Post } from '@nestjs/common';
 import { CreateWallet } from '../application/create-wallet.ts';
 import { GetWallet } from '../application/get-wallet.ts';
 import { parseCreateWalletRequest, toWalletResponse, type WalletResponse } from './wallet.http.ts';
@@ -18,8 +18,11 @@ export class WalletController {
 
   @Post()
   @HttpCode(201)
-  async create(@Body() body: unknown): Promise<WalletResponse> {
-    const wallet = await this.createWallet.execute(parseCreateWalletRequest(body));
+  async create(
+    @Body() body: unknown,
+    @Headers('x-correlation-id') correlationId: string | undefined,
+  ): Promise<WalletResponse> {
+    const wallet = await this.createWallet.execute(parseCreateWalletRequest(body, correlationId));
     return toWalletResponse(wallet);
   }
 
