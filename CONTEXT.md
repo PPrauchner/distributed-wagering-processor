@@ -164,6 +164,13 @@ Desfecho terminal de uma transação que não pôde ser avaliada por um erro per
 de infraestrutura. Não houve julgamento de negócio.
 _Avoid_: rejeição, erro
 
+**Submissão não admitida**:
+Submissão de um provedor que nunca chegou a ser uma transação de aposta — payload
+inválido, carteira inexistente, conflito de idempotência, id externo reusado com
+outra chave. Fica registrada para auditoria, mas não tem desfecho nem
+`transactionId`.
+_Avoid_: rejeição, recusa, transação rejeitada
+
 **Falha transitória**:
 Indisponibilidade passageira que impede o processamento sem gerar desfecho; a
 transação é tentada de novo.
