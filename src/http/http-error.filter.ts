@@ -15,11 +15,7 @@ import {
 import { CurrencyMismatchError, InvalidMoneyError } from '../shared/domain/money.ts';
 import { InvalidPayloadError } from '../shared/interface/invalid-payload.error.ts';
 import { InvalidWalletError } from '../wallet/domain/wallet.ts';
-import {
-  UnsupportedInitialBalanceError,
-  WalletAlreadyExistsError,
-  WalletNotFoundError,
-} from '../wallet/application/wallet-errors.ts';
+import { WalletAlreadyExistsError, WalletNotFoundError } from '../wallet/application/wallet-errors.ts';
 
 // The slice of the platform response this filter uses; keeps it off Express types.
 interface HttpResponse {
@@ -36,7 +32,6 @@ const INVALID_PAYLOAD_ERRORS = [
   InvalidMoneyError,
   CurrencyMismatchError,
   InvalidWalletError,
-  UnsupportedInitialBalanceError,
 ];
 
 @Catch()
