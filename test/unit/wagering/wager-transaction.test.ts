@@ -1,10 +1,11 @@
 /**
- * Unit tests for `WagerTransaction`: creation and the `create` → `markProcessed`
- * transition the opening follows.
+ * Unit tests for `WagerTransaction`: creation and its transitions (`ARCHITECTURE.md`
+ * § Transições da transação de aposta).
  *
  * @packageDocumentation
  */
 import { describe, expect, test } from 'bun:test';
+import { FailureCode } from '../../../src/shared/domain/failure-code.ts';
 import { Money } from '../../../src/shared/domain/money.ts';
 import {
   InvalidTransactionStateError,
@@ -85,4 +86,122 @@ describe('WagerTransaction.markProcessed', () => {
 
     expect(() => transaction.markProcessed(outcome)).toThrow(InvalidTransactionStateError);
   });
+});
+
+const bet = (overrides: Partial<CreateWagerTransactionProps> = {}): CreateWagerTransactionProps =>
+  opening({
+    providerId: 'provider-a',
+    externalTransactionId: 'bet-1',
+    idempotencyKey: 'provider-a:bet-1',
+    roundId: 'round-1',
+    gameId: 'game-1',
+    kind: WagerTransactionKind.Bet,
+    money: brl('25.00'),
+    ...overrides,
+  });
+
+describe('WagerTransaction.create for a BET', () => {
+  test('takes a positive amount and no reference', () => {
+    const transaction = WagerTransaction.create(bet());
+
+    expect(transaction.kind).toBe(WagerTransactionKind.Bet);
+    expect(transaction.status).toBe(WagerTransactionStatus.Pending);
+  });
+
+  test.each([
+    ['a zero amount', bet({ money: brl('0.00') })],
+    ['a reference', bet({ referenceExternalTransactionId: 'bet-0' })],
+  ])('refuses %s', (_case, props) => {
+    expect(() => WagerTransaction.create(props)).toThrow(InvalidWagerTransactionError);
+  });
+});
+
+describe('WagerTransaction.reject', () => {
+  test('records the failure code and the balance and version observed, with no processing time', () => {
+    const transaction = WagerTransaction.create(bet());
+
+    transaction.reject({
+      code: FailureCode.InsufficientFunds,
+      balanceAfter: brl('10.00'),
+      walletVersionObserved: 3,
+    });
+
+    expect(transaction.status).toBe(WagerTransactionStatus.Rejected);
+    expect(transaction.isTerminal()).toBe(true);
+    expect(transaction.failureCode).toBe(FailureCode.InsufficientFunds);
+    expect(transaction.balanceAfter?.equals(brl('10.00'))).toBe(true);
+    expect(transaction.walletVersionObserved).toBe(3);
+    expect(transaction.processedAt).toBeUndefined();
+  });
+});
+
+describe('WagerTransaction.fail', () => {
+  test('records the failure code and nothing observed', () => {
+    const transaction = WagerTransaction.create(bet());
+
+    transaction.fail(FailureCode.InfraUnexpected);
+
+    expect(transaction.status).toBe(WagerTransactionStatus.Failed);
+    expect(transaction.isTerminal()).toBe(true);
+    expect(transaction.failureCode).toBe(FailureCode.InfraUnexpected);
+    expect(transaction.balanceAfter).toBeUndefined();
+    expect(transaction.walletVersionObserved).toBeUndefined();
+  });
+});
+
+describe('WagerTransaction.markPendingReference', () => {
+  const refund = (): WagerTransaction =>
+    WagerTransaction.create(bet({ kind: WagerTransactionKind.Refund, referenceExternalTransactionId: 'bet-0' }));
+
+  test('leaves PENDING for PENDING_REFERENCE, which is not terminal', () => {
+    const transaction = refund();
+
+    transaction.markPendingReference();
+
+    expect(transaction.status).toBe(WagerTransactionStatus.PendingReference);
+    expect(transaction.isTerminal()).toBe(false);
+  });
+
+  test('a pending reference can still be resolved', () => {
+    const transaction = refund();
+    transaction.markPendingReference();
+
+    transaction.markProcessed({ at: new Date(), balanceAfter: brl('25.00'), walletVersionObserved: 2 });
+
+    expect(transaction.status).toBe(WagerTransactionStatus.Processed);
+  });
+
+  test('only leaves PENDING: a pending reference keeps waiting without a transition', () => {
+    const transaction = refund();
+    transaction.markPendingReference();
+
+    expect(() => transaction.markPendingReference()).toThrow(InvalidTransactionStateError);
+  });
+});
+
+describe('a terminal transaction never transitions', () => {
+  const terminals: [string, (transaction: WagerTransaction) => void][] = [
+    ['PROCESSED', (t) => t.markProcessed({ at: new Date(), balanceAfter: brl('75.00'), walletVersionObserved: 2 })],
+    [
+      'REJECTED',
+      (t) => t.reject({ code: FailureCode.InsufficientFunds, balanceAfter: brl('1.00'), walletVersionObserved: 1 }),
+    ],
+    ['FAILED', (t) => t.fail(FailureCode.InfraUnexpected)],
+  ];
+  const transitions: [string, (transaction: WagerTransaction) => void][] = [
+    ['markProcessed', (t) => t.markProcessed({ at: new Date(), balanceAfter: brl('1.00'), walletVersionObserved: 1 })],
+    ['reject', (t) => t.reject({ code: FailureCode.CurrencyMismatch, balanceAfter: brl('1.00'), walletVersionObserved: 1 })],
+    ['fail', (t) => t.fail(FailureCode.InfraUnexpected)],
+    ['markPendingReference', (t) => t.markPendingReference()],
+  ];
+
+  for (const [status, reach] of terminals) {
+    test.each(transitions)(`${status} → %s is a programming error`, (_name, transition) => {
+      const transaction = WagerTransaction.create(bet());
+      reach(transaction);
+
+      expect(() => transition(transaction)).toThrow(InvalidTransactionStateError);
+      expect(transaction.status).toBe(status as WagerTransactionStatus);
+    });
+  }
 });
