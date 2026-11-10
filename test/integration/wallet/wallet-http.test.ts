@@ -9,10 +9,12 @@ import type { INestApplication } from '@nestjs/common';
 import { SQL } from 'bun';
 import { createApp } from '../../../src/app.ts';
 import { loadConfig } from '../../../src/config.ts';
+import { expectLedgerConsistent } from '../ledger-invariant.ts';
 
 let app: INestApplication;
 let baseUrl: string;
 let sql: SQL;
+const touchedWallets: string[] = [];
 
 beforeAll(async () => {
   const config = loadConfig();
@@ -23,14 +25,15 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  await expectLedgerConsistent(sql, touchedWallets);
   await app?.close();
   await sql?.close();
 });
 
-function postWallet(body: unknown): Promise<Response> {
+function postWallet(body: unknown, headers: Record<string, string> = {}): Promise<Response> {
   return fetch(`${baseUrl}/wallets`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    headers: { 'content-type': 'application/json', ...headers },
     body: typeof body === 'string' ? body : JSON.stringify(body),
   });
 }
@@ -84,17 +87,38 @@ describe('POST /wallets', () => {
     expect(conflict.walletId).toBe(created.id);
   });
 
-  test('a positive initial balance is refused, says why and creates nothing', async () => {
+  test('a positive initial balance creates the wallet at version 1 with its opening and CREDIT entry', async () => {
     const playerId = Bun.randomUUIDv7();
+    const initialBalance = { amount: '1000.00', currency: 'BRL' };
 
-    const response = await postWallet({ playerId, initialBalance: { amount: '10.00', currency: 'BRL' } });
+    const response = await postWallet({ playerId, initialBalance }, { 'x-correlation-id': 'corr-http' });
 
-    expect(response.status).toBe(400);
+    expect(response.status).toBe(201);
     const body = await readJson(response);
-    expect(body.failureCode).toBe('INVALID_PAYLOAD');
-    expect(body.message).toMatch(/not supported/);
-    const [row] = await sql`select count(*)::int as count from wallets where player_id = ${playerId}`;
-    expect(row.count).toBe(0);
+    expect(body).toEqual({ id: expect.any(String), playerId, balance: initialBalance, version: 1 });
+    touchedWallets.push(body.id as string);
+    const [opening] = await sql`
+      select kind, status, correlation_id from wager_transactions where wallet_id = ${body.id}
+    `;
+    expect(opening).toEqual({ kind: 'OPENING', status: 'PROCESSED', correlation_id: 'corr-http' });
+    const [entry] = await sql`
+      select direction, balance_before_amount::text as before, balance_after_amount::text as after, wallet_version
+        from wallet_ledger_entries where wallet_id = ${body.id}
+    `;
+    expect(entry).toEqual({ direction: 'CREDIT', before: '0.00', after: '1000.00', wallet_version: body.version });
+  });
+
+  test('without X-Correlation-Id, the opening gets a generated correlation id', async () => {
+    const response = await postWallet({
+      playerId: Bun.randomUUIDv7(),
+      initialBalance: { amount: '10.00', currency: 'BRL' },
+    });
+
+    expect(response.status).toBe(201);
+    const body = await readJson(response);
+    touchedWallets.push(body.id as string);
+    const [opening] = await sql`select correlation_id from wager_transactions where wallet_id = ${body.id}`;
+    expect(opening.correlation_id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-/);
   });
 
   const valid = (): Record<string, unknown> => ({
