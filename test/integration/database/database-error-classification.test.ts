@@ -64,7 +64,10 @@ async function newWallet(playerId: string = Bun.randomUUIDv7()): Promise<Wallet>
 }
 
 /** A `FAILED` bet on the wallet — coherent with the schema, and moving nothing. */
-function failedBet(walletId: string, ids: { key?: string; externalId?: string } = {}): WagerTransaction {
+function failedBet(
+  walletId: string,
+  ids: { key?: string; externalId?: string; roundId?: string } = {},
+): WagerTransaction {
   const transaction = WagerTransaction.create({
     id: Bun.randomUUIDv7(),
     providerId: 'provider-a',
@@ -73,7 +76,7 @@ function failedBet(walletId: string, ids: { key?: string; externalId?: string } 
     payloadHash: 'a'.repeat(64),
     walletId,
     playerId: 'player',
-    roundId: 'round',
+    roundId: ids.roundId ?? 'round',
     gameId: 'game',
     kind: WagerTransactionKind.Bet,
     money: brl('10.00'),
@@ -287,5 +290,24 @@ describe('transient', () => {
     } finally {
       await offline.close(true);
     }
+  });
+});
+
+describe('anything else → INFRA_UNEXPECTED', () => {
+  test('22001: an identifier beyond its varchar(255) column', async () => {
+    const wallet = await newWallet();
+
+    let thrown: unknown;
+    try {
+      await orm.em.fork().transactional(async (em) => {
+        em.persist(failedBet(wallet.id, { roundId: 'r'.repeat(256) }));
+      });
+    } catch (error) {
+      thrown = error;
+    }
+
+    // The SQLSTATE, so the row is reached by the database and not by a domain error.
+    expect(Reflect.get(thrown as object, 'code')).toBe('22001');
+    expect(classifyDatabaseError(thrown)).toEqual({ category: 'permanent', failureCode: FailureCode.InfraUnexpected });
   });
 });
