@@ -6,8 +6,15 @@
  * order, and the first violation decides (`ARCHITECTURE.md` § Ordem das
  * validações). This slice settles `BET`.
  *
+ * Error path (`ARCHITECTURE.md` § Classificação de falhas): a transient failure
+ * records nothing and reaches the caller; a permanent one rolls the SQL
+ * transaction back, and a second unit of work records the transaction as
+ * `FAILED`, so the key keeps answering the same outcome.
+ *
  * @packageDocumentation
  */
+import { FaultPoint, type FaultInjection } from '../../shared/application/fault-injector.ts';
+import { PermanentFailureError, type PermanentFailureCode } from '../../shared/application/infrastructure-failures.ts';
 import type { UnitOfWork } from '../../shared/application/unit-of-work.ts';
 import { Money, type MoneyProps } from '../../shared/domain/money.ts';
 import type { WalletRepositories } from '../../wallet/application/wallet-repository.ts';
@@ -16,6 +23,7 @@ import {
   InvalidWagerTransactionError,
   WagerTransaction,
   WagerTransactionKind,
+  type CreateWagerTransactionProps,
 } from '../domain/wager-transaction.ts';
 import { hashWagerPayload, type WagerPayload } from './wager-payload.ts';
 import type { WagerTransactionRepository, WageringRepositories } from './wager-transaction-repository.ts';
@@ -57,14 +65,14 @@ const KINDS = new Set<string>(Object.values(WagerTransactionKind));
 
 export class ProcessWagerTransaction {
   constructor(
-    private readonly unitOfWork: UnitOfWork<WalletRepositories & WageringRepositories>,
+    private readonly unitOfWork: UnitOfWork<WalletRepositories & WageringRepositories & FaultInjection>,
     private readonly generateId: () => string,
   ) {}
 
   /**
    * @param command - The submission, with its idempotency key already present.
-   * @returns The transaction it ended in — `PROCESSED` or `REJECTED` — new or
-   *   replayed.
+   * @returns The transaction it ended in — `PROCESSED`, `REJECTED` or, after a
+   *   permanent error, `FAILED` — new or replayed.
    * @throws {@link InvalidMoneyError} If the money is malformed.
    * @throws {@link InvalidWagerTransactionError} If any other field breaks the
    *   payload contract or the rules of its kind.
@@ -77,25 +85,41 @@ export class ProcessWagerTransaction {
    * @throws {@link SubmissionWalletNotFoundError} If the wallet does not exist.
    * @throws {@link TransientFailureError} If the wallet stayed locked too long
    *   or the database is unavailable: nothing was recorded.
+   * @throws {@link PermanentFailureError} If even the `FAILED` could not be
+   *   recorded for a permanent reason.
    */
   async execute(command: SubmitWagerTransactionCommand): Promise<WagerTransactionOutcome> {
-    const submitted = this.validated(command);
+    const props = this.validated(command);
 
     try {
-      return await this.record(submitted);
+      return await this.settled(props, () => this.record(WagerTransaction.create(props)));
+    } catch (error) {
+      if (!(error instanceof PermanentFailureError)) throw error;
+      // The SQL transaction rolled back: record the failure in a unit of work of its own.
+      return this.settled(props, () => this.recordFailure(props, error.failureCode));
+    }
+  }
+
+  /** Runs one attempt to record the submission, settling the races on its key. */
+  private async settled(
+    props: CreateWagerTransactionProps,
+    attempt: () => Promise<WagerTransactionOutcome>,
+  ): Promise<WagerTransactionOutcome> {
+    try {
+      return await attempt();
     } catch (error) {
       if (error instanceof DuplicateExternalIdError) {
-        throw new ExternalIdConflictError(submitted.providerId, submitted.externalTransactionId);
+        throw new ExternalIdConflictError(props.providerId, props.externalTransactionId);
       }
       // A concurrent submission of the same key committed first, outside the lock.
-      if (error instanceof DuplicateIdempotencyKeyError) return this.readBack(submitted);
+      if (error instanceof DuplicateIdempotencyKeyError) return this.readBack(props);
       throw error;
     }
   }
 
   /** Steps 4 to 8 of the order, in one unit of work. */
   private record(submitted: WagerTransaction): Promise<WagerTransactionOutcome> {
-    return this.unitOfWork.run(async ({ wallets, ledger, transactions }) => {
+    return this.unitOfWork.run(async ({ wallets, ledger, transactions, faults }) => {
       const earlier = await findEarlier(transactions, submitted);
       if (earlier) return earlier;
 
@@ -108,19 +132,42 @@ export class ProcessWagerTransaction {
       const entry = applyBet(submitted, wallet, { entryId: this.generateId() });
       transactions.add(submitted);
       if (entry) ledger.add(entry);
+      await faults.inject(FaultPoint.InvariantViolationBeforeCommit, { transactionId: submitted.id });
       return { transaction: submitted, idempotentReplay: false };
     });
   }
 
+  /** The second unit of work: `FAILED`, with nothing observed and no ledger entry. */
+  private recordFailure(
+    props: CreateWagerTransactionProps,
+    code: PermanentFailureCode,
+  ): Promise<WagerTransactionOutcome> {
+    return this.unitOfWork.run(async ({ transactions }) => {
+      const failed = WagerTransaction.create(props);
+      const earlier = await findEarlier(transactions, failed);
+      if (earlier) return earlier;
+      failed.fail(code);
+      transactions.add(failed);
+      return { transaction: failed, idempotentReplay: false };
+    });
+  }
+
   /** The transaction a concurrent submission recorded under the key: replay or conflict. */
-  private async readBack(submitted: WagerTransaction): Promise<WagerTransactionOutcome> {
-    const earlier = await this.unitOfWork.run(({ transactions }) => findEarlier(transactions, submitted));
+  private async readBack(props: CreateWagerTransactionProps): Promise<WagerTransactionOutcome> {
+    const earlier = await this.unitOfWork.run(({ transactions }) =>
+      findEarlier(transactions, WagerTransaction.create(props)),
+    );
     if (!earlier) throw new Error('unique violation reported, but no transaction found');
     return earlier;
   }
 
-  /** Steps 2 and 3 of the order: the payload's shape, then its hash. */
-  private validated(command: SubmitWagerTransactionCommand): WagerTransaction {
+  /**
+   * Steps 2 and 3 of the order: the payload's shape, then its hash.
+   *
+   * @returns The transaction's creation props, with its id and correlation id
+   *   fixed, so every attempt creates the same transaction.
+   */
+  private validated(command: SubmitWagerTransactionCommand): CreateWagerTransactionProps {
     assertIdentifiers(command);
     const money = Money.from(command.money);
     if (!KINDS.has(command.kind)) {
@@ -137,17 +184,18 @@ export class ProcessWagerTransaction {
       money,
       referenceExternalTransactionId: command.referenceExternalTransactionId,
     };
-    // `create` enforces the rules of the kind: amount floor and reference.
-    const transaction = WagerTransaction.create({
+    const props: CreateWagerTransactionProps = {
       ...payload,
       id: this.generateId(),
       idempotencyKey: command.idempotencyKey,
       payloadHash: hashWagerPayload(payload),
       correlationId: command.correlationId ?? this.generateId(),
-    });
-    if (transaction.kind === WagerTransactionKind.Opening) throw new InternalKindNotAllowedError(transaction.kind);
-    if (transaction.kind !== WagerTransactionKind.Bet) throw new UnsupportedKindError(transaction.kind);
-    return transaction;
+    };
+    // `create` enforces the rules of the kind: amount floor and reference.
+    WagerTransaction.create(props);
+    if (props.kind === WagerTransactionKind.Opening) throw new InternalKindNotAllowedError(props.kind);
+    if (props.kind !== WagerTransactionKind.Bet) throw new UnsupportedKindError(props.kind);
+    return props;
   }
 }
 

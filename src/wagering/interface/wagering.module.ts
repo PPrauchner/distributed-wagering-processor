@@ -5,6 +5,7 @@
  * @packageDocumentation
  */
 import { Module } from '@nestjs/common';
+import type { FaultInjection } from '../../shared/application/fault-injector.ts';
 import { UNIT_OF_WORK, type UnitOfWork } from '../../shared/application/unit-of-work.ts';
 import type { WalletRepositories } from '../../wallet/application/wallet-repository.ts';
 import { ProcessWagerTransaction } from '../application/process-wager-transaction.ts';
@@ -17,7 +18,7 @@ import { WagerTransactionController } from './wager-transaction.controller.ts';
     {
       provide: ProcessWagerTransaction,
       inject: [UNIT_OF_WORK],
-      useFactory: (unitOfWork: UnitOfWork<WalletRepositories & WageringRepositories>) =>
+      useFactory: (unitOfWork: UnitOfWork<WalletRepositories & WageringRepositories & FaultInjection>) =>
         new ProcessWagerTransaction(unitOfWork, () => Bun.randomUUIDv7()),
     },
   ],
