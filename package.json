@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "typecheck": "tsc --noEmit",
+    "test:unit": "bun test test/unit",
     "spike": "bun test spike/",
     "spike:migrate": "bun spike/migrate.ts"
   },
