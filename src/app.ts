@@ -10,6 +10,7 @@ import { NestFactory } from '@nestjs/core';
 import type { AppConfig } from './config.ts';
 import { DatabaseModule } from './database/database.module.ts';
 import { HttpErrorFilter } from './http/http-error.filter.ts';
+import { RejectedSubmissionAudit } from './wagering/interface/rejected-submission.audit.ts';
 import { WageringModule } from './wagering/interface/wagering.module.ts';
 import { WalletModule } from './wallet/interface/wallet.module.ts';
 
@@ -31,7 +32,12 @@ export async function createApp(config: AppConfig): Promise<INestApplication> {
   const app = await NestFactory.create(AppModule.forConfig(config), {
     logger: ['error', 'warn', 'log'],
   });
-  app.useGlobalFilters(new HttpErrorFilter({ retryAfterSeconds: config.retryAfterSeconds }));
+  app.useGlobalFilters(
+    new HttpErrorFilter({
+      retryAfterSeconds: config.retryAfterSeconds,
+      refusalAudits: [app.get(RejectedSubmissionAudit)],
+    }),
+  );
   app.enableShutdownHooks();
   return app;
 }

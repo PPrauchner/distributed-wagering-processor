@@ -1,6 +1,9 @@
 /**
  * Global HTTP error filter: turns every error into `{ failureCode, message }`
- * with the status of the HTTP status table in `ARCHITECTURE.md`.
+ * with the status of the HTTP status table in `ARCHITECTURE.md`. Before
+ * answering, it reports the refusal to the audits — the only point every
+ * refusal goes through, malformed JSON included, which never reaches a
+ * controller.
  *
  * @packageDocumentation
  */
@@ -40,9 +43,23 @@ interface ErrorResponse {
   headers?: Record<string, string>;
 }
 
+/** The request a refusal answered, as the audits see it. */
+export interface RefusedRequest {
+  method: string;
+  path: string;
+  body: unknown;
+  headers: Record<string, string | string[] | undefined>;
+}
+
+/** Records the refusals it cares about; the filter answers once it is done. */
+export interface RefusalAudit {
+  refused(request: RefusedRequest, failureCode: string, error: unknown): Promise<void>;
+}
+
 export interface HttpErrorFilterOptions {
   /** The `Retry-After` of a transient failure's 503, in seconds. */
   retryAfterSeconds: number;
+  refusalAudits?: readonly RefusalAudit[];
 }
 
 const INVALID_PAYLOAD_ERRORS = [
@@ -69,11 +86,28 @@ export class HttpErrorFilter implements ExceptionFilter {
 
   constructor(private readonly options: HttpErrorFilterOptions) {}
 
-  catch(error: unknown, host: ArgumentsHost): void {
+  catch(error: unknown, host: ArgumentsHost): Promise<void> {
+    return this.answer(error, host);
+  }
+
+  private async answer(error: unknown, host: ArgumentsHost): Promise<void> {
     const { status, body, headers = {} } = this.toResponse(error);
-    const response = host.switchToHttp().getResponse<HttpResponse>();
+    const http = host.switchToHttp();
+    if (status < HttpStatus.INTERNAL_SERVER_ERROR) await this.audit(http.getRequest<RefusedRequest>(), body.failureCode, error);
+    const response = http.getResponse<HttpResponse>();
     for (const [name, value] of Object.entries(headers)) response.setHeader(name, value);
     response.status(status).json(body);
+  }
+
+  // The audit is best effort: a failure to record it never changes the answer.
+  private async audit(request: RefusedRequest, failureCode: string, error: unknown): Promise<void> {
+    for (const audit of this.options.refusalAudits ?? []) {
+      try {
+        await audit.refused(request, failureCode, error);
+      } catch (auditError) {
+        this.logger.error(auditError);
+      }
+    }
   }
 
   private toResponse(error: unknown): ErrorResponse {
