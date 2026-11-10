@@ -2,6 +2,7 @@
  * Errors the wagering use cases raise for a submission that does not become a
  * transaction — refused before or without one (`ARCHITECTURE.md` § Submissões
  * não admitidas). A rejection is not among them: it is a transaction outcome.
+ * Those raised after the payload is hashed carry the hash, for the audit.
  *
  * @packageDocumentation
  */
@@ -19,7 +20,10 @@ export class MissingIdempotencyKeyError extends Error {
 export class InternalKindNotAllowedError extends Error {
   override readonly name = 'InternalKindNotAllowedError';
 
-  constructor(kind: string) {
+  constructor(
+    kind: string,
+    readonly payloadHash?: string,
+  ) {
     super(`${kind} is internal and cannot be submitted`);
   }
 }
@@ -37,7 +41,11 @@ export class UnsupportedKindError extends Error {
 export class IdempotencyConflictError extends Error {
   override readonly name = 'IdempotencyConflictError';
 
-  constructor(providerId: string, idempotencyKey: string) {
+  constructor(
+    providerId: string,
+    idempotencyKey: string,
+    readonly payloadHash?: string,
+  ) {
     super(`idempotency key "${idempotencyKey}" of provider "${providerId}" was used with another payload`);
   }
 }
@@ -46,7 +54,11 @@ export class IdempotencyConflictError extends Error {
 export class ExternalIdConflictError extends Error {
   override readonly name = 'ExternalIdConflictError';
 
-  constructor(providerId: string, externalTransactionId: string) {
+  constructor(
+    providerId: string,
+    externalTransactionId: string,
+    readonly payloadHash?: string,
+  ) {
     super(
       `external transaction id "${externalTransactionId}" of provider "${providerId}" was used with another idempotency key`,
     );
@@ -74,7 +86,10 @@ export class DuplicateExternalIdError extends Error {
 export class SubmissionWalletNotFoundError extends Error {
   override readonly name = 'SubmissionWalletNotFoundError';
 
-  constructor(walletId: string) {
+  constructor(
+    walletId: string,
+    readonly payloadHash?: string,
+  ) {
     super(`wallet not found: ${walletId}`);
   }
 }

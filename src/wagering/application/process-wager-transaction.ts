@@ -109,7 +109,7 @@ export class ProcessWagerTransaction {
       return await attempt();
     } catch (error) {
       if (error instanceof DuplicateExternalIdError) {
-        throw new ExternalIdConflictError(props.providerId, props.externalTransactionId);
+        throw new ExternalIdConflictError(props.providerId, props.externalTransactionId, props.payloadHash);
       }
       // A concurrent submission of the same key committed first, outside the lock.
       if (error instanceof DuplicateIdempotencyKeyError) return this.readBack(props);
@@ -124,7 +124,7 @@ export class ProcessWagerTransaction {
       if (earlier) return earlier;
 
       const wallet = await wallets.findByIdForUpdate(submitted.walletId);
-      if (!wallet) throw new SubmissionWalletNotFoundError(submitted.walletId);
+      if (!wallet) throw new SubmissionWalletNotFoundError(submitted.walletId, submitted.payloadHash);
       // A concurrent submission may have committed while this one waited for the lock.
       const committedMeanwhile = await findEarlier(transactions, submitted);
       if (committedMeanwhile) return committedMeanwhile;
@@ -193,7 +193,7 @@ export class ProcessWagerTransaction {
     };
     // `create` enforces the rules of the kind: amount floor and reference.
     WagerTransaction.create(props);
-    if (props.kind === WagerTransactionKind.Opening) throw new InternalKindNotAllowedError(props.kind);
+    if (props.kind === WagerTransactionKind.Opening) throw new InternalKindNotAllowedError(props.kind, props.payloadHash);
     if (props.kind !== WagerTransactionKind.Bet) throw new UnsupportedKindError(props.kind);
     return props;
   }
@@ -217,10 +217,10 @@ async function findEarlier(
   // key may commit between them, and then shows up by its external id. Under
   // the same key it is this submission, not an external id conflict.
   if (earlier.idempotencyKey !== submitted.idempotencyKey) {
-    throw new ExternalIdConflictError(submitted.providerId, submitted.externalTransactionId);
+    throw new ExternalIdConflictError(submitted.providerId, submitted.externalTransactionId, submitted.payloadHash);
   }
   if (earlier.payloadHash !== submitted.payloadHash) {
-    throw new IdempotencyConflictError(submitted.providerId, submitted.idempotencyKey);
+    throw new IdempotencyConflictError(submitted.providerId, submitted.idempotencyKey, submitted.payloadHash);
   }
   return { transaction: earlier, idempotentReplay: true };
 }
