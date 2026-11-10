@@ -5,6 +5,8 @@
  * @packageDocumentation
  */
 import type { EntityManager } from '@mikro-orm/postgresql';
+import type { OutboxRepositories } from '../messaging/application/outbox-repository.ts';
+import { MikroOrmOutboxRepository } from '../messaging/infrastructure/mikro-orm-outbox.repository.ts';
 import type { FaultInjection, FaultPoint } from '../shared/application/fault-injector.ts';
 import type { UnitOfWork } from '../shared/application/unit-of-work.ts';
 import type { RejectedSubmissionRepositories } from '../wagering/application/rejected-submission-repository.ts';
@@ -21,6 +23,7 @@ import { translateDatabaseError } from './translate-database-error.ts';
 export type Repositories = WalletRepositories &
   WageringRepositories &
   RejectedSubmissionRepositories &
+  OutboxRepositories &
   FaultInjection;
 
 export class MikroOrmUnitOfWork implements UnitOfWork<Repositories> {
@@ -45,6 +48,7 @@ export class MikroOrmUnitOfWork implements UnitOfWork<Repositories> {
           ledger: new MikroOrmWalletLedgerRepository(tx),
           transactions: new MikroOrmWagerTransactionRepository(tx),
           rejectedSubmissions: new MikroOrmRejectedSubmissionRepository(tx),
+          outbox: new MikroOrmOutboxRepository(tx),
           faults: new SqlFaultInjector(tx, this.faultPoints),
         }),
       );
