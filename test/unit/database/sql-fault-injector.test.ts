@@ -8,7 +8,7 @@
 import { describe, expect, test } from 'bun:test';
 import type { EntityManager } from '@mikro-orm/postgresql';
 import { SqlFaultInjector } from '../../../src/database/sql-fault-injector.ts';
-import { FaultPoint } from '../../../src/shared/application/fault-injector.ts';
+import { FaultPoint, SimulatedCrashError } from '../../../src/shared/application/fault-injector.ts';
 
 /** An entity manager that fails the test if the injector uses it at all. */
 const untouchable = new Proxy({} as EntityManager, {
@@ -30,5 +30,13 @@ describe('SqlFaultInjector', () => {
     await expect(
       faults.inject(FaultPoint.InvariantViolationBeforeCommit, { transactionId: 'any' }),
     ).resolves.toBeUndefined();
+  });
+});
+
+describe('crash-after-send', () => {
+  test('when enabled, the publisher dies there: a simulated crash, without touching the database', async () => {
+    const faults = new SqlFaultInjector(untouchable, new Set([FaultPoint.CrashAfterSend]));
+
+    await expect(faults.inject(FaultPoint.CrashAfterSend, {})).rejects.toBeInstanceOf(SimulatedCrashError);
   });
 });
