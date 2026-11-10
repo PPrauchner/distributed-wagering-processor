@@ -23,6 +23,13 @@ export interface WalletState {
   updatedAt: Date;
 }
 
+/** A credit or debit: its amount, and ids of the new entry and of its transaction. */
+export interface MovementProps {
+  money: Money;
+  entryId: string;
+  transactionId: string;
+}
+
 /** Raised when a wallet would be opened breaking one of its invariants. */
 export class InvalidWalletError extends Error {
   override readonly name = 'InvalidWalletError';
@@ -120,16 +127,43 @@ export class Wallet {
    * @throws {@link CurrencyMismatchError} If the amount is in another currency.
    * @throws {@link InvalidLedgerEntryError} If the amount is not positive.
    */
-  credit(props: { money: Money; entryId: string; transactionId: string }): WalletLedgerEntry {
+  credit(props: MovementProps): WalletLedgerEntry {
+    return this.move(LedgerDirection.Credit, props, this._balance.add(props.money));
+  }
+
+  /**
+   * Debits the wallet: the balance shrinks, the version goes up by exactly 1,
+   * and the matching ledger entry is returned for the caller to persist with it.
+   *
+   * @param props - Amount, and ids of the new entry and of its transaction.
+   * @returns The ledger entry of this debit.
+   * @throws {@link CurrencyMismatchError} If the amount is in another currency.
+   * @throws {@link InvalidLedgerEntryError} If the amount is not positive or
+   *   exceeds the balance — check {@link Wallet.canDebit} first.
+   */
+  debit(props: MovementProps): WalletLedgerEntry {
+    return this.move(LedgerDirection.Debit, props, this._balance.subtract(props.money));
+  }
+
+  /**
+   * @param money - An amount in the wallet's currency.
+   * @returns Whether debiting it keeps the balance at zero or more.
+   * @throws {@link CurrencyMismatchError} If the amount is in another currency.
+   */
+  canDebit(money: Money): boolean {
+    return !this._balance.isLessThan(money);
+  }
+
+  private move(direction: LedgerDirection, props: MovementProps, balanceAfter: Money): WalletLedgerEntry {
     const at = new Date();
     const entry = WalletLedgerEntry.create({
       id: props.entryId,
       walletId: this.id,
       transactionId: props.transactionId,
-      direction: LedgerDirection.Credit,
+      direction,
       money: props.money,
       balanceBefore: this._balance,
-      balanceAfter: this._balance.add(props.money),
+      balanceAfter,
       walletVersion: this._version + 1,
       createdAt: at,
     });
