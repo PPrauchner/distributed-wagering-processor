@@ -430,6 +430,38 @@ describe('concurrency, with real parallel HTTP requests', () => {
     expect(await debits(wallet.id)).toBe(1);
   });
 
+  test('the same key on two wallets at once, outside a shared lock: one PROCESSED, the other 409 IDEMPOTENCY_CONFLICT', async () => {
+    const first = await createWallet('100.00');
+    const second = await createWallet('100.00');
+    const externalTransactionId = Bun.randomUUIDv7();
+    const key = { 'idempotency-key': `race-${externalTransactionId}` };
+
+    const responses = await Promise.all([
+      submit(betOn(first, { externalTransactionId }), key),
+      submit(betOn(second, { externalTransactionId }), key),
+    ]);
+
+    const results = await Promise.all(responses.map(readJson));
+    expect(responses.map((r) => r.status).sort()).toEqual([200, 409]);
+    expect(results.find((r) => r.failureCode)!.failureCode).toBe('IDEMPOTENCY_CONFLICT');
+    expect((await transactionsOf(first.id)).length + (await transactionsOf(second.id)).length).toBe(1);
+  });
+
+  test('the same external id with two keys on two wallets at once: one PROCESSED, the other 409 EXTERNAL_ID_CONFLICT', async () => {
+    const first = await createWallet('100.00');
+    const second = await createWallet('100.00');
+    const externalTransactionId = Bun.randomUUIDv7();
+
+    const responses = await Promise.all([
+      submit(betOn(first, { externalTransactionId }), { 'idempotency-key': `a-${externalTransactionId}` }),
+      submit(betOn(second, { externalTransactionId }), { 'idempotency-key': `b-${externalTransactionId}` }),
+    ]);
+
+    const results = await Promise.all(responses.map(readJson));
+    expect(responses.map((r) => r.status).sort()).toEqual([200, 409]);
+    expect(results.find((r) => r.failureCode)!.failureCode).toBe('EXTERNAL_ID_CONFLICT');
+  });
+
   test('the same bet sent 50 times in parallel debits once; the rest are replays of it', async () => {
     const wallet = await createWallet('100.00');
     const body = betOn(wallet);
