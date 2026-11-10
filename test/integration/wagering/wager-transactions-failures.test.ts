@@ -1,7 +1,10 @@
 /**
  * The error path of `POST /wagering/transactions`, end to end against the real
  * PostgreSQL: transient failures answer 503 with `Retry-After` and record
- * nothing. Ends checking the ledger invariant of every wallet it touched.
+ * nothing; a permanent error — provoked by the `FaultInjector` with a real
+ * schema violation — records the transaction as `FAILED` and answers 500, and
+ * so does its replay. Ends checking the ledger invariant of every wallet it
+ * touched.
  *
  * @packageDocumentation
  */
@@ -10,6 +13,7 @@ import type { INestApplication } from '@nestjs/common';
 import { SQL } from 'bun';
 import { createApp } from '../../../src/app.ts';
 import { loadConfig, type AppConfig } from '../../../src/config.ts';
+import { FaultPoint } from '../../../src/shared/application/fault-injector.ts';
 import { expectLedgerConsistent } from '../ledger-invariant.ts';
 
 type JsonObject = Record<string, unknown>;
@@ -122,5 +126,63 @@ describe('transient failures: 503 with Retry-After, nothing recorded', () => {
     expect(response.status).toBe(503);
     expect(response.headers.get('retry-after')).toBe('3');
     expect(await response.json()).toEqual({ failureCode: 'TRANSIENT_UNAVAILABLE', message: expect.any(String) });
+  });
+});
+
+describe('a permanent error: FAILED, recorded by a second unit of work', () => {
+  let faultyUrl: string;
+
+  beforeAll(async () => {
+    faultyUrl = await startApp({ ...config, faultPoints: [FaultPoint.InvariantViolationBeforeCommit] });
+  });
+
+  test('an invariant violated before the commit → 500 FAILED INFRA_INVARIANT_VIOLATION; balance, ledger untouched', async () => {
+    const wallet = await createWallet('100.00');
+
+    const response = await submit(faultyUrl, betOn(wallet));
+
+    expect(response.status).toBe(500);
+    const result = (await response.json()) as JsonObject;
+    expect(result).toEqual({
+      transactionId: expect.any(String),
+      status: 'FAILED',
+      failureCode: 'INFRA_INVARIANT_VIOLATION',
+      idempotentReplay: false,
+    });
+    const rows = await sql`
+      select id, status, failure_code, balance_after_amount, wallet_version_observed, processed_at
+        from wager_transactions where wallet_id = ${wallet.id} and kind <> 'OPENING'
+    `;
+    expect(rows).toEqual([
+      {
+        id: result.transactionId,
+        status: 'FAILED',
+        failure_code: 'INFRA_INVARIANT_VIOLATION',
+        balance_after_amount: null,
+        wallet_version_observed: null,
+        processed_at: null,
+      },
+    ]);
+    const [walletRow] = await sql`
+      select balance_amount::text as balance, version,
+             (select count(*)::int from wallet_ledger_entries where wallet_id = ${wallet.id}) as entries
+        from wallets where id = ${wallet.id}
+    `;
+    expect(walletRow).toEqual({ balance: '100.00', version: 1, entries: 1 });
+  });
+
+  test('the replay answers the same 500, with idempotentReplay; another payload is a conflict', async () => {
+    const wallet = await createWallet('100.00');
+    const body = betOn(wallet);
+    const original = (await (await submit(faultyUrl, body)).json()) as JsonObject;
+
+    const replay = await submit(baseUrl, body);
+    const conflict = await submit(baseUrl, { ...body, money: { amount: '1.00', currency: 'BRL' } });
+
+    expect(replay.status).toBe(500);
+    expect(await replay.json()).toEqual({ ...original, idempotentReplay: true });
+    expect(conflict.status).toBe(409);
+    expect(await conflict.json()).toMatchObject({ failureCode: 'IDEMPOTENCY_CONFLICT' });
+    expect(await transactionCount(wallet.id)).toBe(1);
   });
 });
