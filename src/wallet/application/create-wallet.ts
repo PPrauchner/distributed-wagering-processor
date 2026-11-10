@@ -1,16 +1,21 @@
 /**
  * Creates a player's wallet in one currency. A positive initial balance is
  * credited by the opening — an internal `OPENING` transaction, already
- * `PROCESSED`, and its `CREDIT` ledger entry — in the same unit of work as the
- * wallet: all three are committed together or not at all.
+ * `PROCESSED`, its `CREDIT` ledger entry, and the `WagerTransactionProcessed`
+ * and `WalletBalanceChanged` events in the outbox — in the same unit of work as
+ * the wallet: all of it is committed together or not at all.
  *
  * @packageDocumentation
  */
+import type { OutboxRepositories } from '../../messaging/application/outbox-repository.ts';
+import { OutboxMessage } from '../../messaging/domain/outbox-message.ts';
 import { hashPayload } from '../../shared/application/payload-hash.ts';
 import type { UnitOfWork } from '../../shared/application/unit-of-work.ts';
 import { Money, type MoneyProps } from '../../shared/domain/money.ts';
 import type { WageringRepositories } from '../../wagering/application/wager-transaction-repository.ts';
 import { WagerTransaction, WagerTransactionKind } from '../../wagering/domain/wager-transaction.ts';
+import { WagerTransactionProcessed } from '../../wagering/domain/wager-transaction-events.ts';
+import { WalletBalanceChanged } from '../domain/wallet-balance-changed.ts';
 import { Wallet } from '../domain/wallet.ts';
 import type { WalletRepositories } from './wallet-repository.ts';
 import { DuplicateWalletError, WalletAlreadyExistsError } from './wallet-errors.ts';
@@ -28,7 +33,7 @@ const OPENING_ROUND_AND_GAME = 'opening';
 
 export class CreateWallet {
   constructor(
-    private readonly unitOfWork: UnitOfWork<WalletRepositories & WageringRepositories>,
+    private readonly unitOfWork: UnitOfWork<WalletRepositories & WageringRepositories & OutboxRepositories>,
     private readonly generateId: () => string,
   ) {}
 
@@ -49,14 +54,20 @@ export class CreateWallet {
     const correlationId = command.correlationId ?? this.generateId();
 
     try {
-      return await this.unitOfWork.run(async ({ wallets, ledger, transactions }) => {
+      return await this.unitOfWork.run(async ({ wallets, ledger, transactions, outbox }) => {
         const existing = await wallets.findByPlayerAndCurrency(wallet.playerId, wallet.currency);
         if (existing) throw new WalletAlreadyExistsError(existing.id);
         wallets.add(wallet);
         if (!wallet.balance.isZero()) {
           const opening = this.openingOf(wallet, correlationId);
+          const entry = wallet.openingEntry({ entryId: this.generateId(), transactionId: opening.id });
           transactions.add(opening);
-          ledger.add(wallet.openingEntry({ entryId: this.generateId(), transactionId: opening.id }));
+          ledger.add(entry);
+          const context = { correlationId, causationId: opening.id };
+          const processed = WagerTransactionProcessed.from(opening, context, { eventId: this.generateId() });
+          const changed = WalletBalanceChanged.from(wallet, entry, context, { eventId: this.generateId() });
+          outbox.add(OutboxMessage.enqueue(processed));
+          outbox.add(OutboxMessage.enqueue(changed));
         }
         return wallet;
       });
