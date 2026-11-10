@@ -58,7 +58,7 @@ todos os módulos para montá-los, e que por isso não cabe em nenhum deles.
   erros do banco e a tradução deles para os erros de cada módulo, e o
   `FaultInjector` ligado à transação SQL;
 - `http/` — o filtro de erros, que traduz os erros de todos os módulos nas
-  respostas HTTP e reporta as recusas à auditoria das submissões não admitidas.
+  respostas HTTP e reporta as submissões não admitidas à auditoria.
 
 Colocá-los em `shared/` faria `shared` depender de `wallet` (e, depois, de
 `wagering` e `messaging`), invertendo a direção da dependência: `shared` é a base
@@ -301,7 +301,8 @@ recursivamente, sem espaços, UTF-8 — com os campos de negócio: `providerId`,
 `money` (`amount`, `currency`) e `referenceExternalTransactionId`, este omitido
 quando ausente (nunca `null`). Ficam de fora a chave de idempotência, `messageId`,
 `type`, `occurredAt` e headers: o reenvio pelo outro canal dá o mesmo hash e é
-replay. O hash é calculado sobre o comando já validado; campo desconhecido no corpo
+replay. O hash é calculado sobre o comando já validado, com o `walletId`
+normalizado em minúsculas (UUID não diferencia caixa); campo desconhecido no corpo
 é 400, para que dois payloads diferentes nunca compartilhem hash. Uma única função,
 comum às duas entradas.
 
@@ -314,19 +315,19 @@ fila, `MESSAGE_ID_CONFLICT`. Colunas: `provider_id`, `idempotency_key`,
 `external_transaction_id`, `payload_hash`, código de falha, canal, `message_id`
 (quando houver), `correlation_id` e `received_at` — o que der para
 extrair, já que um payload inválido pode não ter chave. O insert roda numa unidade
-de trabalho própria, no ponto da recusa; sem unicidade (cada tentativa é uma linha).
+de trabalho própria, no ponto em que a submissão deixa de ser admitida; sem unicidade (cada tentativa é uma linha).
 Replays não entram: são métrica.
 
-**No HTTP, o ponto da recusa é o filtro global de erros:** é o único por onde passa
-toda recusa — o JSON malformado nem chega ao controller. Antes de responder, ele
-reporta a recusa à auditoria do endpoint de submissão
+**No HTTP, esse ponto é o filtro global de erros:** é o único por onde passa toda
+submissão não admitida — o JSON malformado nem chega ao controller. Antes de
+responder, ele a reporta à auditoria do endpoint de submissão
 (`RejectedSubmissionAudit`), que grava só as submissões não admitidas de
 `POST /wagering/transactions`: `provider_id` e `external_transaction_id` do corpo,
 quando é um objeto e os traz como texto; `idempotency_key` e `correlation_id` dos
-headers; `payload_hash` quando a recusa veio depois do hash (`OPENING`, conflitos,
+headers; `payload_hash` quando a não admissão veio depois do hash (`OPENING`, conflitos,
 carteira inexistente). A resposta não muda. A auditoria é de melhor esforço: se o
-insert falhar, o erro é logado e a recusa é respondida igual. As recusas da criação
-de carteira e das consultas não entram.
+insert falhar, o erro é logado e a resposta sai igual. As submissões não admitidas
+da criação de carteira e das consultas não entram.
 
 Com isso, `wager_transactions.wallet_id` mantém a FK `NOT NULL`: a carteira
 inexistente responde `WALLET_NOT_FOUND` (HTTP 422), sem evento e sem
@@ -499,7 +500,12 @@ falhar, a redelivery é reconhecida pelo inbox).
   (`PublishOutbox`, um único `UPDATE … WHERE id IN (SELECT … FOR UPDATE SKIP LOCKED
   LIMIT 10) RETURNING id`), envio fora de transação, e gravação do desfecho de cada
   item (`published_at` ou `scheduleRetry`). Um lote que nem chega ao SQS (fila
-  inexistente, SQS fora) reagenda todos os itens.
+  inexistente, SQS fora) reagenda todos os itens. Todo envio que falha gera um log
+  `warn` com o motivo — o erro do lote inteiro, ou o `Code`/`Message` de cada item
+  recusado —, para que uma fila mal configurada não fique invisível.
+- **Parada:** em `beforeApplicationShutdown` o publicador para de reivindicar e
+  espera o ciclo em andamento, antes dos ganchos de `onApplicationShutdown` que
+  fecham o ORM e o cliente SQS.
 - **Configuração por ambiente:** `OUTBOX_PUBLISHER_ENABLED` (padrão `true`),
   `OUTBOX_POLL_INTERVAL_MS` (500), `OUTBOX_LEASE_MS` (30000),
   `OUTBOX_RETRY_BASE_MS` (1000), `OUTBOX_RETRY_MAX_MS` (300000),
@@ -647,4 +653,4 @@ Keycloak.
 - Saldo acumulado além de `numeric(19,2)` vira `FAILED`
   (`INFRA_INVARIANT_VIOLATION`), não rejeição — inalcançável com o teto de entrada.
 - A auditoria das submissões não admitidas é de melhor esforço: com o banco fora do
-  ar, a recusa é respondida igual e a linha se perde (o erro é logado).
+  ar, a resposta sai igual e a linha se perde (o erro é logado).
