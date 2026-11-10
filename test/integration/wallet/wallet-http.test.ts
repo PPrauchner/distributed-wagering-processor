@@ -132,6 +132,13 @@ describe('POST /wallets', () => {
     expect(await response.json()).toEqual({ failureCode: 'INVALID_PAYLOAD', message: expect.any(String) });
   });
 
+  test('a body over the size limit is a client error that keeps its 4xx status', async () => {
+    const response = await postWallet({ playerId: 'p'.repeat(200_000), initialBalance: zeroBrl });
+
+    expect(response.status).toBe(413);
+    expect(await response.json()).toEqual({ failureCode: 'INVALID_PAYLOAD', message: expect.any(String) });
+  });
+
   test('a non-UUID player id up to 255 characters is accepted', async () => {
     const response = await postWallet({ playerId: `player-${Bun.randomUUIDv7()}`, initialBalance: zeroBrl });
 

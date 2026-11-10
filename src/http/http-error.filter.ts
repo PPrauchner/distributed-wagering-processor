@@ -60,9 +60,11 @@ export class HttpErrorFilter implements ExceptionFilter {
     }
     if (error instanceof WalletNotFoundError) return notFound(error.message);
     if (error instanceof HttpException) {
-      // Framework errors: malformed JSON (400) and unknown routes (404).
-      if (error.getStatus() === HttpStatus.BAD_REQUEST) return invalidPayload(error.message);
-      if (error.getStatus() === HttpStatus.NOT_FOUND) return notFound(error.message);
+      // Framework errors: malformed JSON (400), unknown routes (404), and any
+      // other client error (e.g. 413 body too large) keeps its own 4xx status.
+      const status = error.getStatus();
+      if (status === HttpStatus.NOT_FOUND) return notFound(error.message);
+      if (isClientError(status)) return invalidPayload(error.message, status);
     }
     this.logger.error(error);
     return {
@@ -72,8 +74,12 @@ export class HttpErrorFilter implements ExceptionFilter {
   }
 }
 
-function invalidPayload(message: string): ErrorResponse {
-  return { status: HttpStatus.BAD_REQUEST, body: { failureCode: 'INVALID_PAYLOAD', message } };
+function invalidPayload(message: string, status: number = HttpStatus.BAD_REQUEST): ErrorResponse {
+  return { status, body: { failureCode: 'INVALID_PAYLOAD', message } };
+}
+
+function isClientError(status: number): boolean {
+  return status >= 400 && status < 500;
 }
 
 function notFound(message: string): ErrorResponse {
