@@ -62,6 +62,7 @@ const ALL_MIGRATIONS = [
   'Migration0002WagerTransactions',
   'Migration0003WalletLedger',
   'Migration0004WalletIdentity',
+  'Migration0005WagerTransactionInvariants',
 ];
 const TABLES = ['wallets', 'wager_transactions', 'wallet_ledger_entries'];
 

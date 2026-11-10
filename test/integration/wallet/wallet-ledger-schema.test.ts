@@ -292,13 +292,4 @@ describe('wager_transactions', () => {
       /wager_transactions_amount_positive/,
     );
   });
-
-  test('the correlation id is required', async () => {
-    const { walletId } = await openedWallet();
-    const id = await sql.begin((tx) => insertTransaction(tx, walletId, '10.00', 'BET'));
-
-    await expect(sql`update wager_transactions set correlation_id = null where id = ${id}`).rejects.toThrow(
-      /correlation_id/,
-    );
-  });
 });

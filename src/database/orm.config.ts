@@ -14,6 +14,7 @@ import { Migration0001Wallets } from '../wallet/infrastructure/migrations/0001-w
 import { Migration0002WagerTransactions } from '../wagering/infrastructure/migrations/0002-wager-transactions.ts';
 import { Migration0003WalletLedger } from '../wallet/infrastructure/migrations/0003-wallet-ledger.ts';
 import { Migration0004WalletIdentity } from '../wallet/infrastructure/migrations/0004-wallet-identity.ts';
+import { Migration0005WagerTransactionInvariants } from '../wagering/infrastructure/migrations/0005-wager-transaction-invariants.ts';
 
 /**
  * @param databaseUrl - PostgreSQL connection URL.
@@ -30,6 +31,7 @@ export function createOrmConfig(databaseUrl: string): Options {
         { name: 'Migration0002WagerTransactions', class: Migration0002WagerTransactions },
         { name: 'Migration0003WalletLedger', class: Migration0003WalletLedger },
         { name: 'Migration0004WalletIdentity', class: Migration0004WalletIdentity },
+        { name: 'Migration0005WagerTransactionInvariants', class: Migration0005WagerTransactionInvariants },
       ],
       // Hand-written migrations; the snapshot only serves automatic diffs.
       snapshot: false,
