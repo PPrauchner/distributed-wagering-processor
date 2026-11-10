@@ -6,7 +6,7 @@
  *
  * @packageDocumentation
  */
-import { Logger, type OnApplicationBootstrap, type OnApplicationShutdown } from '@nestjs/common';
+import { Logger, type BeforeApplicationShutdown, type OnApplicationBootstrap } from '@nestjs/common';
 import { OUTBOX_BATCH_SIZE, type PublishOutbox } from '../application/publish-outbox.ts';
 
 export interface OutboxPublisherWorkerOptions {
@@ -14,7 +14,7 @@ export interface OutboxPublisherWorkerOptions {
   pollIntervalMs: number;
 }
 
-export class OutboxPublisherWorker implements OnApplicationBootstrap, OnApplicationShutdown {
+export class OutboxPublisherWorker implements OnApplicationBootstrap, BeforeApplicationShutdown {
   private readonly logger = new Logger('OutboxPublisher');
   private running = false;
   private loop: Promise<void> | undefined;
@@ -31,7 +31,8 @@ export class OutboxPublisherWorker implements OnApplicationBootstrap, OnApplicat
     this.loop = this.run();
   }
 
-  async onApplicationShutdown(): Promise<void> {
+  // Before the shutdown hooks, where the ORM closes: the cycle in flight ends on an open pool.
+  async beforeApplicationShutdown(): Promise<void> {
     this.running = false;
     this.wake?.();
     await this.loop;
@@ -45,7 +46,8 @@ export class OutboxPublisherWorker implements OnApplicationBootstrap, OnApplicat
       } catch (error) {
         this.logger.warn(`outbox publication cycle failed: ${error instanceof Error ? error.message : String(error)}`);
       }
-      if (claimed < OUTBOX_BATCH_SIZE) await this.pause();
+      // A shutdown asked during the cycle does not wait out the poll interval.
+      if (this.running && claimed < OUTBOX_BATCH_SIZE) await this.pause();
     }
   }
 
