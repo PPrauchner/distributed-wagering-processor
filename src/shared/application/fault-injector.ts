@@ -16,8 +16,20 @@ export enum FaultPoint {
   InvariantViolationBeforeCommit = 'invariant-violation-before-commit',
   /** Reserved for the queue consumer: after the commit, before the `ack`. */
   CrashAfterCommit = 'crash-after-commit',
-  /** Reserved for the outbox publisher: after the send, before `published_at`. */
+  /**
+   * The outbox publisher dies after the send, before `published_at`: the lease
+   * expires and another instance resends the same `eventId`.
+   */
   CrashAfterSend = 'crash-after-send',
+}
+
+/** The process "died" at a crash point: what came after it never ran. */
+export class SimulatedCrashError extends Error {
+  override readonly name = 'SimulatedCrashError';
+
+  constructor(readonly point: FaultPoint) {
+    super(`simulated crash at ${point}`);
+  }
 }
 
 /** What a fault point may need to know about where it fires. */
