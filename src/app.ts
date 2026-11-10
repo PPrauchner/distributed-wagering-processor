@@ -18,7 +18,7 @@ class AppModule {
   static forConfig(config: AppConfig): DynamicModule {
     return {
       module: AppModule,
-      imports: [DatabaseModule.forRoot(config.databaseUrl), WalletModule, WageringModule],
+      imports: [DatabaseModule.forRoot(config), WalletModule, WageringModule],
     };
   }
 }
