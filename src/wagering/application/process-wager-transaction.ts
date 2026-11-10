@@ -211,7 +211,8 @@ export class ProcessWagerTransaction {
       providerId: command.providerId,
       externalTransactionId: command.externalTransactionId,
       playerId: command.playerId,
-      walletId: command.walletId,
+      // A UUID is case-insensitive: one spelling, so the hash and the events agree with the database.
+      walletId: command.walletId.toLowerCase(),
       roundId: command.roundId,
       gameId: command.gameId,
       kind: command.kind as WagerTransactionKind,
