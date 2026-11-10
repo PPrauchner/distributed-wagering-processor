@@ -1,0 +1,7 @@
+.git
+.claude
+node_modules
+docs
+spike
+test
+*.md

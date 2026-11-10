@@ -24,15 +24,22 @@ está em `docs/Desafio.md`. Ele é a especificação: em dúvida, vale o que est
 
 ```bash
 bun install --frozen-lockfile   # dependências
-docker compose up -d --wait     # PostgreSQL (127.0.0.1:55432) e LocalStack (:4566)
+docker compose up -d --wait     # PostgreSQL (127.0.0.1:55432), LocalStack (:4566),
+                                # migrations (serviço migrate) e app (:3000)
+docker compose up -d --wait --build   # idem, reconstruindo a imagem do app
 bun run typecheck               # tsc --noEmit (TypeScript 6.0)
+bun run test                    # unit + integration (exige o Compose de pé)
+bun run test:unit               # só domínio, sem I/O
+bun run test:integration        # app em processo contra PostgreSQL real; recria o
+                                # banco <db>_test a cada execução
+bun run db:migrate up|down      # migrations por script Bun, sem o CLI do MikroORM
+bun src/main.ts                 # app local, fora do Compose (PORT, DATABASE_URL)
 bun run spike                   # testes do spike do ADR 0001, contra o banco real
 bun run spike:migrate up|down   # migrations do spike, sem o CLI do MikroORM
 ```
 
 A conexão com o banco usa `127.0.0.1`, nunca `localhost` (ver ADR 0001). Os demais
-comandos (dev, testes de unidade/integração/concorrência, `test:load`) entram aqui
-quando forem criados.
+comandos (testes de concorrência, `test:load`) entram aqui quando forem criados.
 
 ## Estrutura
 
@@ -41,6 +48,11 @@ quando forem criados.
 `application/` (use cases e portas), `infrastructure/` (MikroORM, SQS, migrations)
 e `interface/` (controllers HTTP e handlers da fila). A dependência aponta só para
 dentro.
+
+Fora dos módulos fica só a raiz de composição — `main.ts`, `app.ts`, `config.ts`,
+`database/` (MikroORM, `UnitOfWork`, migrations, tradução de erros do banco) e
+`http/` (filtro de erros) —, que importa os módulos e nunca é importada por eles.
+Ver `ARCHITECTURE.md` § Organização do código.
 
 Entregáveis exigidos na raiz: `README.md` (setup e comandos) e `ARCHITECTURE.md`
 (decisões, trade-offs, limitações).
