@@ -293,6 +293,18 @@ describe('idempotency', () => {
     expect(await debits(wallet.id)).toBe(2);
   });
 
+  test('the walletId is case-insensitive: the same submission in upper case replays the original', async () => {
+    const wallet = await createWallet('100.00');
+    const body = betOn(wallet, { walletId: wallet.id.toUpperCase() });
+    const original = await readJson(await submit(body));
+
+    const response = await submit({ ...body, walletId: wallet.id });
+
+    expect(response.status).toBe(200);
+    expect(await readJson(response)).toEqual({ ...original, idempotentReplay: true });
+    expect(await debits(wallet.id)).toBe(1);
+  });
+
   test('a rejection replays as a rejection, with the balance it observed', async () => {
     const wallet = await createWallet('10.00');
     const body = betOn(wallet);

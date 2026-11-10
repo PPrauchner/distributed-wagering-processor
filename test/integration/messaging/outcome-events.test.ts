@@ -189,6 +189,16 @@ describe('the BET', () => {
     });
   });
 
+  test('a walletId sent in upper case: every event carries the wallet in lower case', async () => {
+    const wallet = await createWallet('100.00');
+
+    const result = await submit({ ...betOn(wallet), walletId: wallet.id.toUpperCase() });
+
+    const rows = (await outboxOf(wallet.id)).filter((row) => row.payload.causationId === result.transactionId);
+    expect(rows.map((row) => row.event_type).sort()).toEqual(['WagerTransactionProcessed', 'WalletBalanceChanged']);
+    for (const row of rows) expect(row.payload.data).toMatchObject({ walletId: wallet.id });
+  });
+
   test('rejected by a business rule: only WagerTransactionRejected', async () => {
     const wallet = await createWallet('10.00');
 
