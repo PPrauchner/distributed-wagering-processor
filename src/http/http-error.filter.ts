@@ -12,6 +12,7 @@ import {
   type ArgumentsHost,
   type ExceptionFilter,
 } from '@nestjs/common';
+import { PermanentFailureError, TransientFailureError } from '../shared/application/infrastructure-failures.ts';
 import { FailureCode } from '../shared/domain/failure-code.ts';
 import { CurrencyMismatchError, InvalidMoneyError } from '../shared/domain/money.ts';
 import { InvalidPayloadError } from '../shared/interface/invalid-payload.error.ts';
@@ -29,12 +30,19 @@ import { WalletAlreadyExistsError, WalletNotFoundError } from '../wallet/applica
 
 // The slice of the platform response this filter uses; keeps it off Express types.
 interface HttpResponse {
+  setHeader(name: string, value: string): void;
   status(code: number): { json(body: unknown): void };
 }
 
 interface ErrorResponse {
   status: number;
   body: { failureCode: string; message: string; walletId?: string };
+  headers?: Record<string, string>;
+}
+
+export interface HttpErrorFilterOptions {
+  /** The `Retry-After` of a transient failure's 503, in seconds. */
+  retryAfterSeconds: number;
 }
 
 const INVALID_PAYLOAD_ERRORS = [
@@ -59,12 +67,31 @@ const REFUSED_SUBMISSIONS: [new (...args: never[]) => Error, number, FailureCode
 export class HttpErrorFilter implements ExceptionFilter {
   private readonly logger = new Logger(HttpErrorFilter.name);
 
+  constructor(private readonly options: HttpErrorFilterOptions) {}
+
   catch(error: unknown, host: ArgumentsHost): void {
-    const { status, body } = this.toResponse(error);
-    host.switchToHttp().getResponse<HttpResponse>().status(status).json(body);
+    const { status, body, headers = {} } = this.toResponse(error);
+    const response = host.switchToHttp().getResponse<HttpResponse>();
+    for (const [name, value] of Object.entries(headers)) response.setHeader(name, value);
+    response.status(status).json(body);
   }
 
   private toResponse(error: unknown): ErrorResponse {
+    if (error instanceof TransientFailureError) {
+      this.logger.warn(`${error.failureCode}: ${String(error.cause)}`);
+      return {
+        status: HttpStatus.SERVICE_UNAVAILABLE,
+        body: { failureCode: error.failureCode, message: error.message },
+        headers: { 'Retry-After': String(this.options.retryAfterSeconds) },
+      };
+    }
+    if (error instanceof PermanentFailureError) {
+      this.logger.error(error);
+      return {
+        status: HttpStatus.INTERNAL_SERVER_ERROR,
+        body: { failureCode: error.failureCode, message: error.message },
+      };
+    }
     if (INVALID_PAYLOAD_ERRORS.some((type) => error instanceof type)) {
       return invalidPayload((error as Error).message);
     }

@@ -31,7 +31,7 @@ export async function createApp(config: AppConfig): Promise<INestApplication> {
   const app = await NestFactory.create(AppModule.forConfig(config), {
     logger: ['error', 'warn', 'log'],
   });
-  app.useGlobalFilters(new HttpErrorFilter());
+  app.useGlobalFilters(new HttpErrorFilter({ retryAfterSeconds: config.retryAfterSeconds }));
   app.enableShutdownHooks();
   return app;
 }
