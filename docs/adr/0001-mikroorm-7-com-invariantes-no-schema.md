@@ -80,7 +80,11 @@ repetidas:
   objeto `Decimal` —, e a aritmética converte para centavos em `bigint`. A moeda
   repetida (três vezes no lançamento) é amarrada no schema: um `CHECK` exige que
   sejam iguais, e uma FK composta `(wallet_id, currency) → wallets(id, currency)`
-  exige que a moeda do lançamento seja a da carteira. A alternativa — valor e moeda
+  exige que a moeda do lançamento seja a da carteira. A carteira repete a moeda do
+  mesmo jeito (`currency` e `balance_currency`), e um `CHECK` as amarra; a FK
+  composta aponta para `currency`. A FK de moeda fica só no lançamento: a transação
+  de aposta precisa poder chegar com outra moeda para ser persistida como `REJECTED`
+  (`CURRENCY_MISMATCH`). A alternativa — valor e moeda
   em colunas soltas, com o `Money` montado no getter — faria o domínio guardar
   primitivos por causa do ORM.
 - Estado do domínio usa campos `private` do TypeScript, não `#private` do
@@ -93,7 +97,8 @@ repetidas:
   estado privado, se inevitável, fica no repositório com coerção comentada.
 - Consultas de fila (reivindicar eventos da outbox, transações aguardando
   referência) são SQL explícito no repositório, com `FOR UPDATE SKIP LOCKED`, para
-  que publishers e workers concorrentes não peguem a mesma linha.
+  que publishers e workers concorrentes não peguem a mesma linha. A reivindicação é
+  um lease numa transação SQL curta e separada — ver o ADR 0002.
 - TypeScript fixado em 6.0. Aqui ele só checa tipos (`noEmit`): os metadados de
   decorators que o NestJS usa em runtime vêm do transpilador do Bun. O 7.0 nativo é
   uma reescrita recente, e trocar de verificador perto da entrega arrisca diferenças
@@ -104,8 +109,12 @@ repetidas:
   por acaso e faz um teste de concorrência passar sem disputa real.
 - **Um único classificador de erros do banco**, na infraestrutura, lê o SQLSTATE e o
   nome da constraint e devolve a categoria do §10: `40001`, `40P01`, `55P03` e queda
-  de conexão são transitórios; `23505` nas constraints de idempotência e inbox é
-  duplicata (replay ou conflito), nunca falha; violação de `CHECK` de saldo, FK de
+  de conexão são transitórios. O `23505` segue um critério: unicidade cuja disputa
+  escapa do lock da carteira é desfecho legítimo — carteira por jogador e moeda e
+  id externo por provedor são conflito, chave de idempotência é replay ou conflito
+  (relê e compara o hash), inbox é redelivery (`ack` sem efeito); unicidade
+  serializada pelo lock — uma reversão por referência, um lançamento por transação
+  e carteira — é bug, permanente. Violação de `CHECK` de saldo ou de moeda, FK de
   moeda ou trigger do livro-razão é permanente (`FAILED`, com alerta). `REJECTED`
   vem só do domínio, que verifica saldo e moeda antes, sob lock — se o schema
   dispara, o domínio deixou passar, e isso é bug, não regra de negócio. Cada caso
