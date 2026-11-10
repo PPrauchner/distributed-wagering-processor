@@ -1,31 +1,44 @@
 /**
- * Translates database errors into application errors. Today it knows one case,
- * the one-wallet-per-player-and-currency uniqueness; it is the seam the single
- * database error classifier (ADR 0001) will grow from.
+ * Translates database errors into application errors, by the category the
+ * single classifier gives them. Errors raised by the application itself pass
+ * through untouched.
  *
  * @packageDocumentation
  */
-import { UniqueConstraintViolationException } from '@mikro-orm/core';
+import { PermanentFailureError, TransientFailureError } from '../shared/application/infrastructure-failures.ts';
+import { FailureCode } from '../shared/domain/failure-code.ts';
+import {
+  DuplicateExternalIdError,
+  DuplicateIdempotencyKeyError,
+} from '../wagering/application/wagering-errors.ts';
 import { DuplicateWalletError } from '../wallet/application/wallet-errors.ts';
-
-const WALLET_PER_PLAYER_AND_CURRENCY = 'wallets_player_currency_unique';
+import { classifyDatabaseError, isDatabaseError } from './classify-database-error.ts';
 
 /**
  * @param error - Whatever the unit of work threw.
- * @returns The application error it means, or the error itself when unknown.
+ * @returns The application error it means, or the error itself when it did not
+ *   come from the database or has no application meaning yet.
  */
 export function translateDatabaseError(error: unknown): unknown {
-  if (
-    error instanceof UniqueConstraintViolationException &&
-    violatedConstraint(error) === WALLET_PER_PLAYER_AND_CURRENCY
-  ) {
-    return new DuplicateWalletError(error.message);
+  if (!isDatabaseError(error)) return error;
+  const classified = classifyDatabaseError(error);
+  const message = (error as Error).message;
+  switch (classified.category) {
+    case 'transient':
+      return new TransientFailureError(classified.failureCode, { cause: error });
+    case 'permanent':
+      return new PermanentFailureError(classified.failureCode, { cause: error });
+    case 'conflict':
+      return classified.failureCode === FailureCode.WalletAlreadyExists
+        ? new DuplicateWalletError(message)
+        : new DuplicateExternalIdError(message);
+    case 'reread':
+      // The wallet creation key arrives with the idempotent-creation slice.
+      return classified.target === 'wager-transaction-idempotency-key'
+        ? new DuplicateIdempotencyKeyError(message)
+        : error;
+    case 'redelivery':
+      // The inbox arrives with the queue consumer.
+      return error;
   }
-  return error;
-}
-
-// The driver error copies the PostgreSQL error's own fields, `constraint` included.
-function violatedConstraint(error: Error): string | undefined {
-  const constraint: unknown = Reflect.get(error, 'constraint');
-  return typeof constraint === 'string' ? constraint : undefined;
 }

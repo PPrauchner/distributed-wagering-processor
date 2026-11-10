@@ -13,7 +13,9 @@ import { loadConfig } from '../../../src/config.ts';
 import { createOrmConfig } from '../../../src/database/orm.config.ts';
 import { MikroOrmUnitOfWork, type Repositories } from '../../../src/database/mikro-orm-unit-of-work.ts';
 import type { UnitOfWork } from '../../../src/shared/application/unit-of-work.ts';
+import { PermanentFailureError } from '../../../src/shared/application/infrastructure-failures.ts';
 import { hashPayload } from '../../../src/shared/application/payload-hash.ts';
+import { FailureCode } from '../../../src/shared/domain/failure-code.ts';
 import { Money } from '../../../src/shared/domain/money.ts';
 import { InvalidMoneyError } from '../../../src/shared/domain/money.ts';
 import { Wallet } from '../../../src/wallet/domain/wallet.ts';
@@ -197,7 +199,11 @@ describe('CreateWallet', () => {
       initialBalance: { amount: '100.00', currency: 'BRL' },
     });
 
-    await expect(attempt).rejects.toThrow(/wallet_ledger_entries_pkey/);
+    // The primary key of the entry is no documented constraint: unexpected.
+    const error = await attempt.catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(PermanentFailureError);
+    expect((error as PermanentFailureError).failureCode).toBe(FailureCode.InfraUnexpected);
+    expect(String((error as Error).cause)).toContain('wallet_ledger_entries_pkey');
     const [row] = await sql`
       select (select count(*) from wallets where player_id = ${playerId})::int as wallets,
              (select count(*) from wager_transactions where player_id = ${playerId})::int as transactions,
