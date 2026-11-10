@@ -1,0 +1,30 @@
+/**
+ * Wallet endpoints: `POST /wallets` and `GET /wallets/:id`. Errors are turned
+ * into responses by the global HTTP error filter.
+ *
+ * @packageDocumentation
+ */
+import { Body, Controller, Get, HttpCode, Param, Post } from '@nestjs/common';
+import { CreateWallet } from '../application/create-wallet.ts';
+import { GetWallet } from '../application/get-wallet.ts';
+import { parseCreateWalletRequest, toWalletResponse, type WalletResponse } from './wallet.http.ts';
+
+@Controller('wallets')
+export class WalletController {
+  constructor(
+    private readonly createWallet: CreateWallet,
+    private readonly getWallet: GetWallet,
+  ) {}
+
+  @Post()
+  @HttpCode(201)
+  async create(@Body() body: unknown): Promise<WalletResponse> {
+    const wallet = await this.createWallet.execute(parseCreateWalletRequest(body));
+    return toWalletResponse(wallet);
+  }
+
+  @Get(':id')
+  async show(@Param('id') id: string): Promise<WalletResponse> {
+    return toWalletResponse(await this.getWallet.execute(id));
+  }
+}
