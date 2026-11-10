@@ -238,7 +238,8 @@ Com mais de uma violação, prevalece a primeira, na mesma ordem nos dois canais
 8. Domínio: `WALLET_PLAYER_MISMATCH`; `CURRENCY_MISMATCH`; referência (ausente ou
    ela mesma pendente → espera; `REFERENCE_NOT_PROCESSED`;
    `REFERENCE_KIND_NOT_ALLOWED`; `REFERENCE_MISMATCH`, citando o primeiro campo
-   divergente na ordem provedor, jogador, carteira, moeda, rodada;
+   divergente na ordem jogador, carteira, moeda, rodada — o provedor não diverge:
+   a referência é buscada pelo provedor da própria submissão;
    `REFERENCE_AMOUNT_MISMATCH`, exceto no `WIN`; `REFERENCE_ALREADY_REVERSED`, só na
    transação dependente); saldo (`INSUFFICIENT_FUNDS` ou
    `REVERSAL_INSUFFICIENT_FUNDS`).
@@ -345,7 +346,7 @@ Enum fechado em `shared/domain`.
 | `REFERENCE_NOT_FOUND` | rejeição (422) | a referência não chegou em 5 min; verifica o próprio envio |
 | `REFERENCE_NOT_PROCESSED` | rejeição (422) | desiste; a referência foi rejeitada ou falhou |
 | `REFERENCE_KIND_NOT_ALLOWED` | rejeição (422) | desiste; o tipo da referência não admite esta transação dependente |
-| `REFERENCE_MISMATCH` | rejeição (422) | corrige; provedor, jogador, carteira, moeda ou rodada divergem (campo no `message`) |
+| `REFERENCE_MISMATCH` | rejeição (422) | corrige; jogador, carteira, moeda ou rodada divergem (campo no `message`) |
 | `REFERENCE_AMOUNT_MISMATCH` | rejeição (422) | corrige o valor; reversão parcial não existe |
 | `REFERENCE_ALREADY_REVERSED` | rejeição (422) | desiste; a referência já foi desfeita |
 | `INVALID_PAYLOAD` | não admitida (400) | corrige o payload |
