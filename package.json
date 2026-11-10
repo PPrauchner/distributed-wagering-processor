@@ -6,6 +6,8 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test:unit": "bun test test/unit",
+    "test:integration": "bun test --preload ./test/integration/setup.ts test/integration",
+    "db:migrate": "bun src/database/migrate.ts",
     "spike": "bun test spike/",
     "spike:migrate": "bun spike/migrate.ts"
   },
