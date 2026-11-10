@@ -99,10 +99,10 @@ export class ProcessWagerTransaction {
    *   recorded for a permanent reason.
    */
   async execute(command: SubmitWagerTransactionCommand): Promise<WagerTransactionOutcome> {
-    const props = this.validated(command);
+    const { props, submitted } = this.validated(command);
 
     try {
-      return await this.settled(props, () => this.record(WagerTransaction.create(props)));
+      return await this.settled(props, () => this.record(submitted));
     } catch (error) {
       if (!(error instanceof PermanentFailureError)) throw error;
       // The SQL transaction rolled back: record the failure in a unit of work of its own.
@@ -188,9 +188,7 @@ export class ProcessWagerTransaction {
 
   /** The transaction a concurrent submission recorded under the key: replay or conflict. */
   private async readBack(props: CreateWagerTransactionProps): Promise<WagerTransactionOutcome> {
-    const earlier = await this.unitOfWork.run(({ transactions }) =>
-      findEarlier(transactions, WagerTransaction.create(props)),
-    );
+    const earlier = await this.unitOfWork.run(({ transactions }) => findEarlier(transactions, props));
     if (!earlier) throw new Error('unique violation reported, but no transaction found');
     return earlier;
   }
@@ -199,9 +197,13 @@ export class ProcessWagerTransaction {
    * Steps 2 and 3 of the order: the payload's shape, then its hash.
    *
    * @returns The transaction's creation props, with its id and correlation id
-   *   fixed, so every attempt creates the same transaction.
+   *   fixed, so every attempt creates the same transaction, and the transaction
+   *   created from them for the first attempt.
    */
-  private validated(command: SubmitWagerTransactionCommand): CreateWagerTransactionProps {
+  private validated(command: SubmitWagerTransactionCommand): {
+    props: CreateWagerTransactionProps;
+    submitted: WagerTransaction;
+  } {
     assertIdentifiers(command);
     const money = Money.from(command.money);
     if (!KINDS.has(command.kind)) {
@@ -227,12 +229,18 @@ export class ProcessWagerTransaction {
       correlationId: command.correlationId ?? this.generateId(),
     };
     // `create` enforces the rules of the kind: amount floor and reference.
-    WagerTransaction.create(props);
+    const submitted = WagerTransaction.create(props);
     if (props.kind === WagerTransactionKind.Opening) throw new InternalKindNotAllowedError(props.kind, props.payloadHash);
     if (props.kind !== WagerTransactionKind.Bet) throw new UnsupportedKindError(props.kind);
-    return props;
+    return { props, submitted };
   }
 }
+
+/** What identifies a submission to its provider, and its fingerprint. */
+type SubmissionKeys = Pick<
+  CreateWagerTransactionProps,
+  'providerId' | 'idempotencyKey' | 'externalTransactionId' | 'payloadHash'
+>;
 
 /**
  * Steps 4 and 5 of the order: the provider's key, then its external id.
@@ -242,7 +250,7 @@ export class ProcessWagerTransaction {
  */
 async function findEarlier(
   transactions: WagerTransactionRepository,
-  submitted: WagerTransaction,
+  submitted: SubmissionKeys,
 ): Promise<WagerTransactionOutcome | undefined> {
   const earlier =
     (await transactions.findByIdempotencyKey(submitted.providerId, submitted.idempotencyKey)) ??
