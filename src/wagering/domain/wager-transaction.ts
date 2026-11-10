@@ -6,6 +6,7 @@
  *
  * @packageDocumentation
  */
+import type { FailureCode } from '../../shared/domain/failure-code.ts';
 import type { Money } from '../../shared/domain/money.ts';
 
 export enum WagerTransactionKind {
@@ -25,9 +26,6 @@ export enum WagerTransactionStatus {
   Rejected = 'REJECTED',
   Failed = 'FAILED',
 }
-
-/** Stable, machine-readable reason of a rejection or failure. */
-export type FailureCode = string;
 
 export interface CreateWagerTransactionProps {
   id: string;
@@ -53,6 +51,14 @@ export interface ProcessedOutcome {
   balanceAfter: Money;
   walletVersionObserved: number;
   referenceTransactionId?: string;
+}
+
+/** What a rejection leaves on a transaction. */
+export interface RejectedOutcome {
+  code: FailureCode;
+  /** The wallet balance, untouched, read under lock — in the wallet's currency. */
+  balanceAfter: Money;
+  walletVersionObserved: number;
 }
 
 /** Raised when a transaction would be created breaking a rule of its kind. */
@@ -181,6 +187,45 @@ export class WagerTransaction {
     this._balanceAfter = outcome.balanceAfter;
     this._walletVersionObserved = outcome.walletVersionObserved;
     this._referenceTransactionId = outcome.referenceTransactionId;
+  }
+
+  /**
+   * A business rule refused the transaction; the wallet is untouched.
+   *
+   * @param outcome - The failure code, and the balance and wallet version observed.
+   * @throws {@link InvalidTransactionStateError} If the transaction is terminal.
+   */
+  reject(outcome: RejectedOutcome): void {
+    this.assertNotTerminal();
+    this._status = WagerTransactionStatus.Rejected;
+    this._failureCode = outcome.code;
+    this._balanceAfter = outcome.balanceAfter;
+    this._walletVersionObserved = outcome.walletVersionObserved;
+  }
+
+  /**
+   * A permanent error: auditable, with nothing observed.
+   *
+   * @param code - The failure code.
+   * @throws {@link InvalidTransactionStateError} If the transaction is terminal.
+   */
+  fail(code: FailureCode): void {
+    this.assertNotTerminal();
+    this._status = WagerTransactionStatus.Failed;
+    this._failureCode = code;
+  }
+
+  /**
+   * The referenced transaction does not exist yet. Only leaves `PENDING`: a
+   * pending reference that keeps waiting is rescheduled, not transitioned.
+   *
+   * @throws {@link InvalidTransactionStateError} If the transaction is not `PENDING`.
+   */
+  markPendingReference(): void {
+    if (this._status !== WagerTransactionStatus.Pending) {
+      throw new InvalidTransactionStateError(`transaction ${this.id} is ${this._status}, not PENDING`);
+    }
+    this._status = WagerTransactionStatus.PendingReference;
   }
 
   isTerminal(): boolean {
