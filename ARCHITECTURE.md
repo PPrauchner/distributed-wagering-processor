@@ -125,8 +125,10 @@ Não há deadlock por uma regra de ordem: **o lock da carteira é o primeiro loc
 toda transação SQL que toca uma carteira**. Por isso os workers (referências
 pendentes e publicador da outbox) reivindicam itens com um **lease** numa transação
 SQL curta e separada (`FOR UPDATE SKIP LOCKED` + `next_attempt_at = now() + lease`,
-com commit) e processam cada item numa unidade de trabalho própria, que começa pela
-carteira. Worker morto: o lease expira e outra instância assume. Ver
+com commit). O worker de referências pendentes processa cada item numa unidade de
+trabalho própria, que começa pela carteira; **o publicador da outbox não trava a
+carteira** — nenhuma das suas transações SQL toca `wallets` (emenda do ADR 0002).
+Worker morto: o lease expira e outra instância assume. Ver
 [ADR 0002](docs/adr/0002-lock-pessimista-por-carteira.md).
 
 ## Invariantes no schema
@@ -137,7 +139,7 @@ carteira. Worker morto: o lease expira e outra instância assume. Ver
 | `wager_transactions` | `UNIQUE (provider_id, idempotency_key)`; `UNIQUE (provider_id, external_transaction_id)`; FK `wallet_id NOT NULL`; FK `reference_transaction_id` na própria tabela; índice único parcial da reversão; `CHECK`s de coerência (`REFUND`/`ROLLBACK` ⇒ referência externa preenchida, `BET`/`LOSS`/`OPENING` ⇒ nula, `WIN` livre; `PENDING_REFERENCE` só para `REFUND`, `ROLLBACK` e `WIN`; `PROCESSED` ⇔ `processed_at`; `REJECTED`/`FAILED` ⇔ `failure_code`; `PROCESSED`/`REJECTED` ⇔ `balance_after` e `wallet_version_observed` preenchidos; `status <> 'PENDING'`); `amount > 0`, exceto `LOSS` (`>= 0`); `correlation_id NOT NULL`; índice parcial `WHERE status = 'PENDING_REFERENCE'` |
 | `wallet_ledger_entries` | `UNIQUE (transaction_id, wallet_id)`; `UNIQUE (wallet_id, wallet_version)`; FK composta e `CHECK` de moeda; `amount > 0`; `CHECK` da aritmética (`balance_after = balance_before ± amount` pela `direction`, saldos `>= 0`) |
 | `inbox_messages` | PK `(consumer_name, message_id)` |
-| `outbox_messages` | `wallet_id NOT NULL` (o `MessageGroupId`); índice parcial `WHERE published_at IS NULL` em `next_attempt_at` |
+| `outbox_messages` | `wallet_id NOT NULL` (o `MessageGroupId`); índice parcial `WHERE published_at IS NULL` em `next_attempt_at`; `CHECK (attempts >= 0)`; sem FK |
 | `rejected_submissions` | append-only, sem FK nem unicidade (a PK é um UUID substituto); só `failure_code`, `channel` (`HTTP` ou `QUEUE`, por `CHECK`) e `received_at` obrigatórios — `correlation_id` e o resto anuláveis |
 
 **Triggers:**
@@ -492,7 +494,21 @@ falhar, a redelivery é reconhecida pelo inbox).
 - Polling a cada 500 ms, lotes de até 10, lease de 30 s. Falha → `scheduleRetry`
   com `min(1 s × 2^attempts, 5 min)` e jitter. **Sem limite de tentativas** —
   desistir perderia evento confirmado; a partir de 10 tentativas, métrica e log de
-  alerta.
+  alerta. Um lote cheio dispara o ciclo seguinte na hora, sem esperar o polling.
+- **Três passos, duas transações SQL curtas, nenhuma na carteira:** reivindicação
+  (`PublishOutbox`, um único `UPDATE … WHERE id IN (SELECT … FOR UPDATE SKIP LOCKED
+  LIMIT 10) RETURNING id`), envio fora de transação, e gravação do desfecho de cada
+  item (`published_at` ou `scheduleRetry`). Um lote que nem chega ao SQS (fila
+  inexistente, SQS fora) reagenda todos os itens.
+- **Configuração por ambiente:** `OUTBOX_PUBLISHER_ENABLED` (padrão `true`),
+  `OUTBOX_POLL_INTERVAL_MS` (500), `OUTBOX_LEASE_MS` (30000),
+  `OUTBOX_RETRY_BASE_MS` (1000), `OUTBOX_RETRY_MAX_MS` (300000),
+  `WAGERING_EVENTS_QUEUE` (`wagering-events.fifo`), `SQS_ENDPOINT`
+  (`http://127.0.0.1:4566`), `AWS_REGION` e credenciais (padrões do LocalStack).
+- **Filas na subida:** o Compose monta `localstack/init/ready.d/create-queues.sh`
+  no LocalStack, que cria `wager-transactions.fifo`, `wager-transactions-dlq.fifo`
+  (redrive com `maxReceiveCount` 6) e `wagering-events.fifo` (sem DLQ); o
+  healthcheck só passa com as filas criadas, e o app espera por ele.
 - **Outbox lag** = `now() − min(occurred_at)` das linhas não publicadas.
 
 ### Eventos de integração
@@ -583,9 +599,16 @@ Keycloak.
   desconhecido e `NODE_ENV=production` são recusados na partida). Pontos:
   `invariant-violation-before-commit` — dentro da unidade de trabalho, antes do
   commit, altera a transação de aposta terminal recém-gravada, que o trigger
-  recusa, para o erro verdadeiro passar pelo classificador —; e, reservados para o
-  consumidor e a outbox, `crash-after-commit` (depois do commit, antes do `ack`) e
-  `crash-after-send` (entre o envio e o `published_at`).
+  recusa, para o erro verdadeiro passar pelo classificador —; `crash-after-send` —
+  o publicador "morre" entre o envio e o `published_at`: lança
+  `SimulatedCrashError` antes de gravar, e a transação SQL da gravação desfaz —; e,
+  reservado para o consumidor, `crash-after-commit` (depois do commit, antes do
+  `ack`).
+- Os apps dos testes sobem sem publicador da outbox (`OUTBOX_PUBLISHER_ENABLED=false`
+  no preload); os testes do publicador ligam o seu, com fila própria. Como o banco
+  de teste é compartilhado entre os arquivos, um publicador de teste pode entregar
+  eventos de outros arquivos: as verificações olham os eventos do próprio teste, e
+  "desconhecido" quer dizer fora da outbox.
 - Todo teste de integração e de concorrência termina verificando que o saldo é igual
   ao saldo reconstruído e que a sequência de versões não tem buracos.
 - Sem `sleep` fixo: espera por condição com timeout.
