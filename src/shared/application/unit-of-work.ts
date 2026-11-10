@@ -5,6 +5,9 @@
  * @packageDocumentation
  */
 
+/** Injection token of the unit of work implementation. */
+export const UNIT_OF_WORK = Symbol('UnitOfWork');
+
 export interface UnitOfWork<TRepositories> {
   /**
    * Runs `work` inside a single SQL transaction, committed when it resolves and
