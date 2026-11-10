@@ -151,7 +151,7 @@ export class HttpErrorFilter implements ExceptionFilter {
     this.logger.error(error);
     return {
       status: HttpStatus.INTERNAL_SERVER_ERROR,
-      body: { failureCode: 'INTERNAL_ERROR', message: 'internal error' },
+      body: { failureCode: FailureCode.InfraUnexpected, message: 'internal error' },
     };
   }
 }
