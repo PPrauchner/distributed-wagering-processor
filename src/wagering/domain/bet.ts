@@ -10,6 +10,7 @@ import { FailureCode } from '../../shared/domain/failure-code.ts';
 import type { Wallet } from '../../wallet/domain/wallet.ts';
 import type { WalletLedgerEntry } from '../../wallet/domain/wallet-ledger-entry.ts';
 import { WagerTransactionKind, type WagerTransaction } from './wager-transaction.ts';
+import { rejectOn, walletRejectionOf } from './wallet-coherence.ts';
 
 /**
  * Settles a `PENDING` bet on its wallet: processed with a debit, or rejected
@@ -34,11 +35,7 @@ export function applyBet(
   }
   const rejection = rejectionOf(transaction, wallet);
   if (rejection !== undefined) {
-    transaction.reject({
-      code: rejection,
-      balanceAfter: wallet.balance,
-      walletVersionObserved: wallet.version,
-    });
+    rejectOn(transaction, wallet, { code: rejection });
     return undefined;
   }
   const entry = wallet.debit({ money: transaction.money, entryId: ids.entryId, transactionId: transaction.id });
@@ -51,8 +48,8 @@ export function applyBet(
 }
 
 function rejectionOf(transaction: WagerTransaction, wallet: Wallet): FailureCode | undefined {
-  if (transaction.playerId !== wallet.playerId) return FailureCode.WalletPlayerMismatch;
-  if (transaction.money.currency !== wallet.currency) return FailureCode.CurrencyMismatch;
+  const walletRejection = walletRejectionOf(transaction, wallet);
+  if (walletRejection !== undefined) return walletRejection;
   if (!wallet.canDebit(transaction.money)) return FailureCode.InsufficientFunds;
   return undefined;
 }

@@ -56,6 +56,8 @@ export interface ProcessedOutcome {
 /** What a rejection leaves on a transaction. */
 export interface RejectedOutcome {
   code: FailureCode;
+  /** What the code alone does not say — the divergent field of a `REFERENCE_MISMATCH`. */
+  message?: string;
   /** The wallet balance, untouched, read under lock — in the wallet's currency. */
   balanceAfter: Money;
   walletVersionObserved: number;
@@ -107,6 +109,7 @@ export class WagerTransaction {
     private _processedAt?: Date,
     private _balanceAfter?: Money,
     private _walletVersionObserved?: number,
+    private _failureMessage?: string,
   ) {}
 
   /**
@@ -162,6 +165,10 @@ export class WagerTransaction {
     return this._failureCode;
   }
 
+  get failureMessage(): string | undefined {
+    return this._failureMessage;
+  }
+
   get processedAt(): Date | undefined {
     return this._processedAt;
   }
@@ -199,6 +206,7 @@ export class WagerTransaction {
     this.assertNotTerminal();
     this._status = WagerTransactionStatus.Rejected;
     this._failureCode = outcome.code;
+    this._failureMessage = outcome.message;
     this._balanceAfter = outcome.balanceAfter;
     this._walletVersionObserved = outcome.walletVersionObserved;
   }
@@ -226,6 +234,11 @@ export class WagerTransaction {
       throw new InvalidTransactionStateError(`transaction ${this.id} is ${this._status}, not PENDING`);
     }
     this._status = WagerTransactionStatus.PendingReference;
+  }
+
+  /** Whether processing it moves the balance: every kind but the `LOSS`. */
+  affectsBalance(): boolean {
+    return this.kind !== WagerTransactionKind.Loss;
   }
 
   isTerminal(): boolean {

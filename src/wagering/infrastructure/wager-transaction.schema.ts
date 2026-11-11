@@ -43,5 +43,6 @@ export const WagerTransactionSchema = defineEntity({
     _processedAt: p.datetime().nullable().accessor('processedAt'),
     _balanceAfter: p.embedded(MoneySchema).prefix('balance_after_').nullable().accessor('balanceAfter'),
     _walletVersionObserved: p.integer().nullable().accessor('walletVersionObserved'),
+    _failureMessage: p.text().nullable().accessor('failureMessage'),
   },
 });

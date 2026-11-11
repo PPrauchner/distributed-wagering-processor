@@ -6,7 +6,8 @@
  * SQL transaction; the outbox publisher publishes them after the commit, never
  * this use case. Checks run in the documented
  * order, and the first violation decides (`ARCHITECTURE.md` § Ordem das
- * validações). This slice settles `BET`.
+ * validações). This slice settles `BET`, `WIN` and `LOSS`; a `WIN` citing a
+ * reference not there yet is recorded `PENDING_REFERENCE`, with no event.
  *
  * Error path (`ARCHITECTURE.md` § Classificação de falhas): a transient failure
  * records nothing and reaches the caller; a permanent one rolls the SQL
@@ -26,11 +27,14 @@ import type { Wallet } from '../../wallet/domain/wallet.ts';
 import { WalletBalanceChanged } from '../../wallet/domain/wallet-balance-changed.ts';
 import type { WalletLedgerEntry } from '../../wallet/domain/wallet-ledger-entry.ts';
 import { applyBet } from '../domain/bet.ts';
+import { applyLoss } from '../domain/loss.ts';
+import { applyWin } from '../domain/win.ts';
 import { WagerTransactionProcessed, WagerTransactionRejected } from '../domain/wager-transaction-events.ts';
 import {
   InvalidWagerTransactionError,
   WagerTransaction,
   WagerTransactionKind,
+  WagerTransactionStatus,
   type CreateWagerTransactionProps,
 } from '../domain/wager-transaction.ts';
 import { hashWagerPayload, type WagerPayload } from './wager-payload.ts';
@@ -70,6 +74,7 @@ export interface WagerTransactionOutcome {
 const MAX_IDENTIFIER_LENGTH = 255;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const KINDS = new Set<string>(Object.values(WagerTransactionKind));
+const SUPPORTED_KINDS = new Set([WagerTransactionKind.Bet, WagerTransactionKind.Win, WagerTransactionKind.Loss]);
 
 export class ProcessWagerTransaction {
   constructor(
@@ -81,8 +86,9 @@ export class ProcessWagerTransaction {
 
   /**
    * @param command - The submission, with its idempotency key already present.
-   * @returns The transaction it ended in — `PROCESSED`, `REJECTED` or, after a
-   *   permanent error, `FAILED` — new or replayed.
+   * @returns The transaction it ended in — `PROCESSED`, `REJECTED`,
+   *   `PENDING_REFERENCE` or, after a permanent error, `FAILED` — new or replayed;
+   *   a replay of a pending one answers its current status.
    * @throws {@link InvalidMoneyError} If the money is malformed.
    * @throws {@link InvalidWagerTransactionError} If any other field breaks the
    *   payload contract or the rules of its kind.
@@ -139,7 +145,7 @@ export class ProcessWagerTransaction {
       const committedMeanwhile = await findEarlier(transactions, submitted);
       if (committedMeanwhile) return committedMeanwhile;
 
-      const entry = applyBet(submitted, wallet, { entryId: this.generateId() });
+      const entry = await this.settle(submitted, wallet, transactions);
       transactions.add(submitted);
       if (entry) ledger.add(entry);
       this.enqueueEvents(outbox, submitted, wallet, entry);
@@ -149,9 +155,42 @@ export class ProcessWagerTransaction {
   }
 
   /**
-   * The outcome's integration events: processed with its balance change, or
-   * rejected. Added before anything that may still fail in the unit of work, so
-   * they are committed or rolled back with the outcome.
+   * Step 8 of the order: the rules of the transaction's kind, on its locked
+   * wallet. A `WIN` citing a reference reads it by its provider and external id.
+   *
+   * @returns The ledger entry to persist, when the balance moved.
+   */
+  private async settle(
+    transaction: WagerTransaction,
+    wallet: Wallet,
+    transactions: WagerTransactionRepository,
+  ): Promise<WalletLedgerEntry | undefined> {
+    const ids = { entryId: this.generateId() };
+    switch (transaction.kind) {
+      case WagerTransactionKind.Bet:
+        return applyBet(transaction, wallet, ids);
+      case WagerTransactionKind.Win: {
+        const { referenceExternalTransactionId } = transaction;
+        const reference =
+          referenceExternalTransactionId === undefined
+            ? undefined
+            : ((await transactions.findByExternalId(transaction.providerId, referenceExternalTransactionId)) ??
+              undefined);
+        return applyWin(transaction, wallet, reference, ids);
+      }
+      case WagerTransactionKind.Loss:
+        applyLoss(transaction, wallet);
+        return undefined;
+      default:
+        throw new UnsupportedKindError(transaction.kind);
+    }
+  }
+
+  /**
+   * The outcome's integration events: processed, with its balance change when
+   * the balance moved; rejected; none while waiting for a reference. Added
+   * before anything that may still fail in the unit of work, so they are
+   * committed or rolled back with the outcome.
    */
   private enqueueEvents(
     outbox: OutboxRepository,
@@ -160,14 +199,16 @@ export class ProcessWagerTransaction {
     entry: WalletLedgerEntry | undefined,
   ): void {
     const context = { correlationId: transaction.correlationId, causationId: transaction.id };
-    if (entry === undefined) {
+    if (transaction.status === WagerTransactionStatus.Rejected) {
       const rejected = WagerTransactionRejected.from(transaction, context, { eventId: this.generateId(), at: new Date() });
       outbox.add(OutboxMessage.enqueue(rejected));
       return;
     }
+    if (transaction.status !== WagerTransactionStatus.Processed) return;
     const processed = WagerTransactionProcessed.from(transaction, context, { eventId: this.generateId() });
-    const changed = WalletBalanceChanged.from(wallet, entry, context, { eventId: this.generateId() });
     outbox.add(OutboxMessage.enqueue(processed));
+    if (entry === undefined) return;
+    const changed = WalletBalanceChanged.from(wallet, entry, context, { eventId: this.generateId() });
     outbox.add(OutboxMessage.enqueue(changed));
   }
 
@@ -231,7 +272,7 @@ export class ProcessWagerTransaction {
     // `create` enforces the rules of the kind: amount floor and reference.
     const submitted = WagerTransaction.create(props);
     if (props.kind === WagerTransactionKind.Opening) throw new InternalKindNotAllowedError(props.kind, props.payloadHash);
-    if (props.kind !== WagerTransactionKind.Bet) throw new UnsupportedKindError(props.kind);
+    if (!SUPPORTED_KINDS.has(props.kind)) throw new UnsupportedKindError(props.kind);
     return { props, submitted };
   }
 }
