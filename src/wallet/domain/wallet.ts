@@ -51,6 +51,9 @@ export class InvalidWalletError extends Error {
 
 const MAX_PLAYER_ID_LENGTH = 255;
 
+/** Every wallet is opened at this version (ADR 0003). */
+export const OPENING_VERSION = 1;
+
 export class Wallet {
   // Only assigns parameters, with no validation or field initializers: the ORM's
   // metadata discovery calls `new Wallet()` with no arguments (ADR 0001).
@@ -91,7 +94,7 @@ export class Wallet {
       props.playerId,
       props.initialBalance.currency,
       props.initialBalance,
-      1,
+      OPENING_VERSION,
       now,
       now,
       props.initialBalance,
@@ -126,7 +129,7 @@ export class Wallet {
    *   balance is zero.
    */
   openingEntry(ids: { entryId: string; transactionId: string }): WalletLedgerEntry {
-    if (this._version !== 1 || this._balance.isZero()) {
+    if (this._version !== OPENING_VERSION || this._balance.isZero()) {
       throw new InvalidWalletError('only a wallet opened with a positive balance has an opening');
     }
     return WalletLedgerEntry.create({
