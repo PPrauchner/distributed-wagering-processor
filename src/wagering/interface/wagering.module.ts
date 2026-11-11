@@ -15,7 +15,7 @@ import type { OutboxRepositories } from '../../messaging/application/outbox-repo
 import { CONTEXT_LOG, type ContextLog } from '../../shared/application/context-log.ts';
 import type { FaultInjection } from '../../shared/application/fault-injector.ts';
 import { UNIT_OF_WORK, type UnitOfWork } from '../../shared/application/unit-of-work.ts';
-import { CrashFaultInjector } from '../../shared/infrastructure/crash-fault-injector.ts';
+import { CrashFaultInjector, type Crash } from '../../shared/infrastructure/crash-fault-injector.ts';
 import type { WalletRepositories } from '../../wallet/application/wallet-repository.ts';
 import { GetWagerTransaction } from '../application/get-wager-transaction.ts';
 import { ProcessWagerTransaction } from '../application/process-wager-transaction.ts';
@@ -35,10 +35,13 @@ export class WageringModule {
    * @param config - Whether this instance consumes the input queue, how a
    *   pending reference waits and whether this instance resolves them, and the
    *   fault points enabled (none outside the tests).
+   * @param crash - How the consumer dies at an enabled crash point; by
+   *   default, a `SimulatedCrashError`.
    * @returns The module, exporting the audit of refused submissions.
    */
   static forRoot(
     config: Pick<AppConfig, 'wagerTransactionsConsumer' | 'pendingReferences' | 'faultPoints'>,
+    crash?: Crash,
   ): DynamicModule {
     const { ttlMs, retryBaseMs, retryMaxMs } = config.pendingReferences;
     const referenceWait = { ttlMs, backoff: { baseMs: retryBaseMs, maxMs: retryMaxMs } };
@@ -112,7 +115,7 @@ export class WageringModule {
                 recordRejectedSubmission,
                 metrics,
                 log,
-                faults: new CrashFaultInjector(config.faultPoints),
+                faults: new CrashFaultInjector(config.faultPoints, crash),
               },
               { enabled, maxReceives, retryMaxSeconds, drainTimeoutMs },
             );

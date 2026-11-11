@@ -21,6 +21,7 @@ import {
   PinoLoggerService,
   createPinoLogger,
 } from './shared/infrastructure/pino-logging.ts';
+import type { Crash } from './shared/infrastructure/crash-fault-injector.ts';
 import { RejectedSubmissionAudit } from './wagering/interface/rejected-submission.audit.ts';
 import { WageringModule } from './wagering/interface/wagering.module.ts';
 import { WalletModule } from './wallet/interface/wallet.module.ts';
@@ -40,14 +41,14 @@ class LoggingModule {
 
 @Module({})
 class AppModule {
-  static forConfig(config: AppConfig, contextLog: ContextLog): DynamicModule {
+  static forConfig(config: AppConfig, contextLog: ContextLog, crash?: Crash): DynamicModule {
     return {
       module: AppModule,
       imports: [
         LoggingModule.forRoot(contextLog),
         DatabaseModule.forRoot(config),
         WalletModule,
-        WageringModule.forRoot(config),
+        WageringModule.forRoot(config, crash),
         MessagingModule.forRoot(config),
         HealthModule.forRoot(config),
       ],
@@ -58,17 +59,24 @@ class AppModule {
 export interface CreateAppOptions {
   /** Where the JSON log lines go; stdout by default. The tests read them. */
   logDestination?: DestinationStream;
+  /**
+   * How the process dies at an enabled crash fault point. `main.ts` gives the
+   * real death, `SIGKILL`; in process — the integration tests — the default
+   * `SimulatedCrashError` keeps the test runner alive.
+   */
+  crash?: Crash;
 }
 
 /**
  * @param config - Service configuration.
- * @param options - Where the logs go.
+ * @param options - Where the logs go, and how a crash fault point dies.
  * @returns The application, initialized but not listening yet.
  */
 export async function createApp(config: AppConfig, options: CreateAppOptions = {}): Promise<INestApplication> {
   const logContext = new LogContextStore();
   const logger = createPinoLogger(logContext, options.logDestination);
-  const app = await NestFactory.create(AppModule.forConfig(config, new PinoContextLog(logger, logContext)), {
+  const appModule = AppModule.forConfig(config, new PinoContextLog(logger, logContext), options.crash);
+  const app = await NestFactory.create(appModule, {
     logger: new PinoLoggerService(logger),
   });
   app.use(logContextMiddleware(logContext));
