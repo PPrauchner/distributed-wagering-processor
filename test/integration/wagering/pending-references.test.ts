@@ -6,7 +6,8 @@
  * original correlation id; as `REFERENCE_NOT_FOUND` once the TTL is over; as
  * `REFERENCE_NOT_PROCESSED` at once when the reference failed. Short TTL and
  * intervals by configuration; waits are conditions with a timeout, never a
- * fixed sleep. Ends checking the ledger invariant of every wallet it touched.
+ * fixed sleep. The loop of an instance resolves on its own and stops with the
+ * application. Ends checking the ledger invariant of every wallet it touched.
  *
  * @packageDocumentation
  */
@@ -397,6 +398,29 @@ describe('the worker under failure', () => {
       expect(entries.n).toBe(1);
       const events = (await eventsOf(refund.body.transactionId)).map((event) => event.event_type);
       expect(events.filter((type) => type === 'WagerTransactionProcessed')).toHaveLength(1);
+    }
+  });
+});
+
+describe('the worker loop of an instance', () => {
+  test('resolves a pending reference on its own once the reference arrives, and stops with the application', async () => {
+    const pendingReferences = { ...config.pendingReferences, enabled: true, pollIntervalMs: 50 };
+    const running = await createApp({ ...config, pendingReferences });
+    await running.init();
+    try {
+      const wallet = await createWallet('100.00');
+      const bet = transactionOn(wallet, 'BET');
+      const rollback = await submit(citing(wallet, 'ROLLBACK', bet));
+      await submit(bet);
+
+      const resolved = await waitFor(async () => {
+        const current = await row(rollback.body.transactionId);
+        return current.status === 'PENDING_REFERENCE' ? undefined : current;
+      });
+
+      expect(resolved).toMatchObject({ status: 'PROCESSED', balance_after: '100.00' });
+    } finally {
+      await running.close();
     }
   });
 });

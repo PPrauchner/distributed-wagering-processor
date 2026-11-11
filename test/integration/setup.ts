@@ -28,6 +28,8 @@ process.env.DATABASE_URL = baseUrl.toString();
 process.env.OUTBOX_PUBLISHER_ENABLED = 'false';
 // Nor a consumer of the input queue, for the same reason.
 process.env.WAGER_TRANSACTIONS_CONSUMER_ENABLED = 'false';
+// Nor the worker of pending references: a test resolving them runs its own.
+process.env.PENDING_REFERENCES_WORKER_ENABLED = 'false';
 
 const orm = await MikroORM.init(createOrmConfig(process.env.DATABASE_URL));
 try {
