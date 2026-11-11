@@ -20,10 +20,11 @@ import { Money } from '../../../src/shared/domain/money.ts';
 import { InvalidMoneyError } from '../../../src/shared/domain/money.ts';
 import { Wallet } from '../../../src/wallet/domain/wallet.ts';
 import { WalletLedgerEntry } from '../../../src/wallet/domain/wallet-ledger-entry.ts';
-import { CreateWallet, type CreatedWallet } from '../../../src/wallet/application/create-wallet.ts';
+import { CreateWallet, type CreateWalletCommand, type CreatedWallet } from '../../../src/wallet/application/create-wallet.ts';
 import { GetWallet } from '../../../src/wallet/application/get-wallet.ts';
 import {
   DuplicateWalletError,
+  WalletCreationConflictError,
   WalletAlreadyExistsError,
   WalletNotFoundError,
 } from '../../../src/wallet/application/wallet-errors.ts';
@@ -52,6 +53,51 @@ afterAll(async () => {
 });
 
 const zeroBrl = { amount: '0.00', currency: 'BRL' };
+
+/**
+ * Forces the race READ COMMITTED leaves open: right after the attempt's lookup
+ * by key finds nothing, the winner runs and commits on its own unit of work.
+ *
+ * @param attemptCommand - The creation that loses the race.
+ * @param winnerCommand - The creation that commits in between.
+ * @returns The attempt, and the winner's result once it has run.
+ */
+function raceAfterKeyLookup(
+  attemptCommand: CreateWalletCommand,
+  winnerCommand: CreateWalletCommand,
+): { attempt: Promise<CreatedWallet>; winner: () => Promise<CreatedWallet> } {
+  let winner: Promise<CreatedWallet> | undefined;
+  const racing: UnitOfWork<Repositories> = {
+    run: (work) =>
+      unitOfWork.run((repositories) =>
+        work({
+          ...repositories,
+          wallets: {
+            findByPlayerAndCurrency: (...args) => repositories.wallets.findByPlayerAndCurrency(...args),
+            findById: (...args) => repositories.wallets.findById(...args),
+            findByIdForUpdate: (...args) => repositories.wallets.findByIdForUpdate(...args),
+            add: (wallet) => repositories.wallets.add(wallet),
+            findByCreationIdempotencyKey: async (key) => {
+              const found = await repositories.wallets.findByCreationIdempotencyKey(key);
+              if (found === null && winner === undefined) {
+                winner = createWallet.execute(winnerCommand);
+                await winner;
+              }
+              return found;
+            },
+          },
+        }),
+      ),
+  };
+  const attempt = new CreateWallet(racing, () => Bun.randomUUIDv7()).execute(attemptCommand);
+  return {
+    attempt,
+    winner: () => {
+      if (winner === undefined) throw new Error('the winner never ran');
+      return winner;
+    },
+  };
+}
 
 describe('CreateWallet', () => {
   test('opens and persists a zero-balance wallet', async () => {
@@ -213,6 +259,34 @@ describe('CreateWallet', () => {
                where w.player_id = ${playerId})::int as entries
     `;
     expect(row).toEqual({ wallets: 0, transactions: 0, entries: 0 });
+  });
+
+  test('a creation with the same key that commits between the key lookup and the player lookup is replayed', async () => {
+    const command = { playerId: Bun.randomUUIDv7(), initialBalance: zeroBrl, idempotencyKey: Bun.randomUUIDv7() };
+    const { attempt, winner } = raceAfterKeyLookup(command, command);
+
+    const result = await attempt;
+
+    expect(result.idempotentReplay).toBe(true);
+    expect(result.wallet.id).toBe((await winner()).wallet.id);
+  });
+
+  test('the same race with another payload under the key is a key conflict', async () => {
+    const winnerCommand = { playerId: Bun.randomUUIDv7(), initialBalance: zeroBrl, idempotencyKey: Bun.randomUUIDv7() };
+    const attemptCommand = { ...winnerCommand, initialBalance: { amount: '5.00', currency: 'BRL' } };
+    const { attempt } = raceAfterKeyLookup(attemptCommand, winnerCommand);
+
+    await expect(attempt).rejects.toBeInstanceOf(WalletCreationConflictError);
+  });
+
+  test('the same race won by a creation without the key points at the winner', async () => {
+    const attemptCommand = { playerId: Bun.randomUUIDv7(), initialBalance: zeroBrl, idempotencyKey: Bun.randomUUIDv7() };
+    const { attempt, winner } = raceAfterKeyLookup(attemptCommand, { ...attemptCommand, idempotencyKey: undefined });
+
+    const error = await attempt.catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(WalletAlreadyExistsError);
+    expect((error as WalletAlreadyExistsError).walletId).toBe((await winner()).wallet.id);
   });
 
   test('a malformed initial balance is refused by Money', async () => {
