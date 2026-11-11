@@ -1,6 +1,7 @@
 /**
  * Wallet persistence against a real PostgreSQL: reversible migrations, the
- * `defineEntity` mapping with `Money` as an embeddable, and the schema
+ * `defineEntity` mappings of the wallet, the opening and its ledger entry with
+ * `Money` as an embeddable, and the wallet's own schema
  * invariants proven by raw SQL — the code path is not trusted to hold them.
  *
  * @packageDocumentation
@@ -12,6 +13,13 @@ import { loadConfig } from '../../../src/config.ts';
 import { createOrmConfig } from '../../../src/database/orm.config.ts';
 import { Money } from '../../../src/shared/domain/money.ts';
 import { Wallet } from '../../../src/wallet/domain/wallet.ts';
+import { LedgerDirection, WalletLedgerEntry } from '../../../src/wallet/domain/wallet-ledger-entry.ts';
+import {
+  WagerTransaction,
+  WagerTransactionKind,
+  WagerTransactionStatus,
+} from '../../../src/wagering/domain/wager-transaction.ts';
+import { expectLedgerConsistent } from '../ledger-invariant.ts';
 
 let orm: MikroORM;
 let sql: SQL;
@@ -49,15 +57,42 @@ async function insertWallet(overrides: Record<string, unknown> = {}): Promise<st
   return row.id as string;
 }
 
+const ALL_MIGRATIONS = [
+  'Migration0001Wallets',
+  'Migration0002WagerTransactions',
+  'Migration0003WalletLedger',
+  'Migration0004WalletIdentity',
+  'Migration0005WagerTransactionInvariants',
+  'Migration0006RejectedSubmissions',
+  'Migration0007OutboxMessages',
+];
+const TABLES = ['wallets', 'wager_transactions', 'wallet_ledger_entries', 'rejected_submissions', 'outbox_messages'];
+
+/** Tables and functions of the public schema: what the migrations create. */
+async function schemaObjects(): Promise<string[]> {
+  const rows: { name: string }[] = await sql`
+    select table_name::text as name from information_schema.tables
+     where table_schema = 'public' and table_name <> 'mikro_orm_migrations'
+    union all
+    select routine_name::text from information_schema.routines where routine_schema = 'public'
+  `;
+  return rows.map((row) => row.name).sort();
+}
+
 describe('migrations by script', () => {
-  test('down drops the wallets table and up recreates it', async () => {
-    await orm.migrator.down({ to: 0 });
-    expect(await tableExists('wallets')).toBe(false);
+  test('down drops everything they created and up recreates it', async () => {
+    const created = await schemaObjects();
+    expect(created).toEqual(expect.arrayContaining(TABLES));
+
+    const reverted = await orm.migrator.down({ to: 0 });
+
+    expect(reverted.map((migration) => migration.name)).toEqual([...ALL_MIGRATIONS].reverse());
+    expect(await schemaObjects()).toEqual([]);
 
     const applied = await orm.migrator.up();
 
-    expect(applied.map((migration) => migration.name)).toEqual(['Migration0001Wallets']);
-    expect(await tableExists('wallets')).toBe(true);
+    expect(applied.map((migration) => migration.name)).toEqual(ALL_MIGRATIONS);
+    expect(await schemaObjects()).toEqual(created);
   });
 
   test('the migrate script goes down and back up', async () => {
@@ -72,10 +107,10 @@ describe('migrations by script', () => {
       return JSON.parse(stdout.trim().split('\n').at(-1)!);
     };
 
-    expect(await runScript('down')).toEqual({ direction: 'down', migrations: ['Migration0001Wallets'] });
-    expect(await tableExists('wallets')).toBe(false);
-    expect(await runScript('up')).toEqual({ direction: 'up', migrations: ['Migration0001Wallets'] });
-    expect(await tableExists('wallets')).toBe(true);
+    expect(await runScript('down')).toEqual({ direction: 'down', migrations: [...ALL_MIGRATIONS].reverse() });
+    for (const table of TABLES) expect(await tableExists(table)).toBe(false);
+    expect(await runScript('up')).toEqual({ direction: 'up', migrations: ALL_MIGRATIONS });
+    for (const table of TABLES) expect(await tableExists(table)).toBe(true);
   });
 });
 
@@ -158,5 +193,57 @@ describe('schema invariants, by raw SQL', () => {
     } finally {
       await sql`drop table currency_pin_probe`;
     }
+  });
+});
+
+describe('opening mapping', () => {
+  test('a wallet, its OPENING and its entry flush together and load back as domain objects', async () => {
+    const initialBalance = Money.from({ amount: '250.75', currency: 'BRL' });
+    const wallet = Wallet.open({ id: Bun.randomUUIDv7(), playerId: Bun.randomUUIDv7(), initialBalance });
+    const opening = WagerTransaction.create({
+      id: Bun.randomUUIDv7(),
+      providerId: 'internal',
+      externalTransactionId: `opening:${wallet.id}`,
+      idempotencyKey: `opening:${wallet.id}`,
+      payloadHash: 'f'.repeat(64),
+      walletId: wallet.id,
+      playerId: wallet.playerId,
+      roundId: 'opening',
+      gameId: 'opening',
+      kind: WagerTransactionKind.Opening,
+      money: initialBalance,
+      correlationId: 'corr-mapping',
+    });
+    opening.markProcessed({ at: wallet.createdAt, balanceAfter: wallet.balance, walletVersionObserved: 1 });
+    const entry = wallet.openingEntry({ entryId: Bun.randomUUIDv7(), transactionId: opening.id });
+
+    // Persisted entry first: the flush must order the inserts by their foreign keys.
+    await orm.em.fork().persist(entry).persist(opening).persist(wallet).flush();
+
+    const em = orm.em.fork();
+    const loadedOpening = await em.findOneOrFail(WagerTransaction, opening.id);
+    expect(loadedOpening).toBeInstanceOf(WagerTransaction);
+    expect(loadedOpening.status).toBe(WagerTransactionStatus.Processed);
+    expect(loadedOpening.kind).toBe(WagerTransactionKind.Opening);
+    expect(loadedOpening.money.toJSON()).toEqual(initialBalance.toJSON());
+    expect(loadedOpening.balanceAfter?.toJSON()).toEqual(initialBalance.toJSON());
+    expect(loadedOpening.walletVersionObserved).toBe(1);
+    expect(loadedOpening.processedAt?.getTime()).toBe(wallet.createdAt.getTime());
+    expect(loadedOpening.referenceExternalTransactionId).toBeUndefined();
+    expect(loadedOpening.referenceTransactionId).toBeUndefined();
+    expect(loadedOpening.failureCode).toBeUndefined();
+    expect(loadedOpening.correlationId).toBe('corr-mapping');
+    expect(loadedOpening.walletId).toBe(wallet.id);
+
+    const [loadedEntry] = await em.find(WalletLedgerEntry, { walletId: wallet.id });
+    expect(loadedEntry).toBeInstanceOf(WalletLedgerEntry);
+    expect(loadedEntry!.transactionId).toBe(opening.id);
+    expect(loadedEntry!.direction).toBe(LedgerDirection.Credit);
+    expect(loadedEntry!.balanceBefore.toJSON()).toEqual({ amount: '0.00', currency: 'BRL' });
+    expect(loadedEntry!.balanceAfter.toJSON()).toEqual(initialBalance.toJSON());
+    expect(loadedEntry!.walletVersion).toBe(1);
+    expect(loadedEntry!.isBalanced()).toBe(true);
+
+    await expectLedgerConsistent(sql, [wallet.id]);
   });
 });

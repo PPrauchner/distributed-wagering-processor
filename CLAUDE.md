@@ -24,13 +24,14 @@ está em `docs/Desafio.md`. Ele é a especificação: em dúvida, vale o que est
 
 ```bash
 bun install --frozen-lockfile   # dependências
-docker compose up -d --wait     # PostgreSQL (127.0.0.1:55432), LocalStack (:4566),
-                                # migrations (serviço migrate) e app (:3000)
+docker compose up -d --wait     # PostgreSQL (127.0.0.1:55432), LocalStack (:4566)
+                                # com as filas criadas, migrations (serviço
+                                # migrate) e app (:3000)
 docker compose up -d --wait --build   # idem, reconstruindo a imagem do app
 bun run typecheck               # tsc --noEmit (TypeScript 6.0)
 bun run test                    # unit + integration (exige o Compose de pé)
 bun run test:unit               # só domínio, sem I/O
-bun run test:integration        # app em processo contra PostgreSQL real; recria o
+bun run test:integration        # app em processo contra PostgreSQL e LocalStack reais; recria o
                                 # banco <db>_test a cada execução
 bun run db:migrate up|down      # migrations por script Bun, sem o CLI do MikroORM
 bun src/main.ts                 # app local, fora do Compose (PORT, DATABASE_URL)

@@ -1,6 +1,9 @@
 /**
  * Global HTTP error filter: turns every error into `{ failureCode, message }`
- * with the status of the HTTP status table in `ARCHITECTURE.md`.
+ * with the status of the HTTP status table in `ARCHITECTURE.md`. Before
+ * answering, it reports the refusal to the audits — the only point every
+ * refusal goes through, malformed JSON included, which never reaches a
+ * controller.
  *
  * @packageDocumentation
  */
@@ -12,23 +15,51 @@ import {
   type ArgumentsHost,
   type ExceptionFilter,
 } from '@nestjs/common';
+import { PermanentFailureError, TransientFailureError } from '../shared/application/infrastructure-failures.ts';
+import { FailureCode } from '../shared/domain/failure-code.ts';
 import { CurrencyMismatchError, InvalidMoneyError } from '../shared/domain/money.ts';
 import { InvalidPayloadError } from '../shared/interface/invalid-payload.error.ts';
-import { InvalidWalletError } from '../wallet/domain/wallet.ts';
 import {
-  UnsupportedInitialBalanceError,
-  WalletAlreadyExistsError,
-  WalletNotFoundError,
-} from '../wallet/application/wallet-errors.ts';
+  ExternalIdConflictError,
+  IdempotencyConflictError,
+  InternalKindNotAllowedError,
+  MissingIdempotencyKeyError,
+  SubmissionWalletNotFoundError,
+  UnsupportedKindError,
+} from '../wagering/application/wagering-errors.ts';
+import { InvalidWagerTransactionError } from '../wagering/domain/wager-transaction.ts';
+import { InvalidWalletError } from '../wallet/domain/wallet.ts';
+import { WalletAlreadyExistsError, WalletNotFoundError } from '../wallet/application/wallet-errors.ts';
 
 // The slice of the platform response this filter uses; keeps it off Express types.
 interface HttpResponse {
+  setHeader(name: string, value: string): void;
   status(code: number): { json(body: unknown): void };
 }
 
 interface ErrorResponse {
   status: number;
   body: { failureCode: string; message: string; walletId?: string };
+  headers?: Record<string, string>;
+}
+
+/** The request a refusal answered, as the audits see it. */
+export interface RefusedRequest {
+  method: string;
+  path: string;
+  body: unknown;
+  headers: Record<string, string | string[] | undefined>;
+}
+
+/** Records the refusals it cares about; the filter answers once it is done. */
+export interface RefusalAudit {
+  refused(request: RefusedRequest, failureCode: string, error: unknown): Promise<void>;
+}
+
+export interface HttpErrorFilterOptions {
+  /** The `Retry-After` of a transient failure's 503, in seconds. */
+  retryAfterSeconds: number;
+  refusalAudits?: readonly RefusalAudit[];
 }
 
 const INVALID_PAYLOAD_ERRORS = [
@@ -36,21 +67,72 @@ const INVALID_PAYLOAD_ERRORS = [
   InvalidMoneyError,
   CurrencyMismatchError,
   InvalidWalletError,
-  UnsupportedInitialBalanceError,
+  InvalidWagerTransactionError,
+  UnsupportedKindError,
+];
+
+// Refused submissions: a fixed status and failure code, and the error's message.
+const REFUSED_SUBMISSIONS: [new (...args: never[]) => Error, number, FailureCode][] = [
+  [MissingIdempotencyKeyError, HttpStatus.BAD_REQUEST, FailureCode.MissingIdempotencyKey],
+  [InternalKindNotAllowedError, HttpStatus.BAD_REQUEST, FailureCode.InternalKindNotAllowed],
+  [IdempotencyConflictError, HttpStatus.CONFLICT, FailureCode.IdempotencyConflict],
+  [ExternalIdConflictError, HttpStatus.CONFLICT, FailureCode.ExternalIdConflict],
+  [SubmissionWalletNotFoundError, HttpStatus.UNPROCESSABLE_ENTITY, FailureCode.WalletNotFound],
 ];
 
 @Catch()
 export class HttpErrorFilter implements ExceptionFilter {
   private readonly logger = new Logger(HttpErrorFilter.name);
 
-  catch(error: unknown, host: ArgumentsHost): void {
-    const { status, body } = this.toResponse(error);
-    host.switchToHttp().getResponse<HttpResponse>().status(status).json(body);
+  constructor(private readonly options: HttpErrorFilterOptions) {}
+
+  catch(error: unknown, host: ArgumentsHost): Promise<void> {
+    return this.answer(error, host);
+  }
+
+  private async answer(error: unknown, host: ArgumentsHost): Promise<void> {
+    const { status, body, headers = {} } = this.toResponse(error);
+    const http = host.switchToHttp();
+    if (status < HttpStatus.INTERNAL_SERVER_ERROR) await this.audit(http.getRequest<RefusedRequest>(), body.failureCode, error);
+    const response = http.getResponse<HttpResponse>();
+    for (const [name, value] of Object.entries(headers)) response.setHeader(name, value);
+    response.status(status).json(body);
+  }
+
+  // The audit is best effort: a failure to record it never changes the answer.
+  private async audit(request: RefusedRequest, failureCode: string, error: unknown): Promise<void> {
+    for (const audit of this.options.refusalAudits ?? []) {
+      try {
+        await audit.refused(request, failureCode, error);
+      } catch (auditError) {
+        this.logger.error(auditError);
+      }
+    }
   }
 
   private toResponse(error: unknown): ErrorResponse {
+    if (error instanceof TransientFailureError) {
+      this.logger.warn(`${error.failureCode}: ${String(error.cause)}`);
+      return {
+        status: HttpStatus.SERVICE_UNAVAILABLE,
+        body: { failureCode: error.failureCode, message: error.message },
+        headers: { 'Retry-After': String(this.options.retryAfterSeconds) },
+      };
+    }
+    if (error instanceof PermanentFailureError) {
+      this.logger.error(error);
+      return {
+        status: HttpStatus.INTERNAL_SERVER_ERROR,
+        body: { failureCode: error.failureCode, message: error.message },
+      };
+    }
     if (INVALID_PAYLOAD_ERRORS.some((type) => error instanceof type)) {
       return invalidPayload((error as Error).message);
+    }
+    const refused = REFUSED_SUBMISSIONS.find(([type]) => error instanceof type);
+    if (refused) {
+      const [, status, failureCode] = refused;
+      return { status, body: { failureCode, message: (error as Error).message } };
     }
     if (error instanceof WalletAlreadyExistsError) {
       return {
@@ -69,7 +151,7 @@ export class HttpErrorFilter implements ExceptionFilter {
     this.logger.error(error);
     return {
       status: HttpStatus.INTERNAL_SERVER_ERROR,
-      body: { failureCode: 'INTERNAL_ERROR', message: 'internal error' },
+      body: { failureCode: FailureCode.InfraUnexpected, message: 'internal error' },
     };
   }
 }

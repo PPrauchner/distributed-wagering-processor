@@ -31,6 +31,7 @@ services:
     environment:
       DATABASE_URL: postgresql://wagering:wagering@postgres:5432/wagering
       PORT: "3000"
+      SQS_ENDPOINT: http://localstack:4566
     ports:
       - "3000:3000"
     depends_on:
@@ -38,6 +39,8 @@ services:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
+      localstack:
+        condition: service_healthy
 
   localstack:
     # 4.14.0 é a última versão que roda sem conta/token (ver CLAUDE.md).
@@ -46,8 +49,12 @@ services:
       SERVICES: sqs
     ports:
       - "4566:4566"
+    volumes:
+      # Cria wager-transactions.fifo, sua DLQ e wagering-events.fifo na subida.
+      - ./localstack/init/ready.d:/etc/localstack/init/ready.d:ro
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf localhost:4566/_localstack/health | grep -q '\"sqs\": \"\\(available\\|running\\)\"'"]
+      # Saudável só depois das filas: a de eventos é a última criada.
+      test: ["CMD-SHELL", "awslocal sqs get-queue-url --queue-name wagering-events.fifo > /dev/null"]
       interval: 3s
       timeout: 3s
       retries: 40

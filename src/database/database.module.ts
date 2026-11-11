@@ -7,6 +7,7 @@
 import { Global, Module, type DynamicModule } from '@nestjs/common';
 import { MikroOrmModule } from '@mikro-orm/nestjs';
 import { MikroORM } from '@mikro-orm/postgresql';
+import type { FaultPoint } from '../shared/application/fault-injector.ts';
 import { UNIT_OF_WORK } from '../shared/application/unit-of-work.ts';
 import { MikroOrmUnitOfWork } from './mikro-orm-unit-of-work.ts';
 import { createOrmConfig } from './orm.config.ts';
@@ -15,10 +16,12 @@ import { createOrmConfig } from './orm.config.ts';
 @Module({})
 export class DatabaseModule {
   /**
-   * @param databaseUrl - PostgreSQL connection URL.
+   * @param options - PostgreSQL connection URL, and the fault points enabled in
+   *   every unit of work (none outside the tests).
    * @returns The module, exporting the unit of work.
    */
-  static forRoot(databaseUrl: string): DynamicModule {
+  static forRoot(options: { databaseUrl: string; faultPoints: readonly FaultPoint[] }): DynamicModule {
+    const { databaseUrl, faultPoints } = options;
     return {
       module: DatabaseModule,
       imports: [
@@ -31,7 +34,7 @@ export class DatabaseModule {
         {
           provide: UNIT_OF_WORK,
           inject: [MikroORM],
-          useFactory: (orm: MikroORM) => new MikroOrmUnitOfWork(orm.em),
+          useFactory: (orm: MikroORM) => new MikroOrmUnitOfWork(orm.em, faultPoints),
         },
       ],
       exports: [UNIT_OF_WORK],

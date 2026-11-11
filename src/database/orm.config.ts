@@ -8,7 +8,17 @@ import { defineConfig, type Options } from '@mikro-orm/postgresql';
 import { Migrator } from '@mikro-orm/migrations';
 import { MoneySchema } from '../shared/infrastructure/money.schema.ts';
 import { WalletSchema } from '../wallet/infrastructure/wallet.schema.ts';
+import { WalletLedgerEntrySchema } from '../wallet/infrastructure/wallet-ledger-entry.schema.ts';
+import { WagerTransactionSchema } from '../wagering/infrastructure/wager-transaction.schema.ts';
+import { RejectedSubmissionSchema } from '../wagering/infrastructure/rejected-submission.schema.ts';
+import { OutboxMessageSchema } from '../messaging/infrastructure/outbox-message.schema.ts';
 import { Migration0001Wallets } from '../wallet/infrastructure/migrations/0001-wallets.ts';
+import { Migration0002WagerTransactions } from '../wagering/infrastructure/migrations/0002-wager-transactions.ts';
+import { Migration0003WalletLedger } from '../wallet/infrastructure/migrations/0003-wallet-ledger.ts';
+import { Migration0004WalletIdentity } from '../wallet/infrastructure/migrations/0004-wallet-identity.ts';
+import { Migration0005WagerTransactionInvariants } from '../wagering/infrastructure/migrations/0005-wager-transaction-invariants.ts';
+import { Migration0006RejectedSubmissions } from '../wagering/infrastructure/migrations/0006-rejected-submissions.ts';
+import { Migration0007OutboxMessages } from '../messaging/infrastructure/migrations/0007-outbox-messages.ts';
 
 /**
  * @param databaseUrl - PostgreSQL connection URL.
@@ -17,14 +27,31 @@ import { Migration0001Wallets } from '../wallet/infrastructure/migrations/0001-w
 export function createOrmConfig(databaseUrl: string): Options {
   return defineConfig({
     clientUrl: databaseUrl,
-    entities: [MoneySchema, WalletSchema],
+    entities: [
+      MoneySchema,
+      WalletSchema,
+      WagerTransactionSchema,
+      WalletLedgerEntrySchema,
+      RejectedSubmissionSchema,
+      OutboxMessageSchema,
+    ],
     extensions: [Migrator],
     migrations: {
-      migrationsList: [{ name: 'Migration0001Wallets', class: Migration0001Wallets }],
+      migrationsList: [
+        { name: 'Migration0001Wallets', class: Migration0001Wallets },
+        { name: 'Migration0002WagerTransactions', class: Migration0002WagerTransactions },
+        { name: 'Migration0003WalletLedger', class: Migration0003WalletLedger },
+        { name: 'Migration0004WalletIdentity', class: Migration0004WalletIdentity },
+        { name: 'Migration0005WagerTransactionInvariants', class: Migration0005WagerTransactionInvariants },
+        { name: 'Migration0006RejectedSubmissions', class: Migration0006RejectedSubmissions },
+        { name: 'Migration0007OutboxMessages', class: Migration0007OutboxMessages },
+      ],
       // Hand-written migrations; the snapshot only serves automatic diffs.
       snapshot: false,
     },
     pool: { min: 0, max: 10 },
+    // Absent nullable columns load as `undefined`, as the domain types them.
+    forceUndefined: true,
     debug: false,
   });
 }

@@ -3,7 +3,8 @@
  *
  * @packageDocumentation
  */
-import type { Money } from '../../shared/domain/money.ts';
+import { Money } from '../../shared/domain/money.ts';
+import { LedgerDirection, WalletLedgerEntry } from './wallet-ledger-entry.ts';
 
 export interface OpenWalletProps {
   id: string;
@@ -20,6 +21,13 @@ export interface WalletState {
   version: number;
   createdAt: Date;
   updatedAt: Date;
+}
+
+/** A credit or debit: its amount, and ids of the new entry and of its transaction. */
+export interface MovementProps {
+  money: Money;
+  entryId: string;
+  transactionId: string;
 }
 
 /** Raised when a wallet would be opened breaking one of its invariants. */
@@ -82,6 +90,87 @@ export class Wallet {
       state.createdAt,
       state.updatedAt,
     );
+  }
+
+  /**
+   * The ledger entry of the opening: a credit from zero to the initial balance,
+   * at version 1. A wallet opened at zero has no opening (ADR 0003).
+   *
+   * @param ids - Id of the new entry and of the `OPENING` transaction.
+   * @returns The entry; it changes nothing on the wallet.
+   * @throws {@link InvalidWalletError} If the wallet is not at version 1 or its
+   *   balance is zero.
+   */
+  openingEntry(ids: { entryId: string; transactionId: string }): WalletLedgerEntry {
+    if (this._version !== 1 || this._balance.isZero()) {
+      throw new InvalidWalletError('only a wallet opened with a positive balance has an opening');
+    }
+    return WalletLedgerEntry.create({
+      id: ids.entryId,
+      walletId: this.id,
+      transactionId: ids.transactionId,
+      direction: LedgerDirection.Credit,
+      money: this._balance,
+      balanceBefore: Money.zero(this.currency),
+      balanceAfter: this._balance,
+      walletVersion: this._version,
+      createdAt: this.createdAt,
+    });
+  }
+
+  /**
+   * Credits the wallet: the balance grows, the version goes up by exactly 1, and
+   * the matching ledger entry is returned for the caller to persist with it.
+   *
+   * @param props - Amount, and ids of the new entry and of its transaction.
+   * @returns The ledger entry of this credit.
+   * @throws {@link CurrencyMismatchError} If the amount is in another currency.
+   * @throws {@link InvalidLedgerEntryError} If the amount is not positive.
+   */
+  credit(props: MovementProps): WalletLedgerEntry {
+    return this.move(LedgerDirection.Credit, props, this._balance.add(props.money));
+  }
+
+  /**
+   * Debits the wallet: the balance shrinks, the version goes up by exactly 1,
+   * and the matching ledger entry is returned for the caller to persist with it.
+   *
+   * @param props - Amount, and ids of the new entry and of its transaction.
+   * @returns The ledger entry of this debit.
+   * @throws {@link CurrencyMismatchError} If the amount is in another currency.
+   * @throws {@link InvalidLedgerEntryError} If the amount is not positive or
+   *   exceeds the balance — check {@link Wallet.canDebit} first.
+   */
+  debit(props: MovementProps): WalletLedgerEntry {
+    return this.move(LedgerDirection.Debit, props, this._balance.subtract(props.money));
+  }
+
+  /**
+   * @param money - An amount in the wallet's currency.
+   * @returns Whether debiting it keeps the balance at zero or more.
+   * @throws {@link CurrencyMismatchError} If the amount is in another currency.
+   */
+  canDebit(money: Money): boolean {
+    return !this._balance.isLessThan(money);
+  }
+
+  private move(direction: LedgerDirection, props: MovementProps, balanceAfter: Money): WalletLedgerEntry {
+    const at = new Date();
+    const entry = WalletLedgerEntry.create({
+      id: props.entryId,
+      walletId: this.id,
+      transactionId: props.transactionId,
+      direction,
+      money: props.money,
+      balanceBefore: this._balance,
+      balanceAfter,
+      walletVersion: this._version + 1,
+      createdAt: at,
+    });
+    this._balance = entry.balanceAfter;
+    this._version = entry.walletVersion;
+    this._updatedAt = at;
+    return entry;
   }
 
   get balance(): Money {
