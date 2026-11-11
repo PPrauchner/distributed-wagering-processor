@@ -7,7 +7,10 @@
  *
  * With an `Idempotency-Key`, the creation is idempotent: the same key and
  * payload replay the wallet the key created, and another payload is a conflict
- * — decided before the player's existing wallets, and again after losing a race.
+ * — the key always decides before the player's existing wallet: it is read
+ * first, read again when the player already has a wallet in that currency (a
+ * simultaneous creation may have committed in between), and read again after
+ * losing a race at the insert.
  *
  * @packageDocumentation
  */
@@ -88,7 +91,8 @@ export class CreateWallet {
    * @throws {@link WalletCreationConflictError} If the key already created a
    *   wallet from another payload — checked before the player's wallets.
    * @throws {@link WalletAlreadyExistsError} If the player already has a wallet in
-   *   that currency — also when a simultaneous creation wins the race.
+   *   that currency that the key did not create — also when a simultaneous
+   *   creation without that key wins the race.
    */
   async execute(command: CreateWalletCommand): Promise<CreatedWallet> {
     const initialBalance = Money.from(command.initialBalance);
@@ -108,7 +112,13 @@ export class CreateWallet {
         const replay = await replayFrom(wallets, wallet);
         if (replay) return replay;
         const existing = await wallets.findByPlayerAndCurrency(wallet.playerId, wallet.currency);
-        if (existing) throw new WalletAlreadyExistsError(existing.id);
+        if (existing) {
+          // A simultaneous creation may have committed after the lookup by key:
+          // read the key again, so it decides before the player's wallet does.
+          const lateReplay = await replayFrom(wallets, wallet);
+          if (lateReplay) return lateReplay;
+          throw new WalletAlreadyExistsError(existing.id);
+        }
         wallets.add(wallet);
         if (!wallet.balance.isZero()) {
           const opening = this.openingOf(wallet, correlationId);
