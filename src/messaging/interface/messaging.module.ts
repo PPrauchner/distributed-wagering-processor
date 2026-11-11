@@ -1,6 +1,7 @@
 /**
  * Nest module of messaging: the SQS client, the event publisher over it, the
- * outbox publication use case and the loop that runs it in every instance.
+ * outbox publication use case and the loop that runs it in every instance, and
+ * the input queue of the wager transactions, offered to every module.
  *
  * @packageDocumentation
  */
@@ -10,9 +11,11 @@ import type { AppConfig } from '../../config.ts';
 import type { FaultInjection } from '../../shared/application/fault-injector.ts';
 import { UNIT_OF_WORK, type UnitOfWork } from '../../shared/application/unit-of-work.ts';
 import type { EventPublisher } from '../application/event-publisher.ts';
+import { WAGER_TRANSACTIONS_QUEUE } from '../application/input-queue.ts';
 import type { OutboxRepositories } from '../application/outbox-repository.ts';
 import { PublishOutbox } from '../application/publish-outbox.ts';
 import { SqsEventPublisher } from '../infrastructure/sqs-event-publisher.ts';
+import { SqsInputQueue } from '../infrastructure/sqs-input-queue.ts';
 import { OutboxPublisherWorker } from './outbox-publisher.worker.ts';
 
 const SQS_CLIENT = Symbol('SQSClient');
@@ -26,10 +29,12 @@ export class MessagingModule implements OnApplicationShutdown {
    * @param config - The SQS connection, the event queue and the publisher's times.
    * @returns The module, exporting the publication use case.
    */
-  static forRoot(config: Pick<AppConfig, 'sqs' | 'outboxPublisher'>): DynamicModule {
-    const { sqs, outboxPublisher } = config;
+  static forRoot(config: Pick<AppConfig, 'sqs' | 'outboxPublisher' | 'wagerTransactionsConsumer'>): DynamicModule {
+    const { sqs, outboxPublisher, wagerTransactionsConsumer } = config;
     return {
       module: MessagingModule,
+      // Global for the input queue: its consumer lives with the use case it feeds.
+      global: true,
       providers: [
         {
           provide: SQS_CLIENT,
@@ -44,6 +49,17 @@ export class MessagingModule implements OnApplicationShutdown {
           provide: EVENT_PUBLISHER,
           inject: [SQS_CLIENT],
           useFactory: (client: SQSClient) => new SqsEventPublisher(client, sqs.wageringEventsQueue),
+        },
+        {
+          provide: WAGER_TRANSACTIONS_QUEUE,
+          inject: [SQS_CLIENT],
+          useFactory: (client: SQSClient) =>
+            new SqsInputQueue(client, {
+              queueName: sqs.wagerTransactionsQueue,
+              waitTimeSeconds: wagerTransactionsConsumer.waitTimeSeconds,
+              batchSize: wagerTransactionsConsumer.batchSize,
+              visibilityTimeoutSeconds: wagerTransactionsConsumer.visibilityTimeoutSeconds,
+            }),
         },
         {
           provide: PublishOutbox,
@@ -65,7 +81,7 @@ export class MessagingModule implements OnApplicationShutdown {
           useFactory: (publishOutbox: PublishOutbox) => new OutboxPublisherWorker(publishOutbox, outboxPublisher),
         },
       ],
-      exports: [PublishOutbox],
+      exports: [PublishOutbox, WAGER_TRANSACTIONS_QUEUE],
     };
   }
 

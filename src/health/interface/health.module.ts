@@ -11,6 +11,7 @@ import { Global, Inject, Logger, Module, type DynamicModule, type OnApplicationS
 import { SQSClient } from '@aws-sdk/client-sqs';
 import { MikroORM } from '@mikro-orm/postgresql';
 import type { AppConfig } from '../../config.ts';
+import { INBOX_METRICS } from '../../messaging/application/inbox-metrics.ts';
 import type { OutboxBacklogRepositories } from '../../messaging/application/outbox-backlog.ts';
 import { UNIT_OF_WORK, type UnitOfWork } from '../../shared/application/unit-of-work.ts';
 import { WAGERING_METRICS } from '../../wagering/application/wagering-metrics.ts';
@@ -51,6 +52,7 @@ export class HealthModule implements OnApplicationShutdown {
             }),
         },
         { provide: WAGERING_METRICS, useExisting: PrometheusMetrics },
+        { provide: INBOX_METRICS, useExisting: PrometheusMetrics },
         { provide: RECONCILIATION_DIVERGENCE_COUNTER, useExisting: PrometheusMetrics },
         {
           provide: PROBE_SQS_CLIENT,
@@ -76,7 +78,7 @@ export class HealthModule implements OnApplicationShutdown {
             ),
         },
       ],
-      exports: [WAGERING_METRICS, RECONCILIATION_DIVERGENCE_COUNTER],
+      exports: [WAGERING_METRICS, INBOX_METRICS, RECONCILIATION_DIVERGENCE_COUNTER],
     };
   }
 

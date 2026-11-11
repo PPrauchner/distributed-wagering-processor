@@ -14,6 +14,7 @@ export interface AppConfig {
   faultPoints: FaultPoint[];
   sqs: SqsConfig;
   outboxPublisher: OutboxPublisherConfig;
+  wagerTransactionsConsumer: WagerTransactionsConsumerConfig;
 }
 
 export interface SqsConfig {
@@ -38,6 +39,18 @@ export interface OutboxPublisherConfig {
   retryMaxMs: number;
 }
 
+/** The consumer of the input queue of every instance (`ARCHITECTURE.md` § Consumidor). */
+export interface WagerTransactionsConsumerConfig {
+  /** Whether this instance consumes the input queue; on by default. */
+  enabled: boolean;
+  /** The long polling wait of each receive, 0 to 20 s. */
+  waitTimeSeconds: number;
+  /** Messages per receive, 1 to 10, processed in parallel. */
+  batchSize: number;
+  /** How long a received message stays invisible to the other consumers. */
+  visibilityTimeoutSeconds: number;
+}
+
 // 127.0.0.1 and never localhost: on Windows localhost tries IPv6 first and each
 // new connection takes ~300 ms — enough to serialize transactions by accident
 // and hide a race in the tests (ADR 0001).
@@ -50,7 +63,8 @@ const DEFAULT_RETRY_AFTER_SECONDS = 1;
  * @returns The configuration, with local-development defaults.
  * @throws {@link Error} If `PORT` is not a valid port number, or
  *   `RETRY_AFTER_SECONDS` or a time of the outbox publisher is not a positive
- *   integer, or `OUTBOX_PUBLISHER_ENABLED` is neither `true` nor `false`, or
+ *   integer, or `OUTBOX_PUBLISHER_ENABLED` is neither `true` nor `false`, or a
+ *   setting of the consumer is out of its range, or
  *   `FAULT_INJECTION` names an unknown point or is set in production.
  */
 export function loadConfig(env: Record<string, string | undefined> = process.env): AppConfig {
@@ -84,7 +98,29 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
       retryBaseMs: positiveIntegerOf(env, 'OUTBOX_RETRY_BASE_MS', 1000),
       retryMaxMs: positiveIntegerOf(env, 'OUTBOX_RETRY_MAX_MS', 5 * 60_000),
     },
+    // SQS's own limits: a wait of at most 20 s, at most 10 messages per receive.
+    wagerTransactionsConsumer: {
+      enabled: booleanOf(env, 'WAGER_TRANSACTIONS_CONSUMER_ENABLED', true),
+      waitTimeSeconds: integerInRangeOf(env, 'WAGER_TRANSACTIONS_WAIT_SECONDS', 20, [0, 20]),
+      batchSize: integerInRangeOf(env, 'WAGER_TRANSACTIONS_BATCH_SIZE', 10, [1, 10]),
+      visibilityTimeoutSeconds: positiveIntegerOf(env, 'WAGER_TRANSACTIONS_VISIBILITY_SECONDS', 30),
+    },
   };
+}
+
+function integerInRangeOf(
+  env: Record<string, string | undefined>,
+  name: string,
+  fallback: number,
+  [min, max]: [number, number],
+): number {
+  const raw = env[name];
+  if (raw === undefined) return fallback;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < min || value > max) {
+    throw new Error(`${name} must be an integer between ${min} and ${max}, got "${raw}"`);
+  }
+  return value;
 }
 
 function positiveIntegerOf(env: Record<string, string | undefined>, name: string, fallback: number): number {

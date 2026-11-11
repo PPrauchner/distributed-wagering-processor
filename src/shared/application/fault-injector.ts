@@ -14,7 +14,10 @@ export enum FaultPoint {
    * schema invariant, so the true error goes through the classifier.
    */
   InvariantViolationBeforeCommit = 'invariant-violation-before-commit',
-  /** Reserved for the queue consumer: after the commit, before the `ack`. */
+  /**
+   * The queue consumer dies after the outcome committed, before the `ack`:
+   * the message reappears once its visibility expires.
+   */
   CrashAfterCommit = 'crash-after-commit',
   /**
    * The outbox publisher dies after the send, before `published_at`: the lease

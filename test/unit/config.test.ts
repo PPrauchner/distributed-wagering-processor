@@ -105,3 +105,42 @@ describe('the outbox publisher', () => {
     expect(() => loadConfig({ OUTBOX_PUBLISHER_ENABLED: 'maybe' })).toThrow(/OUTBOX_PUBLISHER_ENABLED/);
   });
 });
+
+describe('the wager transactions consumer', () => {
+  test('defaults: enabled, 20 s long polling, batches of 10, 30 s visibility', () => {
+    expect(loadConfig({}).wagerTransactionsConsumer).toEqual({
+      enabled: true,
+      waitTimeSeconds: 20,
+      batchSize: 10,
+      visibilityTimeoutSeconds: 30,
+    });
+  });
+
+  test('every setting comes from the environment', () => {
+    const config = loadConfig({
+      WAGER_TRANSACTIONS_CONSUMER_ENABLED: 'false',
+      WAGER_TRANSACTIONS_WAIT_SECONDS: '0',
+      WAGER_TRANSACTIONS_BATCH_SIZE: '3',
+      WAGER_TRANSACTIONS_VISIBILITY_SECONDS: '5',
+    });
+
+    expect(config.wagerTransactionsConsumer).toEqual({
+      enabled: false,
+      waitTimeSeconds: 0,
+      batchSize: 3,
+      visibilityTimeoutSeconds: 5,
+    });
+  });
+
+  test.each([
+    ['WAGER_TRANSACTIONS_WAIT_SECONDS', '21'],
+    ['WAGER_TRANSACTIONS_WAIT_SECONDS', '-1'],
+    ['WAGER_TRANSACTIONS_BATCH_SIZE', '0'],
+    ['WAGER_TRANSACTIONS_BATCH_SIZE', '11'],
+    ['WAGER_TRANSACTIONS_VISIBILITY_SECONDS', '0'],
+    ['WAGER_TRANSACTIONS_VISIBILITY_SECONDS', '1.5'],
+    ['WAGER_TRANSACTIONS_CONSUMER_ENABLED', 'yes'],
+  ])('%s=%s is refused', (name, value) => {
+    expect(() => loadConfig({ [name]: value })).toThrow(new RegExp(name));
+  });
+});

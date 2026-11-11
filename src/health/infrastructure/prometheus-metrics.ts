@@ -9,6 +9,7 @@
  * @packageDocumentation
  */
 import { Counter, Gauge, Histogram, Registry } from 'prom-client';
+import type { InboxMetrics } from '../../messaging/application/inbox-metrics.ts';
 import type { OutboxBacklog } from '../../messaging/application/outbox-backlog.ts';
 import type { LockConflictReason } from '../../shared/application/infrastructure-failures.ts';
 import type { SubmissionChannel } from '../../wagering/domain/rejected-submission.ts';
@@ -29,12 +30,13 @@ export interface BacklogReadOptions {
   log: MetricsLog;
 }
 
-export class PrometheusMetrics implements WageringMetrics, ReconciliationDivergenceCounter {
+export class PrometheusMetrics implements WageringMetrics, InboxMetrics, ReconciliationDivergenceCounter {
   readonly registry = new Registry();
   private readonly transactions: Counter<'kind' | 'status' | 'channel'>;
   private readonly replays: Counter<'channel'>;
   private readonly idempotencyConflicts: Counter<'channel'>;
   private readonly notAdmitted: Counter<'failure_code' | 'channel'>;
+  private readonly inboxDuplicates: Counter;
   private readonly lockConflicts: Counter<'reason'>;
   private readonly latency: Histogram<'channel' | 'kind'>;
   private readonly divergences: Counter;
@@ -75,7 +77,7 @@ export class PrometheusMetrics implements WageringMetrics, ReconciliationDiverge
       labelNames: ['failure_code', 'channel'],
       registers,
     });
-    new Counter({
+    this.inboxDuplicates = new Counter({
       name: 'inbox_duplicates_total',
       help: 'Queue messages the inbox already held, acknowledged without processing.',
       registers,
@@ -163,6 +165,10 @@ export class PrometheusMetrics implements WageringMetrics, ReconciliationDiverge
 
   submissionNotAdmitted(failureCode: string, channel: SubmissionChannel): void {
     this.notAdmitted.inc({ failure_code: failureCode, channel });
+  }
+
+  inboxDuplicate(): void {
+    this.inboxDuplicates.inc();
   }
 
   increment(): void {
