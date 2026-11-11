@@ -16,7 +16,7 @@ import type { INestApplication } from '@nestjs/common';
 import { SQL } from 'bun';
 import { createApp } from '../../../src/app.ts';
 import { loadConfig } from '../../../src/config.ts';
-import { InboxRedeliveryError, type InboxEntry } from '../../../src/messaging/application/inbox-repository.ts';
+import { InboxRedeliveryError, MessageIdConflictError, type InboxEntry } from '../../../src/messaging/application/inbox-repository.ts';
 import { FaultPoint } from '../../../src/shared/application/fault-injector.ts';
 import { FailureCode } from '../../../src/shared/domain/failure-code.ts';
 import {
@@ -130,6 +130,23 @@ describe('a submission received by the queue', () => {
 
     await expect(redelivered).rejects.toBeInstanceOf(InboxRedeliveryError);
     expect(await walletState(wallet.id)).toEqual(before);
+  });
+
+  test('the same messageId with another payload is a messageId conflict, and the first outcome stays intact', async () => {
+    const wallet = await createWallet('100.00');
+    const entry = inboxEntry();
+    const first = await useCase.execute(betOn(wallet), SubmissionChannel.Queue, entry);
+    const before = await walletState(wallet.id);
+
+    const conflicting = useCase.execute(betOn(wallet, '10.00'), SubmissionChannel.Queue, {
+      ...entry,
+      payloadHash: 'e'.repeat(64),
+    });
+
+    await expect(conflicting).rejects.toBeInstanceOf(MessageIdConflictError);
+    expect(await walletState(wallet.id)).toEqual(before);
+    expect(await inboxRow(entry.messageId)).toEqual({ payload_hash: entry.payloadHash, processed: true });
+    expect(first.transaction.status).toBe(WagerTransactionStatus.Processed);
   });
 
   test('recorded first by HTTP, it is a replay, and the inbox row is recorded', async () => {
