@@ -37,6 +37,7 @@ import type { WageringRepositories } from '../../../src/wagering/application/wag
 import { CreateWallet } from '../../../src/wallet/application/create-wallet.ts';
 import type { WalletRepositories } from '../../../src/wallet/application/wallet-repository.ts';
 import { expectLedgerConsistent } from '../ledger-invariant.ts';
+import { waitUntil } from '../../support/wait-until.ts';
 
 type JsonObject = Record<string, unknown>;
 
@@ -142,15 +143,6 @@ async function createQueuePair(): Promise<QueuePair> {
   return { name, url: url!, dlqName, dlqUrl: dlqUrl! };
 }
 
-async function waitFor<T>(probe: () => Promise<T | undefined>, timeoutMs = 30_000): Promise<T> {
-  const deadline = Date.now() + timeoutMs;
-  for (;;) {
-    const value = await probe();
-    if (value !== undefined) return value;
-    if (Date.now() > deadline) throw new Error('condition not met in time');
-    await Bun.sleep(25);
-  }
-}
 
 async function createWallet(amount: string): Promise<TestWallet> {
   const playerId = Bun.randomUUIDv7();
@@ -235,7 +227,7 @@ async function drained(queueUrl: string): Promise<true | undefined> {
 async function deadLetter(dlqUrl: string, matches: (letter: DeadLetter) => boolean): Promise<DeadLetter> {
   const seen = letters.get(dlqUrl) ?? [];
   letters.set(dlqUrl, seen);
-  return waitFor(async () => {
+  return waitUntil(async () => {
     const { Messages = [] } = await sqs.send(
       new ReceiveMessageCommand({
         QueueUrl: dlqUrl,
@@ -285,7 +277,7 @@ async function transactionsOf(data: JsonObject): Promise<TransactionRow[]> {
 }
 
 async function oneTransactionOf(data: JsonObject): Promise<TransactionRow> {
-  const [row] = await waitFor(async () => {
+  const [row] = await waitUntil(async () => {
     const rows = await transactionsOf(data);
     return rows.length > 0 ? rows : undefined;
   });
@@ -297,6 +289,20 @@ async function inboxRow(messageId: string): Promise<{ payload_hash: string } | u
     select payload_hash from inbox_messages where consumer_name = ${CONSUMER} and message_id = ${messageId}
   `;
   return row;
+}
+
+async function inboxRowsOf(messageId: string): Promise<{ processed: boolean }[]> {
+  return [
+    ...(await sql`
+      select processed_at is not null as processed from inbox_messages
+       where consumer_name = ${CONSUMER} and message_id = ${messageId}
+    `),
+  ];
+}
+
+async function outboxIds(walletId: string): Promise<string[]> {
+  const rows = await sql`select id::text from outbox_messages where wallet_id = ${walletId} order by id`;
+  return rows.map((row: { id: string }) => row.id);
 }
 
 async function rejectedRows(messageId: string): Promise<{ failure_code: string; channel: string }[]> {
@@ -348,7 +354,7 @@ async function exhaustRetries(data: JsonObject): Promise<{ messageId: string; le
   const messageId = await send(main.url, data);
   const letter = await deadLetter(main.dlqUrl, withMessageId(messageId));
   // The rejected row is recorded after the DLQ send, before the ack.
-  await waitFor(() => drained(main.url));
+  await waitUntil(() => drained(main.url));
   release();
   await lock.released;
   return { messageId, letter };
@@ -363,13 +369,13 @@ describe('a transient failure', () => {
     const lock = await holdWalletLock(wallet.id, new Promise((resolve) => (release = resolve)));
 
     await send(main.url, data);
-    await waitFor(async () => ((await retries('TRANSIENT_LOCK_TIMEOUT')) > retriesBefore ? true : undefined));
+    await waitUntil(async () => ((await retries('TRANSIENT_LOCK_TIMEOUT')) > retriesBefore ? true : undefined));
     expect(await transactionsOf(data)).toEqual([]);
     release();
     await lock.released;
 
     const transaction = await oneTransactionOf(data);
-    await waitFor(() => drained(main.url));
+    await waitUntil(() => drained(main.url));
     expect(transaction.status).toBe('PROCESSED');
     expect(await transactionsOf(data)).toHaveLength(1);
     expect(await walletState(wallet.id)).toEqual({ balance_amount: '75.00', version: 2 });
@@ -396,7 +402,7 @@ describe('a transient failure', () => {
     // The same messageId and body; a new deduplication id, past the FIFO window.
     await send(main.url, data, { messageId });
     const transaction = await oneTransactionOf(data);
-    await waitFor(() => drained(main.url));
+    await waitUntil(() => drained(main.url));
 
     expect(transaction.status).toBe('PROCESSED');
     expect(await transactionsOf(data)).toHaveLength(1);
@@ -434,17 +440,22 @@ describe('a permanent error', () => {
     await faulty.init();
     const wallet = await createWallet('100.00');
     const data = betData(wallet);
+    const outboxBefore = await outboxIds(wallet.id);
 
     const messageId = await send(queues.url, data);
     const letter = await deadLetter(queues.dlqUrl, withMessageId(messageId));
-    await waitFor(() => drained(queues.url));
+    await waitUntil(() => drained(queues.url));
 
     expect(letter.failureCode).toBe('INFRA_INVARIANT_VIOLATION');
     expect(await transactionsOf(data)).toMatchObject([{ status: 'FAILED', failure_code: 'INFRA_INVARIANT_VIOLATION' }]);
     expect(await rejectedRows(messageId)).toEqual([]);
+    // Atomicity: the first unit of work left no event; the inbox holds only the
+    // row the second one — the FAILED write — recorded, processed.
+    expect(await outboxIds(wallet.id)).toEqual(outboxBefore);
+    expect(await inboxRowsOf(messageId)).toEqual([{ processed: true }]);
 
     await send(queues.url, data, { messageId });
-    await waitFor(() => drained(queues.url));
+    await waitUntil(() => drained(queues.url));
     expect(await transactionsOf(data)).toHaveLength(1);
     expect(await walletState(wallet.id)).toEqual({ balance_amount: '100.00', version: 1 });
   }, 60_000);
@@ -458,7 +469,7 @@ describe('a submission not admitted', () => {
 
     const messageId = await send(main.url, data);
     const letter = await deadLetter(main.dlqUrl, withMessageId(messageId));
-    await waitFor(() => drained(main.url));
+    await waitUntil(() => drained(main.url));
 
     expect(letter.failureCode).toBe('INVALID_PAYLOAD');
     expect(await rejectedRows(messageId)).toEqual([{ failure_code: 'INVALID_PAYLOAD', channel: 'QUEUE' }]);
@@ -472,11 +483,11 @@ describe('a submission not admitted', () => {
     const retriesBefore = await retries('WALLET_NOT_FOUND');
 
     const messageId = await send(main.url, data);
-    await waitFor(async () => ((await retries('WALLET_NOT_FOUND')) > retriesBefore ? true : undefined));
+    await waitUntil(async () => ((await retries('WALLET_NOT_FOUND')) > retriesBefore ? true : undefined));
     await createWalletWithId(wallet, '100.00');
 
     const transaction = await oneTransactionOf(data);
-    await waitFor(() => drained(main.url));
+    await waitUntil(() => drained(main.url));
     expect(transaction.status).toBe('PROCESSED');
     expect(await rejectedRows(messageId)).toEqual([]);
     expect(await walletState(wallet.id)).toEqual({ balance_amount: '75.00', version: 2 });
@@ -487,7 +498,7 @@ describe('a submission not admitted', () => {
 
     const messageId = await send(main.url, data);
     const letter = await deadLetter(main.dlqUrl, withMessageId(messageId));
-    await waitFor(() => drained(main.url));
+    await waitUntil(() => drained(main.url));
 
     expect(letter.failureCode).toBe('WALLET_NOT_FOUND');
     expect(await rejectedRows(messageId)).toEqual([{ failure_code: 'WALLET_NOT_FOUND', channel: 'QUEUE' }]);
@@ -499,7 +510,7 @@ describe('a submission not admitted', () => {
     const data = betData(wallet);
     const messageId = await send(main.url, data);
     await oneTransactionOf(data);
-    await waitFor(() => drained(main.url));
+    await waitUntil(() => drained(main.url));
     const before = await walletState(wallet.id);
 
     const other = betData(wallet, '10.00');
@@ -507,7 +518,7 @@ describe('a submission not admitted', () => {
     const letter = await deadLetter(main.dlqUrl, (candidate) =>
       withMessageId(messageId)(candidate) && (candidate.body as { data: JsonObject }).data.externalTransactionId === other.externalTransactionId,
     );
-    await waitFor(() => drained(main.url));
+    await waitUntil(() => drained(main.url));
 
     expect(letter.failureCode).toBe('MESSAGE_ID_CONFLICT');
     expect(await rejectedRows(messageId)).toEqual([{ failure_code: 'MESSAGE_ID_CONFLICT', channel: 'QUEUE' }]);
@@ -521,7 +532,7 @@ describe('a submission not admitted', () => {
     const first = betData(wallet);
     await send(main.url, first);
     await oneTransactionOf(first);
-    await waitFor(() => drained(main.url));
+    await waitUntil(() => drained(main.url));
 
     const cases: [JsonObject, string][] = [
       [{ ...first, money: { amount: '5.00', currency: 'BRL' } }, 'IDEMPOTENCY_CONFLICT'],
@@ -532,7 +543,7 @@ describe('a submission not admitted', () => {
       const messageId = await send(main.url, data);
       const letter = await deadLetter(main.dlqUrl, withMessageId(messageId));
       // The row is recorded after the DLQ send, before the ack.
-      await waitFor(() => drained(main.url));
+      await waitUntil(() => drained(main.url));
       expect(letter.failureCode).toBe(failureCode);
       expect(await rejectedRows(messageId)).toEqual([{ failure_code: failureCode, channel: 'QUEUE' }]);
     }
@@ -562,7 +573,7 @@ describe('SIGTERM with messages in progress', () => {
     });
 
     for (const data of sent) await send(queues.url, data);
-    await waitFor(async () => {
+    await waitUntil(async () => {
       const [row] = await sql`
         select count(*)::int as settled from wager_transactions
          where wallet_id in ${sql(wallets.map((wallet) => wallet.id))} and kind = 'BET'
@@ -572,14 +583,18 @@ describe('SIGTERM with messages in progress', () => {
     const signalled = performance.now();
     if (windows) child.send('SIGTERM');
     else child.kill('SIGTERM');
-    const ended = await Promise.race([child.exited.then(() => true), Bun.sleep(25_000).then(() => false)]);
+    const ended = await waitUntil(
+      async () => (child.exitCode !== null || child.signalCode !== null ? true : undefined),
+      25_000,
+      'the process ended',
+    ).catch(() => false);
     if (!ended) child.kill('SIGKILL');
     expect(ended).toBe(true);
     expect(performance.now() - signalled).toBeLessThan(25_000);
 
     const survivor = await startApp(instanceConfig(queues));
     await survivor.init();
-    await waitFor(() => drained(queues.url), 45_000);
+    await waitUntil(() => drained(queues.url), 45_000);
 
     for (const data of sent) expect(await transactionsOf(data)).toMatchObject([{ status: 'PROCESSED' }]);
     for (const wallet of wallets) expect(await walletState(wallet.id)).toEqual({ balance_amount: '75.00', version: 6 });

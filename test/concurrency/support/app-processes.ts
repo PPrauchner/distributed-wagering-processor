@@ -14,7 +14,7 @@ import { mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Subprocess } from 'bun';
-import { waitUntil } from './wait-until.ts';
+import { waitUntil } from '../../support/wait-until.ts';
 
 /** Where each instance's stdout and stderr go, one file per instance. */
 export const LOG_DIR = join(tmpdir(), 'wagering-concurrency-logs');

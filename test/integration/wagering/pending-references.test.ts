@@ -19,6 +19,7 @@ import { loadConfig, type AppConfig } from '../../../src/config.ts';
 import { FaultPoint } from '../../../src/shared/application/fault-injector.ts';
 import { ResolvePendingReferences } from '../../../src/wagering/application/resolve-pending-references.ts';
 import { expectLedgerConsistent } from '../ledger-invariant.ts';
+import { waitUntil } from '../../support/wait-until.ts';
 
 type JsonObject = Record<string, unknown>;
 
@@ -109,20 +110,10 @@ async function submit(
   return { status: response.status, body: (await response.json()) as JsonObject };
 }
 
-/** Polls `probe` until it returns something, failing after the timeout — never a fixed sleep. */
-async function waitFor<T>(probe: () => Promise<T | undefined>, timeoutMs = 10_000): Promise<T> {
-  const deadline = Date.now() + timeoutMs;
-  for (;;) {
-    const value = await probe();
-    if (value !== undefined) return value;
-    if (Date.now() > deadline) throw new Error('condition not met before the timeout');
-    await Bun.sleep(20);
-  }
-}
 
 /** Runs worker cycles until the transaction leaves `PENDING_REFERENCE`. */
 async function resolvedBy(resolver: ResolvePendingReferences, transactionId: unknown): Promise<JsonObject> {
-  return waitFor(async () => {
+  return waitUntil(async () => {
     await resolver.resolveDue();
     const current = await row(transactionId);
     return current.status === 'PENDING_REFERENCE' ? undefined : current;
@@ -131,7 +122,7 @@ async function resolvedBy(resolver: ResolvePendingReferences, transactionId: unk
 
 /** Waits, on the database clock, until the transaction's TTL is over. */
 async function ttlOver(transactionId: unknown): Promise<void> {
-  await waitFor(async () => {
+  await waitUntil(async () => {
     const [found] = await sql`
       select created_at + make_interval(secs => ${TTL_MS / 1000}) <= now() as over
         from wager_transactions where id = ${transactionId as string}
@@ -273,7 +264,7 @@ describe('the worker turns a pending reference down', () => {
     const rollback = citing(wallet, 'ROLLBACK', transactionOn(wallet, 'BET'));
     const pending = await submit(rollback, 'corr-original');
 
-    const retried = await waitFor(async () => {
+    const retried = await waitUntil(async () => {
       await worker.resolveDue();
       const current = await row(pending.body.transactionId);
       return (current.attempts as number) >= 1 ? current : undefined;
@@ -343,7 +334,7 @@ describe('the worker under failure', () => {
     const refund = await submit(citing(wallet, 'REFUND', bet));
     await submit(bet);
     // The reference is there, yet every attempt fails transiently: counted, still pending.
-    await waitFor(async () => {
+    await waitUntil(async () => {
       await faulty.resolveDue();
       const current = await row(refund.body.transactionId);
       return (current.attempts as number) >= 2 ? current : undefined;
@@ -384,7 +375,7 @@ describe('the worker under failure', () => {
     for (const bet of bets) refunds.push(await submit(citing(wallet, 'REFUND', bet)));
     for (const bet of bets) await submit(bet);
 
-    await waitFor(async () => {
+    await waitUntil(async () => {
       await Promise.all([worker.resolveDue(), other.resolveDue(), worker.resolveDue(), other.resolveDue()]);
       const current = await Promise.all(refunds.map((refund) => row(refund.body.transactionId)));
       return current.every((found) => found.status === 'PROCESSED') ? true : undefined;
@@ -413,7 +404,7 @@ describe('the worker loop of an instance', () => {
       const rollback = await submit(citing(wallet, 'ROLLBACK', bet));
       await submit(bet);
 
-      const resolved = await waitFor(async () => {
+      const resolved = await waitUntil(async () => {
         const current = await row(rollback.body.transactionId);
         return current.status === 'PENDING_REFERENCE' ? undefined : current;
       });

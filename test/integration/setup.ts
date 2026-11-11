@@ -3,12 +3,20 @@
  * run and migrates it up, so tests never depend on leftovers of a previous run.
  * Tests then isolate themselves by using their own ids — no cleanup between them.
  *
+ * Shared by the integration and the concurrency suites. After the whole run —
+ * once every file has ended, and with it the app processes it started — a
+ * global `afterAll` reconciles every wallet of the test database: one left
+ * inconsistent by any test fails the run, unless that test excluded it with
+ * `excludeFromLedgerInvariant`. The per-file checks still run.
+ *
  * @packageDocumentation
  */
+import { afterAll } from 'bun:test';
 import { SQL } from 'bun';
 import { MikroORM } from '@mikro-orm/postgresql';
 import { loadConfig } from '../../src/config.ts';
 import { createOrmConfig } from '../../src/database/orm.config.ts';
+import { findInconsistentWallets } from './ledger-invariant.ts';
 
 const baseUrl = new URL(loadConfig().databaseUrl);
 const testDatabase = `${baseUrl.pathname.slice(1)}_test`;
@@ -37,3 +45,15 @@ try {
 } finally {
   await orm.close(true);
 }
+
+afterAll(async () => {
+  const sql = new SQL(process.env.DATABASE_URL!);
+  try {
+    const inconsistent = await findInconsistentWallets(sql);
+    if (inconsistent.length > 0) {
+      throw new Error(`ledger invariant broken after the run:\n${JSON.stringify(inconsistent, null, 2)}`);
+    }
+  } finally {
+    await sql.close();
+  }
+});

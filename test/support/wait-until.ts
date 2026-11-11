@@ -1,11 +1,12 @@
 /**
- * The one way the concurrency suite waits: for a condition, with a timeout —
- * never for a fixed time.
+ * The one way the integration and concurrency suites wait: for a condition,
+ * with a timeout — never for a fixed time.
  *
  * @packageDocumentation
  */
 
 const POLL_MS = 25;
+const DEFAULT_TIMEOUT_MS = 30_000;
 
 /**
  * Polls `probe` until it returns something other than `undefined`.
@@ -18,7 +19,7 @@ const POLL_MS = 25;
  */
 export async function waitUntil<T>(
   probe: () => Promise<T | undefined>,
-  timeoutMs: number,
+  timeoutMs = DEFAULT_TIMEOUT_MS,
   label = 'condition',
 ): Promise<T> {
   const deadline = Date.now() + timeoutMs;

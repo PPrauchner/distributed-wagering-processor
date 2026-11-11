@@ -16,7 +16,7 @@ import type { INestApplication } from '@nestjs/common';
 import { SQL } from 'bun';
 import { createApp } from '../../../src/app.ts';
 import { loadConfig } from '../../../src/config.ts';
-import { expectLedgerConsistent } from '../ledger-invariant.ts';
+import { excludeFromLedgerInvariant, expectLedgerConsistent } from '../ledger-invariant.ts';
 
 type JsonObject = Record<string, unknown>;
 
@@ -182,6 +182,8 @@ describe('GET /metrics', () => {
   test('a reconciliation divergence: counted', async () => {
     const before = await scrape();
     const wallet = await createWallet('100.00');
+    // Divergent on purpose: out of the final invariant check of the run.
+    excludeFromLedgerInvariant(wallet.id);
     await sql.begin(async (tx) => {
       await tx`set local session_replication_role = replica`;
       await tx`update wallets set balance_amount = 90.00 where id = ${wallet.id}`;

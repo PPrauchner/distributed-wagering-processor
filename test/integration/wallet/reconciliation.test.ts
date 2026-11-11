@@ -19,7 +19,7 @@ import {
   Reconciliation,
   type ReconciliationLog,
 } from '../../../src/wallet/application/reconciliation.ts';
-import { expectLedgerConsistent } from '../ledger-invariant.ts';
+import { excludeFromLedgerInvariant, expectLedgerConsistent } from '../ledger-invariant.ts';
 
 let orm: MikroORM;
 let sql: SQL;
@@ -57,8 +57,12 @@ async function walletWith(amount: string): Promise<string> {
   return wallet.id;
 }
 
-/** Runs `tamper` with every trigger off, in this session's transaction only. */
-async function bypassingTriggers(tamper: (tx: SQL) => Promise<unknown>): Promise<void> {
+/**
+ * Runs `tamper` with every trigger off, in this session's transaction only;
+ * the wallet, divergent on purpose, leaves the final invariant check of the run.
+ */
+async function bypassingTriggers(walletId: string, tamper: (tx: SQL) => Promise<unknown>): Promise<void> {
+  excludeFromLedgerInvariant(walletId);
   await sql.begin(async (tx) => {
     await tx`set local session_replication_role = replica`;
     await tamper(tx);
@@ -87,7 +91,7 @@ describe('Reconciliation', () => {
 
   test('a balance changed without an entry: the difference shows it, logged and counted, nothing changed', async () => {
     const walletId = await walletWith('100.00');
-    await bypassingTriggers((tx) => tx`update wallets set balance_amount = 90.00 where id = ${walletId}`);
+    await bypassingTriggers(walletId, (tx) => tx`update wallets set balance_amount = 90.00 where id = ${walletId}`);
     const before = await stateOf(walletId);
     const { reconciliation, divergences, errors } = reconciliationWithSpies();
 
@@ -109,7 +113,7 @@ describe('Reconciliation', () => {
   test('gaps in the version sequence, inside and at its end: listed as ranges, logged and counted', async () => {
     const walletId = await walletWith('100.00');
     // Version 3 credits 10.00 on top of the opening; 2, 4 and 5 have no entry.
-    await bypassingTriggers(async (tx) => {
+    await bypassingTriggers(walletId, async (tx) => {
       await tx`update wallets set balance_amount = 110.00, version = 5 where id = ${walletId}`;
       await tx`
         insert into wallet_ledger_entries (
@@ -142,7 +146,7 @@ describe('Reconciliation', () => {
   test('an entry above the wallet version: reported, logged and counted', async () => {
     const walletId = await walletWith('100.00');
     // Version 2 credits 10.00 on top of the opening, but the wallet stays at version 1.
-    await bypassingTriggers(async (tx) => {
+    await bypassingTriggers(walletId, async (tx) => {
       await tx`update wallets set balance_amount = 110.00 where id = ${walletId}`;
       await tx`
         insert into wallet_ledger_entries (
@@ -172,7 +176,7 @@ describe('Reconciliation', () => {
 
   test('a missing opening is a difference, not a gap', async () => {
     const walletId = await walletWith('0.00');
-    await bypassingTriggers((tx) => tx`update wallets set balance_amount = 20.00 where id = ${walletId}`);
+    await bypassingTriggers(walletId, (tx) => tx`update wallets set balance_amount = 20.00 where id = ${walletId}`);
     const { reconciliation } = reconciliationWithSpies();
 
     const report = await reconciliation.execute(walletId);
