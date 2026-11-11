@@ -2,7 +2,8 @@
  * Concurrency scenarios 4 and 5 of §13, with real app processes: three
  * instances over the same database and queues under load by HTTP and by the
  * input queue at once, on a few hot wallets; and a worker killed between the
- * commit and the `ack`, whose message another instance gets again. Every
+ * commit and the `ack` — `SIGKILL` to itself, at the `crash-after-commit`
+ * point —, whose message another instance gets again. Every
  * scenario ends checking the ledger invariant of every wallet it touched.
  *
  * @packageDocumentation
@@ -109,9 +110,13 @@ describe('5. a worker killed after the commit, before the ack', () => {
     const bet: JsonObject = transactionOn(wallet, 'BET');
 
     await sendSubmission(queues.input, queued(bet));
-    await waitUntil(() => terminalTransactionOf(bet), 30_000, 'the bet committed');
-    await dying.kill();
-    expect(dying.process.exitCode === 0).toBe(false);
+    // The crash point kills the process itself — `SIGKILL` —, nobody else does.
+    await waitUntil(
+      async () => (dying.process.exitCode !== null || dying.process.signalCode !== null ? true : undefined),
+      30_000,
+      'the instance killed at the crash point',
+    );
+    expect(await terminalTransactionOf(bet)).toMatchObject({ status: 'PROCESSED' });
     expect(await messagesLeft(queues.input)).toBe(1);
     const afterCommit = await walletState(wallet.id);
 
