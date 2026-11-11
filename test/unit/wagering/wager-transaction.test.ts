@@ -349,3 +349,35 @@ describe('WagerTransaction.rehydrate', () => {
     expect(() => WagerTransaction.rehydrate(state)).not.toThrow();
   });
 });
+
+describe('WagerTransaction.create validates the identifiers', () => {
+  const identifiers = [
+    'providerId',
+    'externalTransactionId',
+    'idempotencyKey',
+    'playerId',
+    'roundId',
+    'gameId',
+    'referenceExternalTransactionId',
+  ] as const;
+  const win = (overrides: Partial<CreateWagerTransactionProps>): CreateWagerTransactionProps =>
+    bet({ kind: WagerTransactionKind.Win, referenceExternalTransactionId: 'bet-0', ...overrides });
+
+  test.each(identifiers)('refuses an empty %s', (field) => {
+    expect(() => WagerTransaction.create(win({ [field]: '' }))).toThrow(
+      new InvalidWagerTransactionError(`${field} must have between 1 and 255 characters`),
+    );
+  });
+
+  test.each(identifiers)('refuses a %s of 256 characters', (field) => {
+    expect(() => WagerTransaction.create(win({ [field]: 'x'.repeat(256) }))).toThrow(InvalidWagerTransactionError);
+  });
+
+  test.each(identifiers)('takes a %s of 255 characters', (field) => {
+    expect(() => WagerTransaction.create(win({ [field]: 'y'.repeat(255) }))).not.toThrow();
+  });
+
+  test('takes the OPENING the wallet creates', () => {
+    expect(() => WagerTransaction.create(opening())).not.toThrow();
+  });
+});
