@@ -12,6 +12,11 @@ Fornecedor de jogos que envia transações de aposta. Quem chama a API é sempre
 provedor.
 _Avoid_: fornecedor, parceiro, integrador, usuário
 
+**Identidade do provedor** (`ProviderIdentity`):
+O provedor como o qual uma requisição HTTP está autenticada. O `providerId` que a
+requisição declara tem de ser o dela; a fila, canal interno, não tem identidade.
+_Avoid_: usuário logado, sessão, credencial
+
 **Jogador** (`playerId`):
 A pessoa dona de carteiras, identificada pelo provedor.
 _Avoid_: usuário, cliente
@@ -34,8 +39,9 @@ O valor disponível guardado na carteira. Fica entre zero e o **saldo máximo**.
 _Avoid_: saldo atual, crédito
 
 **Saldo máximo**:
-O maior saldo que uma carteira pode ter. Um crédito que o ultrapassaria é
-rejeitado, nunca truncado.
+O maior saldo que uma carteira pode ter: `99999999999999999.99`, o limite da
+coluna. Um crédito que o ultrapassaria é rejeitado (`BALANCE_LIMIT_EXCEEDED`),
+nunca truncado.
 _Avoid_: limite, teto (sozinhos)
 
 **Valor** (`Money`):

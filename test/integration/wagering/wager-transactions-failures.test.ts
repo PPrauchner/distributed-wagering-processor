@@ -15,6 +15,7 @@ import { createApp } from '../../../src/app.ts';
 import { loadConfig, type AppConfig } from '../../../src/config.ts';
 import { FaultPoint } from '../../../src/shared/application/fault-injector.ts';
 import { expectLedgerConsistent } from '../ledger-invariant.ts';
+import { waitUntil } from '../../support/wait-until.ts';
 
 type JsonObject = Record<string, unknown>;
 
@@ -129,6 +130,16 @@ describe('transient failures: 503 with Retry-After, nothing recorded', () => {
   });
 });
 
+/**
+ * @returns The wallet's outbox rows and the inbox size: what a unit of work
+ *   that wrote an event or a queue message would have changed.
+ */
+async function messagingRows(walletId: string): Promise<{ outbox: string[]; inbox: number }> {
+  const outbox = await sql`select id::text from outbox_messages where wallet_id = ${walletId} order by id`;
+  const [{ inbox }] = await sql`select count(*)::int as inbox from inbox_messages`;
+  return { outbox: outbox.map((row: { id: string }) => row.id), inbox };
+}
+
 describe('a permanent error: FAILED, recorded by a second unit of work', () => {
   let faultyUrl: string;
 
@@ -136,8 +147,9 @@ describe('a permanent error: FAILED, recorded by a second unit of work', () => {
     faultyUrl = await startApp({ ...config, faultPoints: [FaultPoint.InvariantViolationBeforeCommit] });
   });
 
-  test('an invariant violated before the commit → 500 FAILED INFRA_INVARIANT_VIOLATION; balance, ledger untouched', async () => {
+  test('an invariant violated before the commit → 500 FAILED INFRA_INVARIANT_VIOLATION; balance, ledger, outbox and inbox untouched', async () => {
     const wallet = await createWallet('100.00');
+    const before = await messagingRows(wallet.id);
 
     const response = await submit(faultyUrl, betOn(wallet));
 
@@ -169,6 +181,8 @@ describe('a permanent error: FAILED, recorded by a second unit of work', () => {
         from wallets where id = ${wallet.id}
     `;
     expect(walletRow).toEqual({ balance: '100.00', version: 1, entries: 1 });
+    // Atomicity: the first unit of work left no event; the second, by HTTP, writes no inbox row.
+    expect(await messagingRows(wallet.id)).toEqual(before);
   });
 
   test('the replay answers the same 500, with idempotentReplay; another payload is a conflict', async () => {
@@ -184,5 +198,89 @@ describe('a permanent error: FAILED, recorded by a second unit of work', () => {
     expect(conflict.status).toBe(409);
     expect(await conflict.json()).toMatchObject({ failureCode: 'IDEMPOTENCY_CONFLICT' });
     expect(await transactionCount(wallet.id)).toBe(1);
+  });
+
+  describe('the FAILED write starts with the wallet lock (ADR 0002)', () => {
+    /** Polls until a backend matching `condition` waits on a lock. */
+    async function untilLockWait(condition: (row: { pid: number; query: string }) => boolean): Promise<void> {
+      await waitUntil(
+        async () => {
+          const rows = (await sql`
+            select pid, query from pg_stat_activity where wait_event_type = 'Lock'
+          `) as { pid: number; query: string }[];
+          return rows.some(condition) ? true : undefined;
+        },
+        5_000,
+        'a backend waiting on the expected lock',
+      );
+    }
+
+    /**
+     * Submits with the permanent fault and makes an outside session take the
+     * wallet lock right after the first unit of work rolls back, so the FAILED
+     * write meets a held wallet. The first unit of work is held, wallet locked,
+     * on its insert by a table lock; the outside session queues on the wallet;
+     * then the table lock goes. `release` says when the outside session lets
+     * the wallet go: once the answer came — held past the lock timeout — or as
+     * soon as the FAILED write waits on it.
+     */
+    async function failedWriteMeetingHeldWallet(
+      wallet: TestWallet,
+      release: 'after-the-answer' | 'once-the-failed-write-waits',
+    ): Promise<Response> {
+      const tableHolder = await sql.reserve();
+      const walletHolder = await sql.reserve();
+      try {
+        await tableHolder`begin`;
+        await tableHolder`lock table wager_transactions in share mode`;
+        const pending = submit(faultyUrl, betOn(wallet));
+        await untilLockWait(({ query }) => /insert into "wager_transactions"/i.test(query));
+
+        await walletHolder`begin`;
+        const [{ pid }] = (await walletHolder`select pg_backend_pid() as pid`) as [{ pid: number }];
+        const walletLocked = (async () => walletHolder`select id from wallets where id = ${wallet.id} for update`)();
+        await untilLockWait((row) => row.pid === pid);
+        await tableHolder`rollback`;
+        await walletLocked;
+
+        if (release === 'after-the-answer') {
+          const response = await pending;
+          await walletHolder`rollback`;
+          return response;
+        }
+        await untilLockWait((row) => row.pid !== pid && /from "wallets".*for update/i.test(row.query));
+        await walletHolder`rollback`;
+        return await pending;
+      } finally {
+        await tableHolder`rollback`.catch(() => undefined);
+        await walletHolder`rollback`.catch(() => undefined);
+        tableHolder.release();
+        walletHolder.release();
+      }
+    }
+
+    test('the wallet held beyond 2 s → 503 TRANSIENT_LOCK_TIMEOUT, nothing recorded', async () => {
+      const wallet = await createWallet('100.00');
+
+      const response = await failedWriteMeetingHeldWallet(wallet, 'after-the-answer');
+
+      expect(response.status).toBe(503);
+      expect(await response.json()).toEqual({ failureCode: 'TRANSIENT_LOCK_TIMEOUT', message: expect.any(String) });
+      expect(await transactionCount(wallet.id)).toBe(0);
+    }, 15_000);
+
+    test('the wallet released before 2 s → a single FAILED for the key, no ledger entry', async () => {
+      const wallet = await createWallet('100.00');
+
+      const response = await failedWriteMeetingHeldWallet(wallet, 'once-the-failed-write-waits');
+
+      expect(response.status).toBe(500);
+      expect(await response.json()).toMatchObject({ status: 'FAILED', failureCode: 'INFRA_INVARIANT_VIOLATION' });
+      expect(await transactionCount(wallet.id)).toBe(1);
+      const [{ entries }] = await sql`
+        select count(*)::int as entries from wallet_ledger_entries where wallet_id = ${wallet.id}
+      `;
+      expect(entries).toBe(1);
+    }, 15_000);
   });
 });

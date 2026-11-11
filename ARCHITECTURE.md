@@ -114,7 +114,8 @@ transação SQL. Vale igual para HTTP, fila e workers. Ver
 ## Concorrência
 
 Lock pessimista na linha da carteira (`SELECT … FOR UPDATE`), primeiro passo de
-cada unidade de trabalho que move saldo; uma carteira por transação, sem lock
+cada unidade de trabalho que toca a carteira — move saldo ou insere uma linha com FK
+para ela; uma carteira por transação, sem lock
 global. `lock_timeout` de 2 s, por `SET LOCAL` logo antes do `SELECT … FOR UPDATE`
 — vale para a transação SQL que trava a carteira, nunca para a conexão, e cobre
 toda espera de lock depois dela: estourar é erro transitório
@@ -128,6 +129,12 @@ SQL curta e separada (`FOR UPDATE SKIP LOCKED` + `next_attempt_at = now() + leas
 com commit). O worker de referências pendentes processa cada item numa unidade de
 trabalho própria, que começa pela carteira; **o publicador da outbox não trava a
 carteira** — nenhuma das suas transações SQL toca `wallets` (emenda do ADR 0002).
+A gravação de `FAILED` do use case (segunda unidade de trabalho, depois do rollback
+de um erro permanente) insere a transação de aposta, cuja FK `wallet_id` toma
+`FOR KEY SHARE` na carteira: por isso começa pelo lock da carteira, com o mesmo
+`lock_timeout`, antes de qualquer outra escrita — a regra vale sem exceção (emenda
+do ADR 0002). A gravação de `FAILED` do worker de referências pendentes é um
+`UPDATE` que não muda a FK e não toca `wallets`.
 Worker morto: o lease expira e outra instância assume. Ver
 [ADR 0002](docs/adr/0002-lock-pessimista-por-carteira.md).
 
@@ -158,6 +165,17 @@ Worker morto: o lease expira e outra instância assume. Ver
   `initial_balance` e chave e hash da criação não mudam.
 - **Auditoria append-only:** `UPDATE`, `DELETE` e `TRUNCATE` em
   `rejected_submissions` são recusados.
+
+**Saldo máximo:** `99999999999999999.99`, o limite de `numeric(19,2)`. Não há
+`CHECK` próprio: o tipo da coluna já recusa o valor acima dele (`22003`) antes de
+qualquer `CHECK`, que por isso nunca dispararia — o próprio tipo é a garantia no
+schema. O domínio barra antes (`Wallet.canCredit`): `WIN`, `REFUND` e `ROLLBACK`
+de `BET` que passariam do máximo terminam `REJECTED` `BALANCE_LIMIT_EXCEEDED`,
+sem lançamento, com o saldo observado e `WagerTransactionRejected`; o `22003`
+fica só como rede de segurança. A `OPENING` não alcança o máximo: o
+`initialBalance` passa pelo teto de 15 dígitos da entrada. A reconciliação lê os
+valores do banco por `Money.fromPersisted`, sem esse teto, e reporta saldos de
+16 e 17 dígitos normalmente.
 
 Tempos que dependem de relógio — TTL das pendentes e leases dos workers — usam o
 `now()` do banco, nunca o relógio da instância.
@@ -273,7 +291,9 @@ Com mais de uma violação, prevalece a primeira, na mesma ordem nos dois canais
    a referência é buscada pelo provedor da própria submissão;
    `REFERENCE_AMOUNT_MISMATCH`, exceto no `WIN`; `REFERENCE_ALREADY_REVERSED`, só na
    transação dependente); saldo (`INSUFFICIENT_FUNDS` ou
-   `REVERSAL_INSUFFICIENT_FUNDS`).
+   `REVERSAL_INSUFFICIENT_FUNDS` no débito; `BALANCE_LIMIT_EXCEEDED` no crédito
+   que passaria do saldo máximo — sempre depois da referência, então uma
+   referência ausente espera e nunca vira `BALANCE_LIMIT_EXCEEDED`).
 
 ## Idempotência e deduplicação
 
@@ -316,8 +336,9 @@ comum às duas entradas.
 
 Toda submissão que **não vira transação de aposta** é gravada numa tabela própria,
 append-only e sem FK: payload inválido (HTTP ou fila), carteira inexistente,
-`OPENING` vindo de fora, conflito de idempotência, `EXTERNAL_ID_CONFLICT` e, na
-fila, `MESSAGE_ID_CONFLICT`. Colunas: `provider_id`, `idempotency_key`,
+`OPENING` vindo de fora, conflito de idempotência, `EXTERNAL_ID_CONFLICT`,
+`PROVIDER_IDENTITY_MISMATCH` (só HTTP) e, na fila, `MESSAGE_ID_CONFLICT` e as tentativas transitórias esgotadas
+(`INFRA_RETRIES_EXHAUSTED`). Colunas: `provider_id`, `idempotency_key`,
 `external_transaction_id`, `payload_hash`, código de falha, canal, `message_id`
 (quando houver), `correlation_id` e `received_at` — o que der para
 extrair, já que um payload inválido pode não ter chave. O insert roda numa unidade
@@ -363,6 +384,7 @@ mesma chave.
 | carteira criada | 201 |
 | `PENDING_REFERENCE` | 202 |
 | payload inválido, `Idempotency-Key` ausente, `OPENING` de fora, cursor inválido | 400 |
+| provedor declarado diferente da identidade (`PROVIDER_IDENTITY_MISMATCH`) | 403 |
 | recurso inexistente num `GET` | 404 |
 | conflito de idempotência, `EXTERNAL_ID_CONFLICT`, `WALLET_ALREADY_EXISTS` | 409 |
 | `REJECTED` (original ou replay), `WALLET_NOT_FOUND` | 422 |
@@ -397,6 +419,7 @@ Enum fechado em `shared/domain`.
 | `REFERENCE_MISMATCH` | rejeição (422) | corrige; jogador, carteira, moeda ou rodada divergem (campo no `message`) |
 | `REFERENCE_AMOUNT_MISMATCH` | rejeição (422) | corrige o valor; reversão parcial não existe |
 | `REFERENCE_ALREADY_REVERSED` | rejeição (422) | desiste; a referência já foi desfeita |
+| `BALANCE_LIMIT_EXCEEDED` | rejeição (422) | desiste; o crédito passaria do saldo máximo (`99999999999999999.99`) |
 | `INVALID_PAYLOAD` | não admitida (400) | corrige o payload |
 | `MISSING_IDEMPOTENCY_KEY` | não admitida (400) | envia o header |
 | `INTERNAL_KIND_NOT_ALLOWED` | não admitida (400) | não envia `OPENING` |
@@ -406,8 +429,9 @@ Enum fechado em `shared/domain`.
 | `WALLET_ALREADY_EXISTS` | não admitida (409) | usa a carteira existente |
 | `WALLET_NOT_FOUND` | não admitida (422; fila: retry, depois DLQ) | cria a carteira e reenvia |
 | `MESSAGE_ID_CONFLICT` | não admitida (fila → DLQ) | não reusa `messageId` com outro conteúdo |
+| `PROVIDER_IDENTITY_MISMATCH` | não admitida (403; só HTTP) | declara o próprio `providerId` |
 | `NOT_FOUND` | consulta (404) | — |
-| `INFRA_RETRIES_EXHAUSTED` | falha (500) | reenvia com chave nova depois de normalizado |
+| `INFRA_RETRIES_EXHAUSTED` | sem desfecho (fila → DLQ) | reenvia **com a mesma chave** depois de normalizado (redrive da DLQ ou HTTP) |
 | `INFRA_INVARIANT_VIOLATION` | falha (500, alerta) | bug nosso; reenvia com chave nova depois da correção |
 | `INFRA_UNEXPECTED` | falha (500) | idem |
 | `TRANSIENT_LOCK_TIMEOUT` | transitório (503) | reenvia com a mesma chave após `Retry-After` |
@@ -445,13 +469,16 @@ legítimo; se o lock a serializa, o domínio teria visto antes, e é bug.
 | outra | permanente (`FAILED`, `INFRA_UNEXPECTED`) |
 
 Estouro numérico (`22003`) também é permanente (`INFRA_INVARIANT_VIOLATION`,
-alerta): com o teto de entrada, só um saldo acumulado além de `numeric(19,2)` o
-dispara.
+alerta), mas é só rede de segurança: o saldo acumulado além de `numeric(19,2)` é
+alcançável somando créditos, e o domínio o barra antes, como rejeição
+`BALANCE_LIMIT_EXCEEDED` (ver [Invariantes no schema](#invariantes-no-schema)).
+Disparar o `22003` é bug.
 
 **Quem grava `FAILED`: o use case**, nas duas entradas. Como a transação SQL do
 erro permanente já sofreu rollback, uma **segunda unidade de trabalho** grava a
 transação de aposta como `FAILED`, com o código de falha (e o inbox, quando a
-entrada é a fila), pela chave de idempotência — sem saldo observado, sem lançamento
+entrada é a fila), pela chave de idempotência, começando pelo lock da carteira (ver
+[Concorrência](#concorrência)) — sem saldo observado, sem lançamento
 e sem evento. No HTTP, a resposta é 500 com `transactionId`, `status: FAILED` e
 `failureCode`, e o replay (mesma chave e hash) devolve o mesmo 500 com
 `idempotentReplay: true`; hash diferente → 409 `IDEMPOTENCY_CONFLICT`. A segunda
@@ -459,12 +486,16 @@ unidade de trabalho relê a chave antes de gravar: se um concorrente já a gravo
 se ela cai no `23505` da chave, responde como replay ou conflito; se falha de forma
 transitória, 503 sem gravar nada. Na fila, a
 mensagem é enviada explicitamente à DLQ e apagada da fila principal (se a remoção
-falhar, a redelivery é reconhecida pelo inbox).
+falhar, a redelivery é reconhecida pelo inbox). Só o erro permanente grava `FAILED`:
+a falha transitória nunca vira `FAILED`, nem esgotada.
 
 - **Transitório na fila:** sem `ack`; backoff por `ChangeMessageVisibility`
-  (`min(2^receiveCount s, 60 s)`). Esgotados **5 recebimentos** com o banco de pé,
-  vira permanente (`INFRA_RETRIES_EXHAUSTED`). O `maxReceiveCount` do redrive é
-  **6**: rede de segurança para o banco fora do ar.
+  (`min(2^receiveCount s, 60 s)`). Esgotados **5 recebimentos**, a mensagem termina
+  **sem desfecho**: vai à DLQ com `failureCode` `INFRA_RETRIES_EXHAUSTED`, com linha
+  em `rejected_submissions` e sem transação de aposta nem inbox — o mesmo caminho da
+  carteira inexistente. A chave fica livre: reprocessar a mensagem da DLQ, ou
+  reenviá-la por HTTP com a mesma chave, aplica a transação normalmente. O
+  `maxReceiveCount` do redrive é **6**: rede de segurança para o banco fora do ar.
 - **Payload inválido na fila:** direto à DLQ, sem gravar transação — não há chave
   nem hash confiáveis —, com log, métrica e uma linha de
   [submissão não admitida](#submissões-não-admitidas).
@@ -495,25 +526,31 @@ falhar, a redelivery é reconhecida pelo inbox).
 - **Desfecho de cada mensagem:** `PROCESSED`, `REJECTED` ou `PENDING_REFERENCE` →
   `ack`. Transitório (`TRANSIENT_LOCK_TIMEOUT`, `TRANSIENT_UNAVAILABLE`) e
   `WALLET_NOT_FOUND` → sem `ack`, `ChangeMessageVisibility` de
-  `min(2^ApproximateReceiveCount s, 60 s)`. No 5º recebimento, o transitório vira
-  `FAILED` `INFRA_RETRIES_EXHAUSTED` (`giveUp` do use case, segunda unidade de
-  trabalho, com inbox) e vai à DLQ; a carteira ainda inexistente vai à DLQ como
-  submissão não admitida, sem `FAILED` (a FK impede). Se nem a desistência grava
-  (banco fora), a mensagem fica para o redrive (`maxReceiveCount` 6) e chega à DLQ
-  sem desfecho — limitação aceita. `FAILED` (erro permanente, ou o replay de um)
+  `min(2^ApproximateReceiveCount s, 60 s)`. No 5º recebimento, os dois terminam sem
+  desfecho, como submissão não admitida: DLQ com `INFRA_RETRIES_EXHAUSTED` ou
+  `WALLET_NOT_FOUND`, linha em `rejected_submissions` (canal fila, `payload_hash`
+  da mensagem), `ack` — sem transação de aposta nem inbox, então a chave fica livre
+  para o redrive da DLQ ou um reenvio por HTTP. Se o envio à DLQ ou a gravação da
+  recusa falhar (banco fora), a mensagem fica para o redrive nativo
+  (`maxReceiveCount` 6) e chega à DLQ sem o atributo `failureCode` e sem linha de
+  auditoria — limitação aceita. `FAILED` (erro permanente, ou o replay de um)
   → DLQ com o código do classificador. Submissão não admitida → DLQ direto.
 - **Envio à DLQ:** feito pela aplicação (`SendMessage` em
   `wager-transactions-dlq.fifo`, porta `DeadLetterQueue`), com o corpo e os
   atributos originais mais o atributo `failureCode`; `MessageGroupId` = `walletId`
-  (ou `unroutable`), `MessageDeduplicationId` = `messageId` do envelope (ou o
-  SHA-256 do corpo, quando nem ele se extrai). Valor extraído que o SQS não aceita
-  como id (mais de 128 caracteres, ou fora de ASCII alfanumérico e pontuação) conta
-  como ausente. Dos atributos originais vão até 9, `correlationId` primeiro: o SQS
+  (ou `unroutable`), `MessageDeduplicationId` = `MessageId` do SQS da mensagem
+  recebida — não o `messageId` do envelope: a reentrega da mesma mensagem tem o
+  mesmo id e é absorvida, mas o mesmo corpo reenviado à fila (o redrive da DLQ) é
+  outra mensagem, e se esgotar de novo dentro da janela de 5 min do FIFO precisa
+  chegar à DLQ de novo, em vez de ser descartado pela deduplicação. `walletId`
+  extraído que o SQS não aceita como id (mais de 128 caracteres, ou fora de ASCII
+  alfanumérico e pontuação) conta como ausente. Dos atributos originais vão até 9, `correlationId` primeiro: o SQS
   aceita 10 por mensagem, contando o `failureCode`. Ordem: DLQ, linha em
   `rejected_submissions` (só nas não admitidas, com canal fila, `message_id` e
   `correlation_id`), `ack`. Se qualquer passo falha, a mensagem fica e é
   decidida de novo na reentrega — pelo inbox, quando já há desfecho; o
-  `MessageDeduplicationId` absorve o reenvio à DLQ dentro de 5 min.
+  `MessageDeduplicationId` absorve o reenvio à DLQ da mesma mensagem dentro de
+  5 min.
 - O contexto de log de cada mensagem abre com o `messageId` do envelope e o
   `correlationId` (atributo da mensagem, ou o `messageId`).
 - **Configuração por ambiente:** `WAGER_TRANSACTIONS_CONSUMER_ENABLED` (padrão
@@ -540,6 +577,13 @@ falhar, a redelivery é reconhecida pelo inbox).
   gravado numa transação SQL curta. Se a instância morre entre o envio e a gravação,
   o lease expira e outra reenvia: **at-least-once**, e o consumidor deduplica pelo
   `eventId`, estável desde o `enqueue`.
+- **Contrato com o consumidor dos eventos:** o mesmo evento pode chegar mais de
+  uma vez, sempre com o mesmo `eventId` e o mesmo corpo; o consumidor **deduplica
+  por `eventId`**. O `MessageDeduplicationId` do FIFO só cobre reenvios dentro da
+  janela de 5 min do SQS — fora dela, a duplicata chega. O teste de integração do
+  publicador prova o reenvio idêntico: dois publicadores com lease expirado
+  publicam o mesmo item, e um cliente SQS real que registra os envios (sem mock)
+  mostra o mesmo `eventId` e o mesmo corpo nas duas publicações.
 - Polling a cada 500 ms, lotes de até 10, lease de 30 s. Falha → `scheduleRetry`
   com `min(1 s × 2^attempts, 5 min)` e jitter. **Sem limite de tentativas** —
   desistir perderia evento confirmado; a partir de 10 tentativas, métrica e log de
@@ -634,8 +678,27 @@ latência da pendente é limitada pelo intervalo do worker.
 ## Autenticação
 
 Fora do escopo implementado, como o §2 do enunciado permite: guard no-op atrás de
-uma porta de identidade do provedor. *A definir* — o desenho que seria adotado com
-Keycloak.
+uma porta de identidade do provedor. O ponto de extensão no código:
+
+- **Porta** `ProviderIdentity` (`src/shared/application/provider-identity.ts`):
+  resolve, a partir da requisição, o provedor autenticado. Ligada pelo token
+  `PROVIDER_IDENTITY` num módulo global da raiz de composição (`src/app.ts`);
+  trocar pela implementação real é trocar esse provider do Nest.
+- **No-op** `DeclaredProviderIdentity`
+  (`src/shared/infrastructure/declared-provider-identity.ts`): autentica a
+  requisição como o provedor que ela declara — nunca diverge.
+- **Guard** `ProviderIdentityGuard` (`src/shared/interface/provider-identity.guard.ts`),
+  nos controllers de transação de aposta e de carteira: chama a porta e deixa a
+  identidade para o controller (`@CurrentProvider()`). `/health/*` e `/metrics`
+  ficam sem guard; a fila também — é canal interno confiável.
+- **Conferência:** na submissão (depois do parse do corpo, antes do use case) e na
+  consulta por id externo, um `providerId` diferente da identidade é recusado com
+  403 `PROVIDER_IDENTITY_MISMATCH`, sem transação de aposta; na submissão, a recusa
+  é auditada como submissão não admitida. `MISSING_IDEMPOTENCY_KEY` e o
+  `INVALID_PAYLOAD` de forma vêm antes. As rotas de carteira e a consulta por id
+  interno não declaram provedor: o guard só resolve a identidade.
+
+*A definir* — o desenho que seria adotado com Keycloak.
 
 ## Observabilidade
 
@@ -697,8 +760,12 @@ Keycloak.
   recusa, para o erro verdadeiro passar pelo classificador —; `crash-after-send` —
   o publicador "morre" entre o envio e o `published_at`: lança
   `SimulatedCrashError` antes de gravar, e a transação SQL da gravação desfaz —;
-  `crash-after-commit` — o consumidor "morre" depois do commit do desfecho e antes
-  do `ack`: a mensagem volta quando a visibilidade expira e o inbox a reconhece —;
+  `crash-after-commit` — o consumidor morre depois do commit do desfecho e antes
+  do `ack`: o app rodando como processo (`main.ts`) leva `SIGKILL` de si mesmo,
+  por uma função de queda que a raiz de composição injeta no `CrashFaultInjector`;
+  em processo (integração e unidade), lança `SimulatedCrashError`, para não
+  derrubar o test runner. A mensagem volta quando a visibilidade expira e o inbox
+  a reconhece —;
   e `transient-failure-in-resolution` — o worker de referências pendentes, já com
   o lock da carteira, recebe `lock_not_available` do banco: transitório real, e o
   item é reagendado. O `invariant-violation-before-commit` vale também para a
@@ -715,7 +782,11 @@ Keycloak.
   "desconhecido" quer dizer fora da outbox.
 - Todo teste de integração e de concorrência termina verificando que o saldo é igual
   ao saldo reconstruído e que a sequência de versões não tem buracos.
-- Sem `sleep` fixo: espera por condição com timeout.
+- Sem `sleep` fixo: espera por condição com timeout, por um helper único
+  (`test/support/wait-until.ts`) compartilhado por integração e concorrência.
+- Além das checagens por arquivo, um `afterAll` global no preload reconcilia todas
+  as carteiras do banco de teste ao fim da execução; as corrompidas de propósito
+  saem dessa checagem por `excludeFromLedgerInvariant`.
 - O teste do `SIGTERM` sobe o app como processo real (`Bun.spawn` de
   `src/main.ts`). No Windows não há sinal POSIX — `kill('SIGTERM')` encerra o
   processo na hora —, então lá o teste manda `SIGTERM` por IPC e o preload
@@ -742,18 +813,27 @@ Keycloak.
   `lock_timeout` (`55P03`); ele é reconhecido pelo código.
 - A vazão de uma única carteira é limitada pela duração da transação, por causa do
   lock pessimista.
-- Com o PostgreSQL fora até o fim das tentativas, o redrive do SQS leva a mensagem
-  à DLQ sem desfecho gravado: a transação de aposta não existe. Reprocessar a DLQ é
-  seguro pela idempotência.
+- Esgotadas as tentativas transitórias na fila, a mensagem vai à DLQ sem desfecho
+  (`INFRA_RETRIES_EXHAUSTED`): a transação de aposta não existe, e reprocessar a DLQ
+  — ou reenviar por HTTP com a mesma chave — aplica a transação. Se, no último
+  recebimento, o envio à DLQ ou a gravação da recusa também falhar (PostgreSQL ou
+  SQS fora), o redrive nativo do SQS leva a mensagem à DLQ sem o atributo
+  `failureCode` e sem linha em `rejected_submissions`; reprocessá-la continua seguro
+  pela idempotência.
 - `FAILED` é terminal para a chave de idempotência, inclusive quando a causa foi um
-  bug: corrigido o bug, o provedor reenvia com uma chave nova.
+  bug: corrigido o bug, o provedor reenvia com uma chave nova. Só erro permanente
+  grava `FAILED`; a falha transitória esgotada não.
 - Eventos de uma mesma carteira podem ser publicados fora de ordem por publicadores
   concorrentes; o consumidor ordena por `walletVersion`/`occurredAt`.
-- Eventos são publicados pelo menos uma vez; duplicatas carregam o mesmo `eventId`.
+- Eventos são publicados pelo menos uma vez; duplicatas carregam o mesmo `eventId`
+  e o mesmo corpo, e o consumidor deduplica por `eventId`.
 - Linhas publicadas da outbox não são expurgadas.
 - A chave de idempotência da criação de carteira é global, não por provedor: a
   carteira não tem provedor e a autenticação está fora do escopo.
-- Saldo acumulado além de `numeric(19,2)` vira `FAILED`
-  (`INFRA_INVARIANT_VIOLATION`), não rejeição — inalcançável com o teto de entrada.
+- O saldo máximo é o limite técnico da coluna (`99999999999999999.99`), não uma
+  regra de negócio configurável: o crédito que o passaria — alcançável somando
+  créditos no teto de entrada — é rejeitado com `BALANCE_LIMIT_EXCEEDED`, e a
+  carteira cheia só volta a receber crédito depois de um débito. Alargá-lo exige
+  alargar a coluna.
 - A auditoria das submissões não admitidas é de melhor esforço: com o banco fora do
   ar, a resposta sai igual e a linha se perde (o erro é logado).

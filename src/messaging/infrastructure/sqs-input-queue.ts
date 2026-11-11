@@ -52,14 +52,14 @@ export class SqsInputQueue implements InputQueue {
       throw error;
     }
     return Messages.flatMap((message) => {
-      if (message.Body === undefined || message.ReceiptHandle === undefined) return [];
+      if (message.Body === undefined || message.ReceiptHandle === undefined || message.MessageId === undefined) return [];
       const attributes = Object.fromEntries(
         Object.entries(message.MessageAttributes ?? {}).flatMap(([name, value]) =>
           value.StringValue === undefined ? [] : [[name, value.StringValue] as const],
         ),
       );
       const receiveCount = Number(message.Attributes?.ApproximateReceiveCount ?? 1);
-      return [{ body: message.Body, attributes, receipt: message.ReceiptHandle, receiveCount }];
+      return [{ body: message.Body, attributes, deliveryId: message.MessageId, receipt: message.ReceiptHandle, receiveCount }];
     });
   }
 

@@ -83,11 +83,13 @@ export class Reconciliation {
 
 function toReport(snapshot: LedgerSnapshot): ReconciliationReport {
   const { currency } = snapshot;
-  const difference = signedMoney(snapshot.difference, currency);
+  // Read back from the database: past the input ceiling, maybe negative when divergent.
+  const persisted = (amount: string): Money => Money.fromPersisted({ amount, currency });
+  const difference = persisted(snapshot.difference);
   return {
     walletId: snapshot.walletId,
-    storedBalance: signedMoney(snapshot.storedBalance, currency),
-    calculatedBalance: signedMoney(snapshot.calculatedBalance, currency),
+    storedBalance: persisted(snapshot.storedBalance),
+    calculatedBalance: persisted(snapshot.calculatedBalance),
     difference,
     consistent: difference.isZero() && snapshot.versionGaps.length === 0 && !hasEntryAboveVersion(snapshot),
     checkedEntries: snapshot.checkedEntries,
@@ -99,11 +101,4 @@ function toReport(snapshot: LedgerSnapshot): ReconciliationReport {
 
 function hasEntryAboveVersion(snapshot: LedgerSnapshot): boolean {
   return snapshot.lastEntryVersion !== null && snapshot.lastEntryVersion > snapshot.walletVersion;
-}
-
-// A divergent ledger may sum below zero, which `Money.from` refuses on input.
-function signedMoney(amount: string, currency: string): Money {
-  return amount.startsWith('-')
-    ? Money.from({ amount: amount.slice(1), currency }).negate()
-    : Money.from({ amount, currency });
 }

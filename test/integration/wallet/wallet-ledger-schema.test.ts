@@ -293,3 +293,15 @@ describe('wager_transactions', () => {
     );
   });
 });
+
+describe('the maximum balance', () => {
+  test('a direct UPDATE past 99999999999999999.99 is refused by the column type', async () => {
+    const { walletId } = await openedWallet();
+
+    const attempt = sql`update wallets set balance_amount = 100000000000000000.00, version = 2 where id = ${walletId}`;
+
+    await expect(attempt).rejects.toThrow(/numeric field overflow/);
+    const [row] = await sql`select balance_amount::text as balance, version from wallets where id = ${walletId}`;
+    expect(row).toEqual({ balance: '100.00', version: 1 });
+  });
+});

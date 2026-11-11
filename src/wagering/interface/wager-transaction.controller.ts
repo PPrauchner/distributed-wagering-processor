@@ -8,7 +8,9 @@
  *
  * @packageDocumentation
  */
-import { Body, Controller, Get, Headers, Param, Post, Res } from '@nestjs/common';
+import { Body, Controller, Get, Headers, Param, Post, Res, UseGuards } from '@nestjs/common';
+import { assertDeclaredProvider, type AuthenticatedProvider } from '../../shared/application/provider-identity.ts';
+import { CurrentProvider, ProviderIdentityGuard } from '../../shared/interface/provider-identity.guard.ts';
 import { GetWagerTransaction } from '../application/get-wager-transaction.ts';
 import { ProcessWagerTransaction } from '../application/process-wager-transaction.ts';
 import { SubmissionChannel } from '../domain/rejected-submission.ts';
@@ -29,6 +31,7 @@ interface HttpResponse {
 export const WAGER_TRANSACTIONS_PATH = 'wagering/transactions';
 
 @Controller(WAGER_TRANSACTIONS_PATH)
+@UseGuards(ProviderIdentityGuard)
 export class WagerTransactionController {
   constructor(
     private readonly processWagerTransaction: ProcessWagerTransaction,
@@ -46,8 +49,10 @@ export class WagerTransactionController {
     @Headers('idempotency-key') idempotencyKey: string | undefined,
     @Headers('x-correlation-id') correlationId: string | undefined,
     @Res({ passthrough: true }) response: HttpResponse,
+    @CurrentProvider() provider: AuthenticatedProvider,
   ): Promise<WagerTransactionResponse> {
     const command = parseSubmitWagerTransactionRequest(body, { idempotencyKey, correlationId });
+    assertDeclaredProvider(provider, command.providerId);
     const settled = await this.processWagerTransaction.execute(command, SubmissionChannel.Http);
     const outcome = toWagerTransactionResponse(settled);
     response.status(outcome.statusCode);
@@ -56,6 +61,7 @@ export class WagerTransactionController {
 }
 
 @Controller('providers/:providerId/wagering/transactions')
+@UseGuards(ProviderIdentityGuard)
 export class ProviderWagerTransactionController {
   constructor(private readonly getWagerTransaction: GetWagerTransaction) {}
 
@@ -63,7 +69,9 @@ export class ProviderWagerTransactionController {
   async show(
     @Param('providerId') providerId: string,
     @Param('externalTransactionId') externalTransactionId: string,
+    @CurrentProvider() provider: AuthenticatedProvider,
   ): Promise<WagerTransactionView> {
+    assertDeclaredProvider(provider, providerId);
     return toWagerTransactionView(await this.getWagerTransaction.byExternalId(providerId, externalTransactionId));
   }
 }

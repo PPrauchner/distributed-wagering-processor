@@ -1,11 +1,14 @@
 /**
  * Wallet endpoints: `POST /wallets`, `GET /wallets/:id` and
- * `GET /wallets/:walletId/ledger` and `POST /wallets/:walletId/reconciliation`. Errors are turned
- * into responses by the global HTTP error filter.
+ * `GET /wallets/:walletId/ledger` and `POST /wallets/:walletId/reconciliation`. Every route
+ * goes through the provider identity guard, which only resolves the identity:
+ * the routes declare no provider, so there is nothing to check it against.
+ * Errors are turned into responses by the global HTTP error filter.
  *
  * @packageDocumentation
  */
-import { Body, Controller, Get, Headers, HttpCode, Param, Post, Query } from '@nestjs/common';
+import { Body, Controller, Get, Headers, HttpCode, Param, Post, Query, UseGuards } from '@nestjs/common';
+import { ProviderIdentityGuard } from '../../shared/interface/provider-identity.guard.ts';
 import { CreateWallet } from '../application/create-wallet.ts';
 import { GetLedgerPage } from '../application/get-ledger-page.ts';
 import { GetWallet } from '../application/get-wallet.ts';
@@ -24,6 +27,7 @@ import {
 } from './wallet.http.ts';
 
 @Controller('wallets')
+@UseGuards(ProviderIdentityGuard)
 export class WalletController {
   constructor(
     private readonly createWallet: CreateWallet,

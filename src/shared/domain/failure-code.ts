@@ -19,6 +19,7 @@ export enum FailureCode {
   ReferenceMismatch = 'REFERENCE_MISMATCH',
   ReferenceAmountMismatch = 'REFERENCE_AMOUNT_MISMATCH',
   ReferenceAlreadyReversed = 'REFERENCE_ALREADY_REVERSED',
+  BalanceLimitExceeded = 'BALANCE_LIMIT_EXCEEDED',
   // Refused submissions: no transaction is created.
   InvalidPayload = 'INVALID_PAYLOAD',
   MissingIdempotencyKey = 'MISSING_IDEMPOTENCY_KEY',
@@ -29,10 +30,12 @@ export enum FailureCode {
   WalletAlreadyExists = 'WALLET_ALREADY_EXISTS',
   WalletNotFound = 'WALLET_NOT_FOUND',
   MessageIdConflict = 'MESSAGE_ID_CONFLICT',
+  ProviderIdentityMismatch = 'PROVIDER_IDENTITY_MISMATCH',
+  // Queue only, no outcome: transient failures out of receives; the key stays free.
+  InfraRetriesExhausted = 'INFRA_RETRIES_EXHAUSTED',
   // Queries.
   NotFound = 'NOT_FOUND',
   // Failures (500).
-  InfraRetriesExhausted = 'INFRA_RETRIES_EXHAUSTED',
   InfraInvariantViolation = 'INFRA_INVARIANT_VIOLATION',
   InfraUnexpected = 'INFRA_UNEXPECTED',
   // Transient (503): resend with the same key.

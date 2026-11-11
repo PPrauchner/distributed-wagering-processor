@@ -11,7 +11,7 @@
 import { afterAll, afterEach, describe, expect, test } from 'bun:test';
 import { killAllInstances, startInstance } from './support/app-processes.ts';
 import { createScenarioQueues, deleteScenarioQueues, drained, sendSubmission } from './support/queues.ts';
-import { waitUntil } from './support/wait-until.ts';
+import { waitUntil } from '../support/wait-until.ts';
 import {
   citing,
   createWallet,
