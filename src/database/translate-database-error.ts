@@ -12,7 +12,7 @@ import {
   DuplicateExternalIdError,
   DuplicateIdempotencyKeyError,
 } from '../wagering/application/wagering-errors.ts';
-import { DuplicateWalletError } from '../wallet/application/wallet-errors.ts';
+import { DuplicateWalletCreationKeyError, DuplicateWalletError } from '../wallet/application/wallet-errors.ts';
 import { classifyDatabaseError, isDatabaseError } from './classify-database-error.ts';
 
 /**
@@ -37,10 +37,9 @@ export function translateDatabaseError(error: unknown): unknown {
         ? new DuplicateWalletError(message)
         : new DuplicateExternalIdError(message);
     case 'reread':
-      // The wallet creation key arrives with the idempotent-creation slice.
       return classified.target === 'wager-transaction-idempotency-key'
         ? new DuplicateIdempotencyKeyError(message)
-        : error;
+        : new DuplicateWalletCreationKeyError(message);
     case 'redelivery':
       return new InboxRedeliveryError(message, { cause: error });
   }

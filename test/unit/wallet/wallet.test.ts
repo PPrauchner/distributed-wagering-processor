@@ -64,9 +64,11 @@ describe('Wallet.rehydrate', () => {
       version: 7,
       createdAt,
       updatedAt,
+      initialBalance: Money.zero('USD'),
     });
 
     expect(wallet.balance.equals(balance)).toBe(true);
+    expect(wallet.initialBalance.isZero()).toBe(true);
     expect(wallet.currency).toBe('USD');
     expect(wallet.version).toBe(7);
     expect(wallet.createdAt).toEqual(createdAt);

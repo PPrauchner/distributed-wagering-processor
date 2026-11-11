@@ -37,8 +37,8 @@ interface EntryRow {
 async function insertWallet(tx: SQL, balance: string, currency = 'BRL'): Promise<string> {
   const id = Bun.randomUUIDv7();
   await tx`
-    insert into wallets (id, player_id, currency, balance_amount, balance_currency, version, created_at, updated_at)
-    values (${id}, ${Bun.randomUUIDv7()}, ${currency}, ${balance}, ${currency}, 1, now(), now())
+    insert into wallets (id, player_id, currency, balance_amount, balance_currency, version, created_at, updated_at, initial_balance_amount, initial_balance_currency)
+    values (${id}, ${Bun.randomUUIDv7()}, ${currency}, ${balance}, ${currency}, 1, now(), now(), ${balance}, ${currency})
   `;
   return id;
 }
@@ -180,8 +180,8 @@ describe('balance ↔ ledger, checked at commit', () => {
   test('a zero-balance wallet is born at version 1', async () => {
     const attempt = sql.begin(
       (tx) => tx`
-        insert into wallets (id, player_id, currency, balance_amount, balance_currency, version, created_at, updated_at)
-        values (${Bun.randomUUIDv7()}, 'player', 'BRL', 0, 'BRL', 2, now(), now())
+        insert into wallets (id, player_id, currency, balance_amount, balance_currency, version, created_at, updated_at, initial_balance_amount, initial_balance_currency)
+        values (${Bun.randomUUIDv7()}, 'player', 'BRL', 0, 'BRL', 2, now(), now(), 0, 'BRL')
       `,
     );
 

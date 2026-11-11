@@ -6,10 +6,21 @@
 import { Money } from '../../shared/domain/money.ts';
 import { LedgerDirection, WalletLedgerEntry } from './wallet-ledger-entry.ts';
 
+/**
+ * How a creation with an `Idempotency-Key` is recognized again: the key and the
+ * hash of the creation payload.
+ */
+export interface WalletCreation {
+  idempotencyKey: string;
+  payloadHash: string;
+}
+
 export interface OpenWalletProps {
   id: string;
   playerId: string;
   initialBalance: Money;
+  /** Present when the creation came with an `Idempotency-Key`. */
+  creation?: WalletCreation;
 }
 
 /** Persisted state of a wallet, rebuilt as is by {@link Wallet.rehydrate}. */
@@ -21,6 +32,9 @@ export interface WalletState {
   version: number;
   createdAt: Date;
   updatedAt: Date;
+  initialBalance: Money;
+  creationIdempotencyKey?: string;
+  creationPayloadHash?: string;
 }
 
 /** A credit or debit: its amount, and ids of the new entry and of its transaction. */
@@ -37,6 +51,9 @@ export class InvalidWalletError extends Error {
 
 const MAX_PLAYER_ID_LENGTH = 255;
 
+/** Every wallet is opened at this version (ADR 0003). */
+export const OPENING_VERSION = 1;
+
 export class Wallet {
   // Only assigns parameters, with no validation or field initializers: the ORM's
   // metadata discovery calls `new Wallet()` with no arguments (ADR 0001).
@@ -48,6 +65,10 @@ export class Wallet {
     private _version: number,
     readonly createdAt: Date,
     private _updatedAt: Date,
+    /** The balance the wallet was opened with; it never changes. */
+    readonly initialBalance: Money,
+    readonly creationIdempotencyKey: string | undefined,
+    readonly creationPayloadHash: string | undefined,
   ) {}
 
   /**
@@ -73,9 +94,12 @@ export class Wallet {
       props.playerId,
       props.initialBalance.currency,
       props.initialBalance,
-      1,
+      OPENING_VERSION,
       now,
       now,
+      props.initialBalance,
+      props.creation?.idempotencyKey,
+      props.creation?.payloadHash,
     );
   }
 
@@ -89,6 +113,9 @@ export class Wallet {
       state.version,
       state.createdAt,
       state.updatedAt,
+      state.initialBalance,
+      state.creationIdempotencyKey,
+      state.creationPayloadHash,
     );
   }
 
@@ -102,7 +129,7 @@ export class Wallet {
    *   balance is zero.
    */
   openingEntry(ids: { entryId: string; transactionId: string }): WalletLedgerEntry {
-    if (this._version !== 1 || this._balance.isZero()) {
+    if (this._version !== OPENING_VERSION || this._balance.isZero()) {
       throw new InvalidWalletError('only a wallet opened with a positive balance has an opening');
     }
     return WalletLedgerEntry.create({

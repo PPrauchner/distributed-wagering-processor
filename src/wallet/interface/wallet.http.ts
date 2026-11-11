@@ -11,11 +11,12 @@ import {
   expectString,
   InvalidPayloadError,
 } from '../../shared/interface/invalid-payload.error.ts';
-import type { CreateWalletCommand } from '../application/create-wallet.ts';
+import type { CreatedWallet, CreateWalletCommand } from '../application/create-wallet.ts';
+import { EmptyCreationKeyError } from '../application/wallet-errors.ts';
 import type { GetLedgerPageQuery, LedgerPage } from '../application/get-ledger-page.ts';
 import type { ReconciliationReport } from '../application/reconciliation.ts';
 import type { VersionGap } from '../application/wallet-repository.ts';
-import type { Wallet } from '../domain/wallet.ts';
+import { OPENING_VERSION, type Wallet } from '../domain/wallet.ts';
 import type { LedgerDirection, WalletLedgerEntry } from '../domain/wallet-ledger-entry.ts';
 
 export interface WalletResponse {
@@ -23,6 +24,11 @@ export interface WalletResponse {
   playerId: string;
   balance: MoneyProps;
   version: number;
+}
+
+/** `POST /wallets` with an `Idempotency-Key` also says whether it was a replay. */
+export interface CreatedWalletResponse extends WalletResponse {
+  idempotentReplay?: boolean;
 }
 
 export interface LedgerEntryResponse {
@@ -56,16 +62,27 @@ export interface ReconciliationResponse {
 const DEFAULT_LEDGER_LIMIT = 50;
 const MAX_LEDGER_LIMIT = 200;
 const LIMIT_PATTERN = /^[1-9]\d{0,2}$/;
+/** The `creation_idempotency_key` column's size, as on a submission's key. */
+const MAX_CREATION_KEY_LENGTH = 255;
 
 /**
  * @param body - The untrusted request body.
- * @param correlationId - The `X-Correlation-Id` header; empty counts as absent,
- *   and the use case generates one.
+ * @param headers - The `X-Correlation-Id` header, where empty counts as absent
+ *   and the use case generates one, and the optional `Idempotency-Key`.
  * @returns The create-wallet command.
- * @throws {@link InvalidPayloadError} If the body has a wrong shape, a wrong type
- *   or any unknown field, at any level.
+ * @throws {@link EmptyCreationKeyError} If the key is present but empty — the
+ *   submission's rule; checked before the body.
+ * @throws {@link InvalidPayloadError} If the key is longer than 255 characters,
+ *   or the body has a wrong shape, a wrong type or any unknown field, at any level.
  */
-export function parseCreateWalletRequest(body: unknown, correlationId?: string): CreateWalletCommand {
+export function parseCreateWalletRequest(
+  body: unknown,
+  headers: { correlationId?: string; idempotencyKey?: string } = {},
+): CreateWalletCommand {
+  if (headers.idempotencyKey === '') throw new EmptyCreationKeyError();
+  if (headers.idempotencyKey !== undefined && headers.idempotencyKey.length > MAX_CREATION_KEY_LENGTH) {
+    throw new InvalidPayloadError(`Idempotency-Key must have between 1 and ${MAX_CREATION_KEY_LENGTH} characters`);
+  }
   const request = expectExactObject(body, ['playerId', 'initialBalance'], 'body');
   const balance = expectExactObject(
     request.initialBalance,
@@ -78,8 +95,29 @@ export function parseCreateWalletRequest(body: unknown, correlationId?: string):
       amount: expectString(balance.amount, 'body.initialBalance.amount'),
       currency: expectString(balance.currency, 'body.initialBalance.currency'),
     },
-    correlationId: correlationId || undefined,
+    correlationId: headers.correlationId || undefined,
+    idempotencyKey: headers.idempotencyKey,
   };
+}
+
+/**
+ * @param created - What the creation answered with.
+ * @param keyed - Whether the request carried an `Idempotency-Key`; only then
+ *   the response says whether it is a replay.
+ * @returns The creation's original response: the wallet as it was opened, at
+ *   its initial balance and version 1 — the same on a replay, however the
+ *   wallet has moved since.
+ */
+export function toCreatedWalletResponse(created: CreatedWallet, keyed: boolean): CreatedWalletResponse {
+  const { wallet } = created;
+  const response: CreatedWalletResponse = {
+    id: wallet.id,
+    playerId: wallet.playerId,
+    balance: wallet.initialBalance.toJSON(),
+    version: OPENING_VERSION,
+  };
+  if (keyed) response.idempotentReplay = created.idempotentReplay;
+  return response;
 }
 
 export function toWalletResponse(wallet: Wallet): WalletResponse {

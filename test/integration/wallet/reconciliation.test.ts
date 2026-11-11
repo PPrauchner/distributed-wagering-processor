@@ -53,7 +53,7 @@ function reconciliationWithSpies(): {
 }
 
 async function walletWith(amount: string): Promise<string> {
-  const wallet = await createWallet.execute({ playerId: Bun.randomUUIDv7(), initialBalance: { amount, currency: 'BRL' } });
+  const { wallet } = await createWallet.execute({ playerId: Bun.randomUUIDv7(), initialBalance: { amount, currency: 'BRL' } });
   return wallet.id;
 }
 

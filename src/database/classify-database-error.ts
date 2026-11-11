@@ -4,10 +4,6 @@
  * unique violation, by constraint name — to a closed category and its failure
  * code. `REJECTED` never comes from here: it comes only from the domain.
  *
- * One constraint of the table does not exist yet (wallet creation key); it is
- * mapped already so the classifier stays the only place that knows the names,
- * and the slice that creates it adds its integration test.
- *
  * @packageDocumentation
  */
 import type { LockConflictReason } from '../shared/application/infrastructure-failures.ts';

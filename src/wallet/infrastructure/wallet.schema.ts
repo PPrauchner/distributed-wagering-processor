@@ -22,5 +22,8 @@ export const WalletSchema = defineEntity({
     _version: p.integer().accessor('version'),
     createdAt: p.datetime(),
     _updatedAt: p.datetime().accessor('updatedAt'),
+    initialBalance: p.embedded(MoneySchema).prefix('initial_balance_'),
+    creationIdempotencyKey: p.string().length(255).nullable(),
+    creationPayloadHash: p.string().length(64).nullable(),
   },
 });

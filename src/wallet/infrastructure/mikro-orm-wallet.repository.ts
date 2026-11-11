@@ -29,6 +29,10 @@ export class MikroOrmWalletRepository implements WalletRepository {
     return this.em.findOne(Wallet, { playerId, currency });
   }
 
+  findByCreationIdempotencyKey(idempotencyKey: string): Promise<Wallet | null> {
+    return this.em.findOne(Wallet, { creationIdempotencyKey: idempotencyKey });
+  }
+
   add(wallet: Wallet): void {
     this.em.persist(wallet);
   }

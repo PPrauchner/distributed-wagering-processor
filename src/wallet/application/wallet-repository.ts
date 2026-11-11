@@ -16,6 +16,8 @@ export interface WalletRepository {
    */
   findByIdForUpdate(id: string): Promise<Wallet | null>;
   findByPlayerAndCurrency(playerId: string, currency: string): Promise<Wallet | null>;
+  /** The wallet created with this `Idempotency-Key`, if any. */
+  findByCreationIdempotencyKey(idempotencyKey: string): Promise<Wallet | null>;
   /** Registers a new wallet; it is written when the unit of work commits. */
   add(wallet: Wallet): void;
 }

@@ -5,6 +5,10 @@
  * and `WalletBalanceChanged` events in the outbox — in the same unit of work as
  * the wallet: all of it is committed together or not at all.
  *
+ * With an `Idempotency-Key`, the creation is idempotent: the same key and
+ * payload replay the wallet the key created, and another payload is a conflict
+ * — decided before the player's existing wallets, and again after losing a race.
+ *
  * @packageDocumentation
  */
 import type { OutboxRepositories } from '../../messaging/application/outbox-repository.ts';
@@ -17,14 +21,53 @@ import { WagerTransaction, WagerTransactionKind } from '../../wagering/domain/wa
 import { WagerTransactionProcessed } from '../../wagering/domain/wager-transaction-events.ts';
 import { WalletBalanceChanged } from '../domain/wallet-balance-changed.ts';
 import { Wallet } from '../domain/wallet.ts';
-import type { WalletRepositories } from './wallet-repository.ts';
-import { DuplicateWalletError, WalletAlreadyExistsError } from './wallet-errors.ts';
+import type { WalletRepositories, WalletRepository } from './wallet-repository.ts';
+import {
+  DuplicateWalletCreationKeyError,
+  DuplicateWalletError,
+  WalletAlreadyExistsError,
+  WalletCreationConflictError,
+} from './wallet-errors.ts';
 
 export interface CreateWalletCommand {
   playerId: string;
   initialBalance: MoneyProps;
   /** Recorded on the opening; generated when absent. */
   correlationId?: string;
+  /** The `Idempotency-Key`; without it, the creation is not idempotent. */
+  idempotencyKey?: string;
+}
+
+/** The wallet the creation answers with, and whether it is a replay. */
+export interface CreatedWallet {
+  wallet: Wallet;
+  /** True when the key had already created this wallet: nothing new was written. */
+  idempotentReplay: boolean;
+}
+
+/**
+ * The fingerprint of a creation: the validated player id and initial balance,
+ * with the hash every payload uses. Headers and metadata stay out.
+ */
+function creationHash(playerId: string, initialBalance: Money): string {
+  return hashPayload({ playerId, initialBalance: { ...initialBalance.toJSON() } });
+}
+
+/**
+ * @param wallets - The repository of the current unit of work.
+ * @param requested - The wallet this request would open, with its key and hash.
+ * @returns The replay, when the key already created a wallet from the same
+ *   payload; null when the request has no key or the key is new.
+ * @throws {@link WalletCreationConflictError} If the key created a wallet from
+ *   another payload.
+ */
+async function replayFrom(wallets: WalletRepository, requested: Wallet): Promise<CreatedWallet | null> {
+  const key = requested.creationIdempotencyKey;
+  if (key === undefined) return null;
+  const created = await wallets.findByCreationIdempotencyKey(key);
+  if (!created) return null;
+  if (created.creationPayloadHash !== requested.creationPayloadHash) throw new WalletCreationConflictError(key);
+  return { wallet: created, idempotentReplay: true };
 }
 
 /** The opening is internal: it never comes from a provider. */
@@ -39,22 +82,31 @@ export class CreateWallet {
 
   /**
    * @param command - Player, initial balance (zero or more) and correlation id.
-   * @returns The new wallet, at version 1.
+   * @returns The new wallet, at version 1 — or, on a replay, the wallet the key created.
    * @throws {@link InvalidMoneyError} If the initial balance is malformed or negative.
    * @throws {@link InvalidWalletError} If the player id is invalid.
+   * @throws {@link WalletCreationConflictError} If the key already created a
+   *   wallet from another payload — checked before the player's wallets.
    * @throws {@link WalletAlreadyExistsError} If the player already has a wallet in
    *   that currency — also when a simultaneous creation wins the race.
    */
-  async execute(command: CreateWalletCommand): Promise<Wallet> {
+  async execute(command: CreateWalletCommand): Promise<CreatedWallet> {
+    const initialBalance = Money.from(command.initialBalance);
     const wallet = Wallet.open({
       id: this.generateId(),
       playerId: command.playerId,
-      initialBalance: Money.from(command.initialBalance),
+      initialBalance,
+      creation:
+        command.idempotencyKey === undefined
+          ? undefined
+          : { idempotencyKey: command.idempotencyKey, payloadHash: creationHash(command.playerId, initialBalance) },
     });
     const correlationId = command.correlationId ?? this.generateId();
 
     try {
       return await this.unitOfWork.run(async ({ wallets, ledger, transactions, outbox }) => {
+        const replay = await replayFrom(wallets, wallet);
+        if (replay) return replay;
         const existing = await wallets.findByPlayerAndCurrency(wallet.playerId, wallet.currency);
         if (existing) throw new WalletAlreadyExistsError(existing.id);
         wallets.add(wallet);
@@ -69,11 +121,15 @@ export class CreateWallet {
           outbox.add(OutboxMessage.enqueue(processed));
           outbox.add(OutboxMessage.enqueue(changed));
         }
-        return wallet;
+        return { wallet, idempotentReplay: false };
       });
     } catch (error) {
-      if (!(error instanceof DuplicateWalletError)) throw error;
+      if (!(error instanceof DuplicateWalletError || error instanceof DuplicateWalletCreationKeyError)) throw error;
       // Lost the race to a simultaneous creation: the winner is committed now.
+      // With a key, whichever uniqueness was hit, the key decides first.
+      const replay = await this.unitOfWork.run(({ wallets }) => replayFrom(wallets, wallet));
+      if (replay) return replay;
+      if (error instanceof DuplicateWalletCreationKeyError) throw new Error('creation key reported taken, but no wallet found');
       throw new WalletAlreadyExistsError(await this.existingWalletId(wallet));
     }
   }

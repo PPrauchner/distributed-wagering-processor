@@ -1,9 +1,7 @@
 /**
  * The single database error classifier against the real PostgreSQL: each row
- * whose constraint already exists is provoked through MikroORM's flush — the
- * same path a unit of work takes — and the error that comes out is classified.
- * The row of the constraint still to come (wallet creation key) is covered by
- * the unit tests of the mapping.
+ * is provoked through MikroORM's flush — the same path a unit of work takes —
+ * and the error that comes out is classified.
  *
  * @packageDocumentation
  */
@@ -169,6 +167,19 @@ describe('23505, by constraint', () => {
     });
 
     expect(result).toEqual({ category: 'reread', target: 'wager-transaction-idempotency-key' });
+  });
+
+  test('the wallet creation key → reread', async () => {
+    const creation = { idempotencyKey: Bun.randomUUIDv7(), payloadHash: 'd'.repeat(64) };
+    const first = Wallet.open({ id: Bun.randomUUIDv7(), playerId: Bun.randomUUIDv7(), initialBalance: brl('0.00'), creation });
+    await commit((em) => em.persist(first));
+    touchedWallets.push(first.id);
+
+    const result = await classifyFailureOf(async (em) => {
+      em.persist(Wallet.open({ id: Bun.randomUUIDv7(), playerId: Bun.randomUUIDv7(), initialBalance: brl('0.00'), creation }));
+    });
+
+    expect(result).toEqual({ category: 'reread', target: 'wallet-creation-idempotency-key' });
   });
 
   test('the provider external id → EXTERNAL_ID_CONFLICT', async () => {
