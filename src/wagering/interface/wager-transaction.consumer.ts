@@ -1,7 +1,8 @@
 /**
  * The consumer of `wager-transactions.fifo` of one instance: long polling,
- * each batch processed in parallel through the same use case as the HTTP
- * endpoint, with the message's inbox entry recorded in the SQL transaction of
+ * each batch split by the `MessageGroupId` received — one message at a time
+ * within a group, in delivery order, the groups in parallel — through the same
+ * use case as the HTTP endpoint, with the message's inbox entry recorded in the SQL transaction of
  * the outcome. What the use case answers decides the message's fate
  * (`ARCHITECTURE.md` § Consumidor):
  *
@@ -15,6 +16,13 @@
  * - `FAILED`: sent to the DLQ with its code, then `ack`;
  * - a submission not admitted: sent to the DLQ with its code and recorded in
  *   `rejected_submissions`, then `ack`.
+ *
+ * A message of a group that ends with no `ack` keeps the ones after it in the
+ * batch from starting: they go back to the queue unstarted, to reappear with
+ * it — the delay of its retry, or the visibility timeout when it was left
+ * as is — and be redelivered in order, after it. Not at once: LocalStack 4.14
+ * releases a group as soon as any of its messages is visible again, even with
+ * an earlier one still in flight.
  *
  * Every send to the DLQ comes before the `ack`: if either fails, the message
  * stays, and its redelivery is settled again — by the inbox, when an outcome
@@ -101,6 +109,14 @@ const NOT_ADMITTED: [new (...args: never[]) => Error, FailureCode][] = [
   [MessageIdConflictError, FailureCode.MessageIdConflict],
 ];
 
+/**
+ * What became of a message: acknowledged, or still in the queue — visible
+ * again after `reappearsInSeconds`, or after its visibility timeout when absent.
+ */
+export type Settlement = { acknowledged: true } | { acknowledged: false; reappearsInSeconds?: number };
+
+const ACKNOWLEDGED: Settlement = { acknowledged: true };
+
 /** What could be extracted from a message, valid or not, for the DLQ and the audit. */
 interface MessageFacts {
   messageId?: string;
@@ -148,10 +164,11 @@ export class WagerTransactionConsumer implements OnApplicationBootstrap, BeforeA
    * visibility to expire.
    *
    * @param message - The message as the queue delivered it.
+   * @returns Whether it was acknowledged and, if not, when it reappears.
    */
-  async handle(message: ReceivedMessage): Promise<void> {
+  async handle(message: ReceivedMessage): Promise<Settlement> {
     const facts = factsOf(message);
-    await this.deps.log.inContext({ messageId: facts.messageId, correlationId: facts.correlationId }, async () => {
+    return this.deps.log.inContext({ messageId: facts.messageId, correlationId: facts.correlationId }, async () => {
       try {
         let parsed: WagerTransactionMessage;
         try {
@@ -160,14 +177,15 @@ export class WagerTransactionConsumer implements OnApplicationBootstrap, BeforeA
           if (!(error instanceof InvalidPayloadError)) throw error;
           return await this.notAdmitted(message, facts, FailureCode.InvalidPayload);
         }
-        await this.settle(message, facts, parsed);
+        return await this.settle(message, facts, parsed);
       } catch (error) {
         this.logger.warn(`queue message left unacknowledged: ${reasonOf(error)}`);
+        return { acknowledged: false };
       }
     });
   }
 
-  private async settle(message: ReceivedMessage, facts: MessageFacts, parsed: WagerTransactionMessage): Promise<void> {
+  private async settle(message: ReceivedMessage, facts: MessageFacts, parsed: WagerTransactionMessage): Promise<Settlement> {
     const { messageId, payloadHash, command } = parsed;
     const inbox = { consumerName: WAGER_TRANSACTIONS_CONSUMER, messageId, payloadHash };
     let outcome: WagerTransactionOutcome;
@@ -183,44 +201,44 @@ export class WagerTransactionConsumer implements OnApplicationBootstrap, BeforeA
       this.deps.log.warn('queue message out of receives', { failureCode: retryCodeOf(error) });
       return this.notAdmitted(message, facts, FailureCode.InfraRetriesExhausted, payloadHash);
     }
-    await this.settled(message, facts, outcome);
+    return this.settled(message, facts, outcome);
   }
 
   /** The use case gave an outcome: `FAILED` goes to the DLQ, the others are acknowledged. */
-  private async settled(message: ReceivedMessage, facts: MessageFacts, outcome: WagerTransactionOutcome): Promise<void> {
+  private async settled(message: ReceivedMessage, facts: MessageFacts, outcome: WagerTransactionOutcome): Promise<Settlement> {
     const { transaction } = outcome;
     if (transaction.status === WagerTransactionStatus.Failed) {
       await this.deadLetter(message, facts, transaction.failureCode ?? FailureCode.InfraUnexpected);
     } else {
       await this.deps.faults.inject(FaultPoint.CrashAfterCommit, { transactionId: transaction.id });
     }
-    await this.deps.queue.acknowledge(message);
+    return this.acknowledge(message);
   }
 
   /** The use case refused the message without an outcome. */
-  private async refused(message: ReceivedMessage, facts: MessageFacts, error: unknown): Promise<void> {
+  private async refused(message: ReceivedMessage, facts: MessageFacts, error: unknown): Promise<Settlement> {
     // Its first send to the DLQ may be what failed; the deduplication id absorbs a second one of the same delivery.
     if (error instanceof FailedRedeliveryError) {
       this.deps.metrics.inboxDuplicate();
       await this.deadLetter(message, facts, error.failureCode);
-      return this.deps.queue.acknowledge(message);
+      return this.acknowledge(message);
     }
     if (error instanceof InboxRedeliveryError) {
       this.deps.metrics.inboxDuplicate();
       this.deps.log.info('queue message already in the inbox, acknowledged with no effect');
-      return this.deps.queue.acknowledge(message);
+      return this.acknowledge(message);
     }
     const notAdmitted = NOT_ADMITTED.find(([type]) => error instanceof type);
     if (notAdmitted) return this.notAdmitted(message, facts, notAdmitted[1], payloadHashOf(error));
     // Even the `FAILED` could not be recorded: the DLQ is all that is left.
     if (error instanceof PermanentFailureError) {
       await this.deadLetter(message, facts, error.failureCode);
-      return this.deps.queue.acknowledge(message);
+      return this.acknowledge(message);
     }
     throw error;
   }
 
-  private async retry(message: ReceivedMessage, failureCode: string): Promise<void> {
+  private async retry(message: ReceivedMessage, failureCode: string): Promise<Settlement> {
     const delaySeconds = Math.min(2 ** message.receiveCount, this.options.retryMaxSeconds);
     this.deps.metrics.consumerRetry(failureCode);
     this.deps.log.info('queue message handed back for a retry', {
@@ -229,6 +247,7 @@ export class WagerTransactionConsumer implements OnApplicationBootstrap, BeforeA
       delaySeconds,
     });
     await this.deps.queue.changeVisibility(message, delaySeconds);
+    return { acknowledged: false, reappearsInSeconds: delaySeconds };
   }
 
   /** A submission not admitted: DLQ, its `rejected_submissions` row, then the `ack`. */
@@ -237,7 +256,7 @@ export class WagerTransactionConsumer implements OnApplicationBootstrap, BeforeA
     facts: MessageFacts,
     failureCode: FailureCode,
     payloadHash?: string,
-  ): Promise<void> {
+  ): Promise<Settlement> {
     await this.deadLetter(message, facts, failureCode);
     await this.deps.recordRejectedSubmission.execute({
       failureCode,
@@ -249,7 +268,12 @@ export class WagerTransactionConsumer implements OnApplicationBootstrap, BeforeA
       idempotencyKey: facts.idempotencyKey,
       payloadHash,
     });
+    return this.acknowledge(message);
+  }
+
+  private async acknowledge(message: ReceivedMessage): Promise<Settlement> {
     await this.deps.queue.acknowledge(message);
+    return ACKNOWLEDGED;
   }
 
   private async deadLetter(message: ReceivedMessage, facts: MessageFacts, failureCode: string): Promise<void> {
@@ -280,18 +304,55 @@ export class WagerTransactionConsumer implements OnApplicationBootstrap, BeforeA
         await Promise.all(messages.map((message) => this.handBack(message)));
         return;
       }
-      await Promise.all(messages.map((message) => this.handle(message)));
+      await Promise.all(byGroup(messages).map((group) => this.handleGroup(group)));
     }
   }
 
-  /** Makes the message visible again at once; if that fails, its visibility expires on its own. */
-  private async handBack(message: ReceivedMessage): Promise<void> {
+  /**
+   * One group's messages, in delivery order, one at a time. The ones after a
+   * message left in the queue go back unstarted, to reappear with it:
+   * processing them first would undo the group's order. Once the shutdown
+   * began, the rest is handed back at once.
+   */
+  private async handleGroup(group: ReceivedMessage[]): Promise<void> {
+    for (const [index, message] of group.entries()) {
+      if (!this.running) {
+        await Promise.all(group.slice(index).map((rest) => this.handBack(rest)));
+        return;
+      }
+      const settlement = await this.handle(message);
+      if (!settlement.acknowledged) {
+        const delay = settlement.reappearsInSeconds;
+        // With no delay set, the rest keeps the visibility timeout of the batch, like the message.
+        if (delay !== undefined) await Promise.all(group.slice(index + 1).map((rest) => this.handBack(rest, delay)));
+        return;
+      }
+    }
+  }
+
+  /** Makes the message visible again after `seconds`; if that fails, its visibility expires on its own. */
+  private async handBack(message: ReceivedMessage, seconds = 0): Promise<void> {
     try {
-      await this.deps.queue.changeVisibility(message, 0);
+      await this.deps.queue.changeVisibility(message, seconds);
     } catch (error) {
       this.logger.warn(`queue message not handed back: ${reasonOf(error)}`);
     }
   }
+}
+
+/**
+ * The batch split by the `MessageGroupId` received — never by the body's
+ * `walletId` —, each group in delivery order; a message with no group is a
+ * group of its own.
+ */
+function byGroup(messages: ReceivedMessage[]): ReceivedMessage[][] {
+  const groups = new Map<string, ReceivedMessage[]>();
+  const loose: ReceivedMessage[][] = [];
+  for (const message of messages) {
+    if (message.groupId === undefined) loose.push([message]);
+    else groups.set(message.groupId, [...(groups.get(message.groupId) ?? []), message]);
+  }
+  return [...groups.values(), ...loose];
 }
 
 /** A transient failure, or a wallet that may still be created: worth another delivery. */
