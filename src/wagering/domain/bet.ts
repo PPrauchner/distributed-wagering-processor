@@ -10,7 +10,7 @@ import { FailureCode } from '../../shared/domain/failure-code.ts';
 import type { Wallet } from '../../wallet/domain/wallet.ts';
 import type { WalletLedgerEntry } from '../../wallet/domain/wallet-ledger-entry.ts';
 import { WagerTransactionKind, type WagerTransaction } from './wager-transaction.ts';
-import { rejectOn, walletRejectionOf } from './wallet-coherence.ts';
+import { moveBalance, rejectOn, walletRejectionOf } from './wallet-coherence.ts';
 
 /**
  * Settles a `PENDING` bet on its wallet: processed with a debit, or rejected
@@ -38,7 +38,7 @@ export function applyBet(
     rejectOn(transaction, wallet, { code: rejection });
     return undefined;
   }
-  const entry = wallet.debit({ money: transaction.money, entryId: ids.entryId, transactionId: transaction.id });
+  const entry = moveBalance(transaction, wallet, ids);
   transaction.markProcessed({
     at: entry.createdAt,
     balanceAfter: wallet.balance,
