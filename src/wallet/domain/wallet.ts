@@ -6,10 +6,21 @@
 import { Money } from '../../shared/domain/money.ts';
 import { LedgerDirection, WalletLedgerEntry } from './wallet-ledger-entry.ts';
 
+/**
+ * How a creation with an `Idempotency-Key` is recognized again: the key and the
+ * hash of the creation payload.
+ */
+export interface WalletCreation {
+  idempotencyKey: string;
+  payloadHash: string;
+}
+
 export interface OpenWalletProps {
   id: string;
   playerId: string;
   initialBalance: Money;
+  /** Present when the creation came with an `Idempotency-Key`. */
+  creation?: WalletCreation;
 }
 
 /** Persisted state of a wallet, rebuilt as is by {@link Wallet.rehydrate}. */
@@ -21,6 +32,9 @@ export interface WalletState {
   version: number;
   createdAt: Date;
   updatedAt: Date;
+  initialBalance: Money;
+  creationIdempotencyKey?: string;
+  creationPayloadHash?: string;
 }
 
 /** A credit or debit: its amount, and ids of the new entry and of its transaction. */
@@ -48,6 +62,10 @@ export class Wallet {
     private _version: number,
     readonly createdAt: Date,
     private _updatedAt: Date,
+    /** The balance the wallet was opened with; it never changes. */
+    readonly initialBalance: Money,
+    readonly creationIdempotencyKey: string | undefined,
+    readonly creationPayloadHash: string | undefined,
   ) {}
 
   /**
@@ -76,6 +94,9 @@ export class Wallet {
       1,
       now,
       now,
+      props.initialBalance,
+      props.creation?.idempotencyKey,
+      props.creation?.payloadHash,
     );
   }
 
@@ -89,6 +110,9 @@ export class Wallet {
       state.version,
       state.createdAt,
       state.updatedAt,
+      state.initialBalance,
+      state.creationIdempotencyKey,
+      state.creationPayloadHash,
     );
   }
 
