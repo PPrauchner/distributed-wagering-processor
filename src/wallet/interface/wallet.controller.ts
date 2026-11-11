@@ -15,7 +15,9 @@ import {
   parseLedgerPageRequest,
   toLedgerPageResponse,
   toReconciliationResponse,
+  toCreatedWalletResponse,
   toWalletResponse,
+  type CreatedWalletResponse,
   type LedgerPageResponse,
   type ReconciliationResponse,
   type WalletResponse,
@@ -35,9 +37,10 @@ export class WalletController {
   async create(
     @Body() body: unknown,
     @Headers('x-correlation-id') correlationId: string | undefined,
-  ): Promise<WalletResponse> {
-    const wallet = await this.createWallet.execute(parseCreateWalletRequest(body, correlationId));
-    return toWalletResponse(wallet);
+    @Headers('idempotency-key') idempotencyKey: string | undefined,
+  ): Promise<CreatedWalletResponse> {
+    const command = parseCreateWalletRequest(body, { correlationId, idempotencyKey });
+    return toCreatedWalletResponse(await this.createWallet.execute(command), command.idempotencyKey !== undefined);
   }
 
   @Get(':id')

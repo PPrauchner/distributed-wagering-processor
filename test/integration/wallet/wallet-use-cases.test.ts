@@ -20,7 +20,7 @@ import { Money } from '../../../src/shared/domain/money.ts';
 import { InvalidMoneyError } from '../../../src/shared/domain/money.ts';
 import { Wallet } from '../../../src/wallet/domain/wallet.ts';
 import { WalletLedgerEntry } from '../../../src/wallet/domain/wallet-ledger-entry.ts';
-import { CreateWallet } from '../../../src/wallet/application/create-wallet.ts';
+import { CreateWallet, type CreatedWallet } from '../../../src/wallet/application/create-wallet.ts';
 import { GetWallet } from '../../../src/wallet/application/get-wallet.ts';
 import {
   DuplicateWalletError,
@@ -57,7 +57,7 @@ describe('CreateWallet', () => {
   test('opens and persists a zero-balance wallet', async () => {
     const playerId = Bun.randomUUIDv7();
 
-    const created = await createWallet.execute({ playerId, initialBalance: zeroBrl });
+    const { wallet: created } = await createWallet.execute({ playerId, initialBalance: zeroBrl });
 
     const stored = await getWallet.execute(created.id);
     expect(stored.playerId).toBe(playerId);
@@ -67,7 +67,7 @@ describe('CreateWallet', () => {
 
   test('a second wallet for the same player and currency points at the existing one', async () => {
     const playerId = Bun.randomUUIDv7();
-    const first = await createWallet.execute({ playerId, initialBalance: zeroBrl });
+    const { wallet: first } = await createWallet.execute({ playerId, initialBalance: zeroBrl });
 
     const second = createWallet.execute({ playerId, initialBalance: zeroBrl });
 
@@ -79,7 +79,7 @@ describe('CreateWallet', () => {
     const playerId = Bun.randomUUIDv7();
     await createWallet.execute({ playerId, initialBalance: zeroBrl });
 
-    const usd = await createWallet.execute({
+    const { wallet: usd } = await createWallet.execute({
       playerId,
       initialBalance: { amount: '0.00', currency: 'USD' },
     });
@@ -97,7 +97,7 @@ describe('CreateWallet', () => {
     const created = results.filter((r) => r.status === 'fulfilled');
     const refused = results.filter((r): r is PromiseRejectedResult => r.status === 'rejected');
     expect(created).toHaveLength(1);
-    const winnerId = (created[0] as PromiseFulfilledResult<Wallet>).value.id;
+    const winnerId = (created[0] as PromiseFulfilledResult<CreatedWallet>).value.wallet.id;
     for (const { reason } of refused) {
       expect(reason).toBeInstanceOf(WalletAlreadyExistsError);
       expect(reason.walletId).toBe(winnerId);
@@ -107,7 +107,7 @@ describe('CreateWallet', () => {
   test('a positive initial balance writes the wallet, a PROCESSED OPENING and its CREDIT entry', async () => {
     const playerId = Bun.randomUUIDv7();
 
-    const wallet = await createWallet.execute({
+    const { wallet } = await createWallet.execute({
       playerId,
       initialBalance: { amount: '1000.00', currency: 'BRL' },
       correlationId: 'corr-opening',
@@ -151,7 +151,7 @@ describe('CreateWallet', () => {
   });
 
   test('without a correlation id, the OPENING gets a generated one', async () => {
-    const wallet = await createWallet.execute({
+    const { wallet } = await createWallet.execute({
       playerId: Bun.randomUUIDv7(),
       initialBalance: { amount: '5.00', currency: 'BRL' },
     });
@@ -162,7 +162,7 @@ describe('CreateWallet', () => {
   });
 
   test('a zero initial balance has no opening and no entry', async () => {
-    const wallet = await createWallet.execute({ playerId: Bun.randomUUIDv7(), initialBalance: zeroBrl });
+    const { wallet } = await createWallet.execute({ playerId: Bun.randomUUIDv7(), initialBalance: zeroBrl });
     touchedWallets.push(wallet.id);
 
     const [row] = await sql`
@@ -173,7 +173,7 @@ describe('CreateWallet', () => {
   });
 
   test('a failure after the wallet is written and before the commit leaves nothing behind', async () => {
-    const existing = await createWallet.execute({
+    const { wallet: existing } = await createWallet.execute({
       playerId: Bun.randomUUIDv7(),
       initialBalance: { amount: '1.00', currency: 'BRL' },
     });
