@@ -93,17 +93,7 @@ describe('applyLoss', () => {
   });
 });
 
-describe('affectsBalance', () => {
-  test.each([
-    [WagerTransactionKind.Loss, false],
-    [WagerTransactionKind.Bet, true],
-    [WagerTransactionKind.Win, true],
-  ])('%s → %s', (kind, expected) => {
-    const transaction = loss({ kind, money: brl('1.00') });
-
-    expect(transaction.affectsBalance()).toBe(expected);
-  });
-
+describe('payload shape', () => {
   test('a LOSS refuses a reference', () => {
     expect(() => loss({ referenceExternalTransactionId: 'bet-1' })).toThrow();
   });

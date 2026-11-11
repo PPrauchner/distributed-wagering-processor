@@ -240,11 +240,6 @@ export class WagerTransaction {
     this._status = WagerTransactionStatus.PendingReference;
   }
 
-  /** Whether processing it moves the balance: every kind but the `LOSS`. */
-  affectsBalance(): boolean {
-    return this.kind !== WagerTransactionKind.Loss;
-  }
-
   isTerminal(): boolean {
     return TERMINAL_STATUSES.has(this._status);
   }
