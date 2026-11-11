@@ -32,7 +32,11 @@ export class WageringModule {
    *   fault points enabled (none outside the tests).
    * @returns The module, exporting the audit of refused submissions.
    */
-  static forRoot(config: Pick<AppConfig, 'wagerTransactionsConsumer' | 'faultPoints'>): DynamicModule {
+  static forRoot(
+    config: Pick<AppConfig, 'wagerTransactionsConsumer' | 'pendingReferences' | 'faultPoints'>,
+  ): DynamicModule {
+    const { ttlMs, retryBaseMs, retryMaxMs } = config.pendingReferences;
+    const referenceWait = { ttlMs, backoff: { baseMs: retryBaseMs, maxMs: retryMaxMs } };
     return {
       module: WageringModule,
       controllers: [WagerTransactionController],
@@ -46,7 +50,7 @@ export class WageringModule {
             >,
             metrics: WageringMetrics,
             log: ContextLog,
-          ) => new ProcessWagerTransaction(unitOfWork, () => Bun.randomUUIDv7(), metrics, log),
+          ) => new ProcessWagerTransaction(unitOfWork, () => Bun.randomUUIDv7(), metrics, log, referenceWait),
         },
         {
           provide: WagerTransactionConsumer,

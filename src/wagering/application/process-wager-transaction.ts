@@ -8,7 +8,8 @@
  * order, and the first violation decides (`ARCHITECTURE.md` § Ordem das
  * validações). It settles `BET`, `WIN`, `LOSS`, `REFUND` and `ROLLBACK`; a
  * transaction citing a reference not there yet is recorded
- * `PENDING_REFERENCE`, with no event.
+ * `PENDING_REFERENCE`, scheduled for the worker's first attempt, with
+ * `WagerTransactionPendingReference`; only the worker resolves it.
  *
  * Error path (`ARCHITECTURE.md` § Classificação de falhas): a transient failure
  * records nothing and reaches the caller; a permanent one rolls the SQL
@@ -43,7 +44,12 @@ import { applyDependentTransaction, type CitedReference } from '../domain/depend
 import { applyLoss } from '../domain/loss.ts';
 import type { SubmissionChannel } from '../domain/rejected-submission.ts';
 import { applyWin } from '../domain/win.ts';
-import { WagerTransactionProcessed, WagerTransactionRejected } from '../domain/wager-transaction-events.ts';
+import type { ReferenceRetryBackoff } from '../domain/reference-wait.ts';
+import {
+  WagerTransactionPendingReference,
+  WagerTransactionProcessed,
+  WagerTransactionRejected,
+} from '../domain/wager-transaction-events.ts';
 import {
   InvalidWagerTransactionError,
   WagerTransaction,
@@ -86,6 +92,14 @@ export interface WagerTransactionOutcome {
   idempotentReplay: boolean;
 }
 
+/** How a transaction citing a reference not there yet waits for it. */
+export interface ReferenceWaitPolicy {
+  /** How long it waits from its creation. */
+  ttlMs: number;
+  /** When the worker tries it next. */
+  backoff: ReferenceRetryBackoff;
+}
+
 const MAX_IDENTIFIER_LENGTH = 255;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const KINDS = new Set<string>(Object.values(WagerTransactionKind));
@@ -105,6 +119,7 @@ export class ProcessWagerTransaction {
     private readonly generateId: () => string,
     private readonly metrics: WageringMetrics,
     private readonly log: ContextLog,
+    private readonly referenceWait: ReferenceWaitPolicy,
   ) {}
 
   /**
@@ -213,6 +228,9 @@ export class ProcessWagerTransaction {
       if (committedMeanwhile) return recorded(committedMeanwhile);
 
       const entry = await this.settle(submitted, wallet, transactions);
+      if (submitted.status === WagerTransactionStatus.PendingReference) {
+        submitted.scheduleReferenceAttempt(new Date(), this.referenceWait.backoff);
+      }
       transactions.add(submitted);
       if (entry) ledger.add(entry);
       this.enqueueEvents(outbox, submitted, wallet, entry);
@@ -261,7 +279,8 @@ export class ProcessWagerTransaction {
 
   /**
    * The outcome's integration events: processed, with its balance change when
-   * the balance moved; rejected; none while waiting for a reference. Added
+   * the balance moved; rejected; waiting for a reference, with when the wait
+   * expires. Added
    * before anything that may still fail in the unit of work, so they are
    * committed or rolled back with the outcome.
    */
@@ -275,6 +294,12 @@ export class ProcessWagerTransaction {
     if (transaction.status === WagerTransactionStatus.Rejected) {
       const rejected = WagerTransactionRejected.from(transaction, context, { eventId: this.generateId(), at: new Date() });
       outbox.add(OutboxMessage.enqueue(rejected));
+      return;
+    }
+    if (transaction.status === WagerTransactionStatus.PendingReference) {
+      const { ttlMs } = this.referenceWait;
+      const pending = WagerTransactionPendingReference.from(transaction, context, { eventId: this.generateId(), ttlMs });
+      outbox.add(OutboxMessage.enqueue(pending));
       return;
     }
     if (transaction.status !== WagerTransactionStatus.Processed) return;
