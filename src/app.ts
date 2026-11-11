@@ -9,6 +9,7 @@ import { Module, type DynamicModule, type INestApplication } from '@nestjs/commo
 import { NestFactory } from '@nestjs/core';
 import type { AppConfig } from './config.ts';
 import { DatabaseModule } from './database/database.module.ts';
+import { HealthModule } from './health/interface/health.module.ts';
 import { HttpErrorFilter } from './http/http-error.filter.ts';
 import { MessagingModule } from './messaging/interface/messaging.module.ts';
 import { RejectedSubmissionAudit } from './wagering/interface/rejected-submission.audit.ts';
@@ -20,7 +21,13 @@ class AppModule {
   static forConfig(config: AppConfig): DynamicModule {
     return {
       module: AppModule,
-      imports: [DatabaseModule.forRoot(config), WalletModule, WageringModule, MessagingModule.forRoot(config)],
+      imports: [
+        DatabaseModule.forRoot(config),
+        WalletModule,
+        WageringModule,
+        MessagingModule.forRoot(config),
+        HealthModule.forRoot(config),
+      ],
     };
   }
 }
