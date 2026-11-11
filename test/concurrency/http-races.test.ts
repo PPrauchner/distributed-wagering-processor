@@ -137,12 +137,16 @@ async function submitOnce(baseUrl: string, data: JsonObject): Promise<{ status: 
   return { status: response.status, body: (await response.json()) as JsonObject };
 }
 
-/** @returns How many sessions of the test database wait on the use case's wallet lock right now. */
+/**
+ * @returns How many sessions of the test database hold a lock request not
+ *   granted in `pg_locks` while running the use case's wallet lock.
+ */
 async function sessionsWaitingOnWalletLock(): Promise<number> {
   const [row] = await sql`
-    select count(*)::int as n from pg_stat_activity
-     where datname = current_database() and wait_event_type = 'Lock'
-       and query ~* 'from "wallets".*for update'
+    select count(distinct l.pid)::int as n
+      from pg_locks l join pg_stat_activity a on a.pid = l.pid
+     where not l.granted and a.datname = current_database()
+       and a.query ~* 'from "wallets".*for update'
   `;
   return row.n;
 }
