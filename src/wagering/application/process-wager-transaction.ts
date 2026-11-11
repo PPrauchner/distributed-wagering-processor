@@ -60,7 +60,6 @@ import {
   IdempotencyConflictError,
   InternalKindNotAllowedError,
   SubmissionWalletNotFoundError,
-  UnsupportedKindError,
 } from './wagering-errors.ts';
 
 /** A submission as the channel received it: shaped, not yet validated. */
@@ -86,13 +85,6 @@ export interface WagerTransactionOutcome {
 }
 
 const KINDS = new Set<string>(Object.values(WagerTransactionKind));
-const SUPPORTED_KINDS = new Set([
-  WagerTransactionKind.Bet,
-  WagerTransactionKind.Win,
-  WagerTransactionKind.Loss,
-  WagerTransactionKind.Refund,
-  WagerTransactionKind.Rollback,
-]);
 
 export class ProcessWagerTransaction {
   constructor(
@@ -118,7 +110,6 @@ export class ProcessWagerTransaction {
    * @throws {@link InvalidWagerTransactionError} If any other field breaks the
    *   payload contract or the rules of its kind.
    * @throws {@link InternalKindNotAllowedError} If it is a well-formed `OPENING`.
-   * @throws {@link UnsupportedKindError} If its kind is not processed yet.
    * @throws {@link IdempotencyConflictError} If the provider used the key with
    *   another payload.
    * @throws {@link ExternalIdConflictError} If the provider used the external id
@@ -337,7 +328,6 @@ export class ProcessWagerTransaction {
     // `create` enforces the identifiers and the rules of the kind: amount floor and reference.
     const submitted = WagerTransaction.create(props);
     if (props.kind === WagerTransactionKind.Opening) throw new InternalKindNotAllowedError(props.kind, props.payloadHash);
-    if (!SUPPORTED_KINDS.has(props.kind)) throw new UnsupportedKindError(props.kind);
     return { props, submitted };
   }
 }
