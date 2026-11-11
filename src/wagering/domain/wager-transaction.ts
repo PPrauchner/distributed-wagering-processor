@@ -8,6 +8,7 @@
  */
 import type { FailureCode } from '../../shared/domain/failure-code.ts';
 import type { Money } from '../../shared/domain/money.ts';
+import { referenceRetryDelayMs, type ReferenceRetryBackoff } from './reference-wait.ts';
 
 export enum WagerTransactionKind {
   /** Internal: credits a wallet's initial balance; never comes from a provider. */
@@ -110,6 +111,8 @@ export class WagerTransaction {
     private _balanceAfter?: Money,
     private _walletVersionObserved?: number,
     private _failureMessage?: string,
+    private _attempts?: number,
+    private _nextAttemptAt?: Date,
   ) {}
 
   /**
@@ -154,6 +157,13 @@ export class WagerTransaction {
       props.correlationId,
       new Date(),
       WagerTransactionStatus.Pending,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      0,
     );
   }
 
@@ -183,6 +193,16 @@ export class WagerTransaction {
 
   get walletVersionObserved(): number | undefined {
     return this._walletVersionObserved;
+  }
+
+  /** The attempts the worker already made to resolve a pending reference. */
+  get attempts(): number {
+    return this._attempts ?? 0;
+  }
+
+  /** When the worker tries a pending reference next; unset outside `PENDING_REFERENCE`. */
+  get nextAttemptAt(): Date | undefined {
+    return this._nextAttemptAt;
   }
 
   /**
@@ -240,8 +260,40 @@ export class WagerTransaction {
     this._status = WagerTransactionStatus.PendingReference;
   }
 
+  /**
+   * Schedules the first attempt of a pending reference, after the base delay.
+   *
+   * @param now - When it started waiting.
+   * @param backoff - Base, cap and randomness of the delay.
+   * @throws {@link InvalidTransactionStateError} If the transaction is not `PENDING_REFERENCE`.
+   */
+  scheduleReferenceAttempt(now: Date, backoff: ReferenceRetryBackoff): void {
+    this.assertPendingReference();
+    this._nextAttemptAt = new Date(now.getTime() + referenceRetryDelayMs(this.attempts, backoff));
+  }
+
+  /**
+   * An attempt found no reference: counts it and schedules the next one.
+   * There is no limit of attempts — the TTL already limits the wait.
+   *
+   * @param now - When the attempt was made.
+   * @param backoff - Base, cap and randomness of the delay.
+   * @throws {@link InvalidTransactionStateError} If the transaction is not `PENDING_REFERENCE`.
+   */
+  retryReference(now: Date, backoff: ReferenceRetryBackoff): void {
+    this.assertPendingReference();
+    this._attempts = this.attempts + 1;
+    this.scheduleReferenceAttempt(now, backoff);
+  }
+
   isTerminal(): boolean {
     return TERMINAL_STATUSES.has(this._status);
+  }
+
+  private assertPendingReference(): void {
+    if (this._status !== WagerTransactionStatus.PendingReference) {
+      throw new InvalidTransactionStateError(`transaction ${this.id} is ${this._status}, not PENDING_REFERENCE`);
+    }
   }
 
   private assertNotTerminal(): void {

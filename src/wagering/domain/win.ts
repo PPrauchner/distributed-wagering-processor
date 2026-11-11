@@ -8,7 +8,7 @@
  */
 import type { Wallet } from '../../wallet/domain/wallet.ts';
 import type { WalletLedgerEntry } from '../../wallet/domain/wallet-ledger-entry.ts';
-import { resolveReference } from './reference.ts';
+import { resolveReference, waitForReference } from './reference.ts';
 import { WagerTransactionKind, type WagerTransaction } from './wager-transaction.ts';
 import { rejectOn, walletRejectionOf } from './wallet-coherence.ts';
 
@@ -19,7 +19,7 @@ const ACCEPTED_REFERENCE_KINDS: ReadonlySet<WagerTransactionKind> = new Set([Wag
  * the wallet untouched; or, citing a reference that is not there yet, left
  * `PENDING_REFERENCE` with nothing observed.
  *
- * @param transaction - The win, still `PENDING`.
+ * @param transaction - The win, `PENDING` or still waiting for its reference.
  * @param wallet - Its wallet, read under lock.
  * @param reference - The transaction it cites, found by its provider and the
  *   cited external id; `undefined` when it cites none or none was found.
@@ -47,7 +47,7 @@ export function applyWin(
   if (transaction.referenceExternalTransactionId !== undefined) {
     const resolution = resolveReference(transaction, reference, ACCEPTED_REFERENCE_KINDS);
     if (resolution.outcome === 'wait') {
-      transaction.markPendingReference();
+      waitForReference(transaction);
       return undefined;
     }
     if (resolution.outcome === 'rejected') {

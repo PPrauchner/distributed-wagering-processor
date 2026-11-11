@@ -39,6 +39,11 @@ export interface WagerTransactionRejectedData extends WagerTransactionEventData 
   rejectedAt: string;
 }
 
+export interface WagerTransactionPendingReferenceData extends WagerTransactionEventData {
+  /** When the wait ends without its reference: creation + TTL. */
+  expiresAt: string;
+}
+
 /** Raised when an event is built from a transaction without that outcome. */
 export class EventOutcomeMismatchError extends Error {
   override readonly name = 'EventOutcomeMismatchError';
@@ -117,6 +122,38 @@ export class WagerTransactionRejected extends IntegrationEvent<WagerTransactionR
         balanceAfter: balanceAfter.toJSON(),
         walletVersion: walletVersionObserved,
         rejectedAt: ids.at.toISOString(),
+      },
+    });
+  }
+}
+
+export class WagerTransactionPendingReference extends IntegrationEvent<WagerTransactionPendingReferenceData> {
+  readonly eventType = 'WagerTransactionPendingReference';
+  readonly version = 1;
+
+  /**
+   * @param transaction - A `PENDING_REFERENCE` transaction.
+   * @param context - Correlation and causation of the arrival.
+   * @param ids - The new event's id, and how long the transaction waits from its creation.
+   * @returns The event, aggregated by the transaction id, occurred when it was created.
+   * @throws {@link EventOutcomeMismatchError} If the transaction is not `PENDING_REFERENCE`.
+   */
+  static from(
+    transaction: WagerTransaction,
+    context: EventContext,
+    ids: { eventId: string; ttlMs: number },
+  ): WagerTransactionPendingReference {
+    if (transaction.status !== WagerTransactionStatus.PendingReference) {
+      throw new EventOutcomeMismatchError(`transaction ${transaction.id} is ${transaction.status}, not PENDING_REFERENCE`);
+    }
+    return new WagerTransactionPendingReference({
+      eventId: ids.eventId,
+      aggregateId: transaction.id,
+      ...context,
+      occurredAt: transaction.createdAt,
+      data: {
+        ...identityOf(transaction),
+        expiresAt: new Date(transaction.createdAt.getTime() + ids.ttlMs).toISOString(),
       },
     });
   }

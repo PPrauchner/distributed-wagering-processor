@@ -22,10 +22,18 @@ export class SqlFaultInjector implements FaultInjector {
   async inject(point: FaultPoint, context: FaultContext): Promise<void> {
     if (!this.enabled.has(point)) return;
     if (point === FaultPoint.InvariantViolationBeforeCommit) await this.violateInvariant(context);
+    if (point === FaultPoint.TransientFailureInResolution) await this.refuseLock();
     // The process dies there: whatever the caller would do next never happens,
     // and the SQL transaction it runs in rolls back.
     if (point === FaultPoint.CrashAfterSend) throw new SimulatedCrashError(point);
     // `crash-after-commit` belongs to the queue consumer.
+  }
+
+  /** The error PostgreSQL raises when `lock_timeout` expires. */
+  private async refuseLock(): Promise<void> {
+    await this.em.execute(
+      `do $$ begin raise exception 'simulated lock timeout' using errcode = 'lock_not_available'; end $$`,
+    );
   }
 
   /**

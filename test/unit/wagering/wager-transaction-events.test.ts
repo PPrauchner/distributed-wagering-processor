@@ -8,7 +8,11 @@
 import { describe, expect, test } from 'bun:test';
 import { FailureCode } from '../../../src/shared/domain/failure-code.ts';
 import { Money } from '../../../src/shared/domain/money.ts';
-import { WagerTransactionProcessed, WagerTransactionRejected } from '../../../src/wagering/domain/wager-transaction-events.ts';
+import {
+  WagerTransactionPendingReference,
+  WagerTransactionProcessed,
+  WagerTransactionRejected,
+} from '../../../src/wagering/domain/wager-transaction-events.ts';
 import { WagerTransaction, WagerTransactionKind } from '../../../src/wagering/domain/wager-transaction.ts';
 
 const WALLET_ID = '0192f291-27dd-7d3f-8071-5f8685deef37';
@@ -120,5 +124,54 @@ describe('WagerTransactionRejected', () => {
 
   test('refuses a transaction that was not rejected', () => {
     expect(() => WagerTransactionRejected.from(bet(), context, { eventId: EVENT_ID, at: new Date() })).toThrow();
+  });
+});
+
+describe('WagerTransactionPendingReference', () => {
+  const pendingWin = (): WagerTransaction => {
+    const transaction = WagerTransaction.create({
+      id: TRANSACTION_ID,
+      providerId: 'provider-a',
+      externalTransactionId: 'win-1',
+      idempotencyKey: 'key-1',
+      payloadHash: 'a'.repeat(64),
+      walletId: WALLET_ID,
+      playerId: 'player-1',
+      roundId: 'round-1',
+      gameId: 'game-1',
+      kind: WagerTransactionKind.Win,
+      money: brl('40.00'),
+      referenceExternalTransactionId: 'bet-1',
+      correlationId: 'corr-1',
+    });
+    transaction.markPendingReference();
+    return transaction;
+  };
+
+  test('occurs at the creation and expires at creation + TTL', () => {
+    const transaction = pendingWin();
+
+    const event = WagerTransactionPendingReference.from(transaction, context, { eventId: EVENT_ID, ttlMs: 300_000 });
+
+    const json = asJson(event) as { occurredAt: string; data: Record<string, unknown> };
+    expect(json).toMatchObject({ eventType: 'WagerTransactionPendingReference', version: 1, aggregateId: TRANSACTION_ID });
+    expect(json.occurredAt).toBe(transaction.createdAt.toISOString());
+    expect(json.data).toEqual({
+      transactionId: TRANSACTION_ID,
+      providerId: 'provider-a',
+      externalTransactionId: 'win-1',
+      walletId: WALLET_ID,
+      playerId: 'player-1',
+      roundId: 'round-1',
+      gameId: 'game-1',
+      kind: 'WIN',
+      money: { amount: '40.00', currency: 'BRL' },
+      referenceExternalTransactionId: 'bet-1',
+      expiresAt: new Date(transaction.createdAt.getTime() + 300_000).toISOString(),
+    });
+  });
+
+  test('refuses a transaction that is not waiting for its reference', () => {
+    expect(() => WagerTransactionPendingReference.from(bet(), context, { eventId: EVENT_ID, ttlMs: 1 })).toThrow();
   });
 });

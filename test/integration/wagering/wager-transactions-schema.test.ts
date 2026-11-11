@@ -84,6 +84,7 @@ const pendingRefund: Row = {
   balance_after_amount: null,
   balance_after_currency: null,
   wallet_version_observed: null,
+  next_attempt_at: new Date(),
 };
 
 describe('uniqueness per provider', () => {
@@ -147,6 +148,12 @@ describe('coherence CHECKs', () => {
       { ...pendingRefund, wallet_version_observed: 1 },
       /wager_transactions_observed_balance/,
     ],
+    [
+      'PENDING_REFERENCE with no next attempt',
+      { ...pendingRefund, next_attempt_at: null },
+      /wager_transactions_pending_reference_schedule/,
+    ],
+    ['a negative attempt count', { attempts: -1 }, /wager_transactions_attempts_non_negative/],
   ])('refuses %s', async (_case, overrides, constraint) => {
     await expect(insert(overrides)).rejects.toThrow(constraint);
   });
@@ -239,6 +246,18 @@ describe('a terminal transaction never changes', () => {
 
     const [row] = await sql`select status from wager_transactions where id = ${id}`;
     expect(row.status).toBe('PROCESSED');
+  });
+
+  test('a PENDING_REFERENCE row may be rescheduled, staying pending', async () => {
+    const id = await insert(pendingRefund);
+
+    await sql`
+      update wager_transactions set attempts = attempts + 1, next_attempt_at = now() + interval '2 seconds'
+       where id = ${id}
+    `;
+
+    const [row] = await sql`select status, attempts from wager_transactions where id = ${id}`;
+    expect(row).toEqual({ status: 'PENDING_REFERENCE', attempts: 1 });
   });
 
   test.each([

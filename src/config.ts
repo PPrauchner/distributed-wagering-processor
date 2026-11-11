@@ -15,6 +15,7 @@ export interface AppConfig {
   sqs: SqsConfig;
   outboxPublisher: OutboxPublisherConfig;
   wagerTransactionsConsumer: WagerTransactionsConsumerConfig;
+  pendingReferences: PendingReferencesConfig;
 }
 
 export interface SqsConfig {
@@ -51,6 +52,22 @@ export interface WagerTransactionsConsumerConfig {
   visibilityTimeoutSeconds: number;
 }
 
+/**
+ * The transactions pending their reference, and the worker that resolves them
+ * on every instance (`ARCHITECTURE.md` § Referências fora de ordem).
+ */
+export interface PendingReferencesConfig {
+  /** Whether this instance runs the worker; on by default. */
+  enabled: boolean;
+  /** How long a pending reference waits from its creation, on the database clock. */
+  ttlMs: number;
+  pollIntervalMs: number;
+  leaseMs: number;
+  /** The next attempt waits `min(retryBaseMs × 2^attempts, retryMaxMs)`, with jitter. */
+  retryBaseMs: number;
+  retryMaxMs: number;
+}
+
 // 127.0.0.1 and never localhost: on Windows localhost tries IPv6 first and each
 // new connection takes ~300 ms — enough to serialize transactions by accident
 // and hide a race in the tests (ADR 0001).
@@ -62,8 +79,9 @@ const DEFAULT_RETRY_AFTER_SECONDS = 1;
  * @param env - Environment variables; the process environment by default.
  * @returns The configuration, with local-development defaults.
  * @throws {@link Error} If `PORT` is not a valid port number, or
- *   `RETRY_AFTER_SECONDS` or a time of the outbox publisher is not a positive
- *   integer, or `OUTBOX_PUBLISHER_ENABLED` is neither `true` nor `false`, or a
+ *   `RETRY_AFTER_SECONDS` or a time of the outbox publisher or of the pending
+ *   references is not a positive integer, or `OUTBOX_PUBLISHER_ENABLED` or
+ *   `PENDING_REFERENCES_WORKER_ENABLED` is neither `true` nor `false`, or a
  *   setting of the consumer is out of its range, or
  *   `FAULT_INJECTION` names an unknown point or is set in production.
  */
@@ -104,6 +122,14 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
       waitTimeSeconds: integerInRangeOf(env, 'WAGER_TRANSACTIONS_WAIT_SECONDS', 20, [0, 20]),
       batchSize: integerInRangeOf(env, 'WAGER_TRANSACTIONS_BATCH_SIZE', 10, [1, 10]),
       visibilityTimeoutSeconds: positiveIntegerOf(env, 'WAGER_TRANSACTIONS_VISIBILITY_SECONDS', 30),
+    },
+    pendingReferences: {
+      enabled: booleanOf(env, 'PENDING_REFERENCES_WORKER_ENABLED', true),
+      ttlMs: positiveIntegerOf(env, 'PENDING_REFERENCE_TTL_MS', 5 * 60_000),
+      pollIntervalMs: positiveIntegerOf(env, 'PENDING_REFERENCES_POLL_INTERVAL_MS', 1000),
+      leaseMs: positiveIntegerOf(env, 'PENDING_REFERENCES_LEASE_MS', 30_000),
+      retryBaseMs: positiveIntegerOf(env, 'PENDING_REFERENCES_RETRY_BASE_MS', 1000),
+      retryMaxMs: positiveIntegerOf(env, 'PENDING_REFERENCES_RETRY_MAX_MS', 60_000),
     },
   };
 }

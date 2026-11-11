@@ -36,4 +36,6 @@ export interface ContextLog {
   /** Adds fields to the current context: every later line in it carries them. */
   enrich(fields: LogContextFields): void;
   info(message: string, details?: LogDetails): void;
+  /** An alert: something failed that needs a human, with no caller to tell. */
+  warn(message: string, details?: LogDetails): void;
 }

@@ -23,6 +23,7 @@ import { Migration0007OutboxMessages } from '../messaging/infrastructure/migrati
 import { Migration0008WagerTransactionReference } from '../wagering/infrastructure/migrations/0008-wager-transaction-reference.ts';
 import { Migration0009WagerTransactionSingleReversal } from '../wagering/infrastructure/migrations/0009-wager-transaction-single-reversal.ts';
 import { Migration0010InboxMessages } from '../messaging/infrastructure/migrations/0010-inbox-messages.ts';
+import { Migration0011WagerTransactionReferenceSchedule } from '../wagering/infrastructure/migrations/0011-wager-transaction-reference-schedule.ts';
 
 /**
  * @param databaseUrl - PostgreSQL connection URL.
@@ -53,6 +54,10 @@ export function createOrmConfig(databaseUrl: string): Options {
         { name: 'Migration0008WagerTransactionReference', class: Migration0008WagerTransactionReference },
         { name: 'Migration0009WagerTransactionSingleReversal', class: Migration0009WagerTransactionSingleReversal },
         { name: 'Migration0010InboxMessages', class: Migration0010InboxMessages },
+        {
+          name: 'Migration0011WagerTransactionReferenceSchedule',
+          class: Migration0011WagerTransactionReferenceSchedule,
+        },
       ],
       // Hand-written migrations; the snapshot only serves automatic diffs.
       snapshot: false,

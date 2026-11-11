@@ -54,6 +54,21 @@ describe('pino logging', () => {
     expect(lines[1]).not.toHaveProperty('messageId');
   });
 
+  test('an alert is a warn line, with its context', () => {
+    const { lines, store, log } = capture();
+
+    store.run({ transactionId: 'tx-1' }, () => log.warn('pending reference failed', { failureCode: 'INFRA_UNEXPECTED' }));
+
+    expect(lines).toEqual([
+      expect.objectContaining({
+        level: 40,
+        msg: 'pending reference failed',
+        transactionId: 'tx-1',
+        failureCode: 'INFRA_UNEXPECTED',
+      }),
+    ]);
+  });
+
   test('concurrent contexts do not share fields', async () => {
     const { lines, store, log } = capture();
 

@@ -12,7 +12,7 @@
 import { FailureCode } from '../../shared/domain/failure-code.ts';
 import type { Wallet } from '../../wallet/domain/wallet.ts';
 import type { WalletLedgerEntry } from '../../wallet/domain/wallet-ledger-entry.ts';
-import { resolveReference } from './reference.ts';
+import { resolveReference, waitForReference } from './reference.ts';
 import { WagerTransactionKind, type WagerTransaction } from './wager-transaction.ts';
 import { rejectOn, walletRejectionOf } from './wallet-coherence.ts';
 
@@ -43,7 +43,8 @@ const DEBITING_REFERENCE_KINDS: ReadonlySet<WagerTransactionKind> = new Set([
  * reference that is not there yet, left `PENDING_REFERENCE` with nothing
  * observed.
  *
- * @param transaction - The refund or rollback, still `PENDING`.
+ * @param transaction - The refund or rollback, `PENDING` or still waiting for
+ *   its reference.
  * @param wallet - Its wallet, read under lock.
  * @param reference - The transaction it cites, found by its provider and the
  *   cited external id, and whether it was already undone; `undefined` when
@@ -72,7 +73,7 @@ export function applyDependentTransaction(
   }
   const resolution = resolveReference(transaction, reference?.transaction, acceptedKinds);
   if (resolution.outcome === 'wait') {
-    transaction.markPendingReference();
+    waitForReference(transaction);
     return undefined;
   }
   if (resolution.outcome === 'rejected') {
