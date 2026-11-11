@@ -11,10 +11,10 @@
  */
 import { FailureCode } from '../../shared/domain/failure-code.ts';
 import type { Wallet } from '../../wallet/domain/wallet.ts';
-import type { WalletLedgerEntry } from '../../wallet/domain/wallet-ledger-entry.ts';
+import { LedgerDirection, type WalletLedgerEntry } from '../../wallet/domain/wallet-ledger-entry.ts';
 import { resolveReference, waitForReference } from './reference.ts';
 import { WagerTransactionKind, type WagerTransaction } from './wager-transaction.ts';
-import { rejectOn, walletRejectionOf } from './wallet-coherence.ts';
+import { moveBalance, rejectOn, walletRejectionOf } from './wallet-coherence.ts';
 
 /** The transaction a dependent transaction cites, as read under the wallet lock. */
 export interface CitedReference {
@@ -29,12 +29,6 @@ const ACCEPTED_REFERENCE_KINDS = new Map<WagerTransactionKind, ReadonlySet<Wager
     WagerTransactionKind.Rollback,
     new Set([WagerTransactionKind.Bet, WagerTransactionKind.Win, WagerTransactionKind.Refund]),
   ],
-]);
-
-// Undoing a debit credits it back; undoing a credit debits it.
-const DEBITING_REFERENCE_KINDS: ReadonlySet<WagerTransactionKind> = new Set([
-  WagerTransactionKind.Win,
-  WagerTransactionKind.Refund,
 ]);
 
 /**
@@ -81,15 +75,14 @@ export function applyDependentTransaction(
     return undefined;
   }
   const resolved = resolution.reference;
-  const debits = transaction.kind === WagerTransactionKind.Rollback && DEBITING_REFERENCE_KINDS.has(resolved.kind);
+  const debits = transaction.ledgerDirectionFor(resolved) === LedgerDirection.Debit;
   const alreadyReversed = reference?.alreadyReversed ?? false;
   const rejection = rejectionOf(transaction, wallet, { resolved, alreadyReversed, debits });
   if (rejection !== undefined) {
     rejectOn(transaction, wallet, { code: rejection });
     return undefined;
   }
-  const movement = { money: transaction.money, entryId: ids.entryId, transactionId: transaction.id };
-  const entry = debits ? wallet.debit(movement) : wallet.credit(movement);
+  const entry = moveBalance(transaction, wallet, ids, resolved);
   transaction.markProcessed({
     at: entry.createdAt,
     balanceAfter: wallet.balance,

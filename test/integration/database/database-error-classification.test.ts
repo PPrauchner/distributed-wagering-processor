@@ -14,7 +14,11 @@ import { createOrmConfig } from '../../../src/database/orm.config.ts';
 import { InboxMessage } from '../../../src/messaging/domain/inbox-message.ts';
 import { FailureCode } from '../../../src/shared/domain/failure-code.ts';
 import { Money } from '../../../src/shared/domain/money.ts';
-import { WagerTransaction, WagerTransactionKind } from '../../../src/wagering/domain/wager-transaction.ts';
+import {
+  WagerTransaction,
+  WagerTransactionKind,
+  WagerTransactionStatus,
+} from '../../../src/wagering/domain/wager-transaction.ts';
 import { Wallet } from '../../../src/wallet/domain/wallet.ts';
 import { LedgerDirection, WalletLedgerEntry } from '../../../src/wallet/domain/wallet-ledger-entry.ts';
 import { expectLedgerConsistent } from '../ledger-invariant.ts';
@@ -62,12 +66,15 @@ async function newWallet(playerId: string = Bun.randomUUIDv7()): Promise<Wallet>
   return wallet;
 }
 
-/** A `FAILED` bet on the wallet — coherent with the schema, and moving nothing. */
+/**
+ * A `FAILED` bet on the wallet, moving nothing — rehydrated, not created, so an
+ * identifier the domain would refuse still reaches the database.
+ */
 function failedBet(
   walletId: string,
   ids: { id?: string; key?: string; externalId?: string; roundId?: string } = {},
 ): WagerTransaction {
-  const transaction = WagerTransaction.create({
+  return WagerTransaction.rehydrate({
     id: ids.id ?? Bun.randomUUIDv7(),
     providerId: 'provider-a',
     externalTransactionId: ids.externalId ?? Bun.randomUUIDv7(),
@@ -80,9 +87,11 @@ function failedBet(
     kind: WagerTransactionKind.Bet,
     money: brl('10.00'),
     correlationId: 'corr',
+    createdAt: new Date(),
+    status: WagerTransactionStatus.Failed,
+    failureCode: FailureCode.InfraUnexpected,
+    attempts: 0,
   });
-  transaction.fail(FailureCode.InfraUnexpected);
-  return transaction;
 }
 
 /** A wallet opened with 100.00: the opening and its entry at version 1, committed. */

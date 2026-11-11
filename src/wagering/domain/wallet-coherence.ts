@@ -1,12 +1,13 @@
 /**
  * The first domain checks of every provider transaction against its wallet,
  * in the documented order — player, then currency (`ARCHITECTURE.md` § Ordem
- * das validações, step 8).
+ * das validações, step 8) —, and the movement a processed one makes on it.
  *
  * @packageDocumentation
  */
 import { FailureCode } from '../../shared/domain/failure-code.ts';
 import type { Wallet } from '../../wallet/domain/wallet.ts';
+import { LedgerDirection, type WalletLedgerEntry } from '../../wallet/domain/wallet-ledger-entry.ts';
 import type { WagerTransaction } from './wager-transaction.ts';
 
 /**
@@ -39,4 +40,26 @@ export function rejectOn(
     balanceAfter: wallet.balance,
     walletVersionObserved: wallet.version,
   });
+}
+
+/**
+ * Moves the wallet's balance by the transaction's amount, in the direction its
+ * kind decides ({@link WagerTransaction.ledgerDirectionFor}).
+ *
+ * @param transaction - The transaction being processed; it must move the balance.
+ * @param wallet - Its wallet, read under lock, already checked to take the movement.
+ * @param ids - Id of the ledger entry to write.
+ * @param reference - The transaction it cites, resolved; a `ROLLBACK` needs it.
+ * @returns The ledger entry to persist with the wallet.
+ */
+export function moveBalance(
+  transaction: WagerTransaction,
+  wallet: Wallet,
+  ids: { entryId: string },
+  reference?: WagerTransaction,
+): WalletLedgerEntry {
+  const movement = { money: transaction.money, entryId: ids.entryId, transactionId: transaction.id };
+  return transaction.ledgerDirectionFor(reference) === LedgerDirection.Debit
+    ? wallet.debit(movement)
+    : wallet.credit(movement);
 }

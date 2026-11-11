@@ -54,7 +54,6 @@ import {
   IdempotencyConflictError,
   InternalKindNotAllowedError,
   SubmissionWalletNotFoundError,
-  UnsupportedKindError,
 } from '../application/wagering-errors.ts';
 import { SubmissionChannel } from '../domain/rejected-submission.ts';
 import { InvalidWagerTransactionError, WagerTransactionStatus } from '../domain/wager-transaction.ts';
@@ -97,7 +96,6 @@ const INVALID_PAYLOAD_ERRORS = [
   InvalidMoneyError,
   CurrencyMismatchError,
   InvalidWagerTransactionError,
-  UnsupportedKindError,
 ];
 
 // Submissions not admitted the use case refuses, by failure code; the payload's shape comes first.

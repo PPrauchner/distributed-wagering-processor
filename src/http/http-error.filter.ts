@@ -27,7 +27,6 @@ import {
   InternalKindNotAllowedError,
   MissingIdempotencyKeyError,
   SubmissionWalletNotFoundError,
-  UnsupportedKindError,
 } from '../wagering/application/wagering-errors.ts';
 import { InvalidWagerTransactionError } from '../wagering/domain/wager-transaction.ts';
 import { InvalidWalletError } from '../wallet/domain/wallet.ts';
@@ -76,7 +75,6 @@ const INVALID_PAYLOAD_ERRORS = [
   CurrencyMismatchError,
   InvalidWalletError,
   InvalidWagerTransactionError,
-  UnsupportedKindError,
 ];
 
 // Refused requests: a fixed status and failure code, and the error's message.

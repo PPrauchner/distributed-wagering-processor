@@ -13,7 +13,7 @@ import type { Wallet } from '../../wallet/domain/wallet.ts';
 import type { WalletLedgerEntry } from '../../wallet/domain/wallet-ledger-entry.ts';
 import { resolveReference, waitForReference } from './reference.ts';
 import { WagerTransactionKind, type WagerTransaction } from './wager-transaction.ts';
-import { rejectOn, walletRejectionOf } from './wallet-coherence.ts';
+import { moveBalance, rejectOn, walletRejectionOf } from './wallet-coherence.ts';
 
 const ACCEPTED_REFERENCE_KINDS: ReadonlySet<WagerTransactionKind> = new Set([WagerTransactionKind.Bet]);
 
@@ -63,7 +63,7 @@ export function applyWin(
     rejectOn(transaction, wallet, { code: FailureCode.BalanceLimitExceeded });
     return undefined;
   }
-  const entry = wallet.credit({ money: transaction.money, entryId: ids.entryId, transactionId: transaction.id });
+  const entry = moveBalance(transaction, wallet, ids);
   transaction.markProcessed({
     at: entry.createdAt,
     balanceAfter: wallet.balance,
