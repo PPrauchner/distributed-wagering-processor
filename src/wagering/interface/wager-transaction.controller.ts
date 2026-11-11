@@ -7,6 +7,7 @@
  */
 import { Body, Controller, Headers, Post, Res } from '@nestjs/common';
 import { ProcessWagerTransaction } from '../application/process-wager-transaction.ts';
+import { SubmissionChannel } from '../domain/rejected-submission.ts';
 import {
   parseSubmitWagerTransactionRequest,
   toWagerTransactionResponse,
@@ -33,7 +34,8 @@ export class WagerTransactionController {
     @Res({ passthrough: true }) response: HttpResponse,
   ): Promise<WagerTransactionResponse> {
     const command = parseSubmitWagerTransactionRequest(body, { idempotencyKey, correlationId });
-    const outcome = toWagerTransactionResponse(await this.processWagerTransaction.execute(command));
+    const settled = await this.processWagerTransaction.execute(command, SubmissionChannel.Http);
+    const outcome = toWagerTransactionResponse(settled);
     response.status(outcome.statusCode);
     return outcome.body;
   }

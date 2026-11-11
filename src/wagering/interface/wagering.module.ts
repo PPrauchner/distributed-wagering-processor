@@ -1,6 +1,6 @@
 /**
  * Nest module of wagering: its controller and use case, wired to the unit of
- * work by token so the use case stays free of NestJS.
+ * work and the metrics by token so the use case stays free of NestJS.
  *
  * @packageDocumentation
  */
@@ -13,6 +13,7 @@ import { ProcessWagerTransaction } from '../application/process-wager-transactio
 import { RecordRejectedSubmission } from '../application/record-rejected-submission.ts';
 import type { RejectedSubmissionRepositories } from '../application/rejected-submission-repository.ts';
 import type { WageringRepositories } from '../application/wager-transaction-repository.ts';
+import { WAGERING_METRICS, type WageringMetrics } from '../application/wagering-metrics.ts';
 import { RejectedSubmissionAudit } from './rejected-submission.audit.ts';
 import { WagerTransactionController } from './wager-transaction.controller.ts';
 
@@ -21,17 +22,17 @@ import { WagerTransactionController } from './wager-transaction.controller.ts';
   providers: [
     {
       provide: ProcessWagerTransaction,
-      inject: [UNIT_OF_WORK],
+      inject: [UNIT_OF_WORK, WAGERING_METRICS],
       useFactory: (
         unitOfWork: UnitOfWork<WalletRepositories & WageringRepositories & OutboxRepositories & FaultInjection>,
-      ) =>
-        new ProcessWagerTransaction(unitOfWork, () => Bun.randomUUIDv7()),
+        metrics: WageringMetrics,
+      ) => new ProcessWagerTransaction(unitOfWork, () => Bun.randomUUIDv7(), metrics),
     },
     {
       provide: RecordRejectedSubmission,
-      inject: [UNIT_OF_WORK],
-      useFactory: (unitOfWork: UnitOfWork<RejectedSubmissionRepositories>) =>
-        new RecordRejectedSubmission(unitOfWork, () => Bun.randomUUIDv7()),
+      inject: [UNIT_OF_WORK, WAGERING_METRICS],
+      useFactory: (unitOfWork: UnitOfWork<RejectedSubmissionRepositories>, metrics: WageringMetrics) =>
+        new RecordRejectedSubmission(unitOfWork, () => Bun.randomUUIDv7(), metrics),
     },
     {
       provide: RejectedSubmissionAudit,
