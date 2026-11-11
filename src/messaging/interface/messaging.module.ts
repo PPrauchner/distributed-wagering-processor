@@ -1,7 +1,7 @@
 /**
  * Nest module of messaging: the SQS client, the event publisher over it, the
  * outbox publication use case and the loop that runs it in every instance, and
- * the input queue of the wager transactions, offered to every module.
+ * the input queue of the wager transactions and its DLQ, offered to every module.
  *
  * @packageDocumentation
  */
@@ -11,9 +11,11 @@ import type { AppConfig } from '../../config.ts';
 import type { FaultInjection } from '../../shared/application/fault-injector.ts';
 import { UNIT_OF_WORK, type UnitOfWork } from '../../shared/application/unit-of-work.ts';
 import type { EventPublisher } from '../application/event-publisher.ts';
+import { WAGER_TRANSACTIONS_DLQ } from '../application/dead-letter-queue.ts';
 import { WAGER_TRANSACTIONS_QUEUE } from '../application/input-queue.ts';
 import type { OutboxRepositories } from '../application/outbox-repository.ts';
 import { PublishOutbox } from '../application/publish-outbox.ts';
+import { SqsDeadLetterQueue } from '../infrastructure/sqs-dead-letter-queue.ts';
 import { SqsEventPublisher } from '../infrastructure/sqs-event-publisher.ts';
 import { SqsInputQueue } from '../infrastructure/sqs-input-queue.ts';
 import { OutboxPublisherWorker } from './outbox-publisher.worker.ts';
@@ -62,6 +64,11 @@ export class MessagingModule implements OnApplicationShutdown {
             }),
         },
         {
+          provide: WAGER_TRANSACTIONS_DLQ,
+          inject: [SQS_CLIENT],
+          useFactory: (client: SQSClient) => new SqsDeadLetterQueue(client, sqs.wagerTransactionsDlq),
+        },
+        {
           provide: PublishOutbox,
           inject: [UNIT_OF_WORK, EVENT_PUBLISHER],
           useFactory: (unitOfWork: UnitOfWork<OutboxRepositories & FaultInjection>, publisher: EventPublisher) =>
@@ -81,7 +88,7 @@ export class MessagingModule implements OnApplicationShutdown {
           useFactory: (publishOutbox: PublishOutbox) => new OutboxPublisherWorker(publishOutbox, outboxPublisher),
         },
       ],
-      exports: [PublishOutbox, WAGER_TRANSACTIONS_QUEUE],
+      exports: [PublishOutbox, WAGER_TRANSACTIONS_QUEUE, WAGER_TRANSACTIONS_DLQ],
     };
   }
 
