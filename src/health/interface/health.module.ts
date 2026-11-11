@@ -1,37 +1,52 @@
 /**
  * Nest module of health: the liveness and readiness endpoints, with probes of
- * the database and of the input and event queues. The queue probes have an SQS
- * client of their own, with no retry, so a probe fails within its timeout.
+ * the database and of the input and event queues, and the metrics endpoint.
+ * The queue probes have an SQS client of their own, with no retry, so a probe
+ * fails within its timeout. Global: it binds the metrics ports the other
+ * modules inject by token.
  *
  * @packageDocumentation
  */
-import { Inject, Module, type DynamicModule, type OnApplicationShutdown } from '@nestjs/common';
+import { Global, Inject, Module, type DynamicModule, type OnApplicationShutdown } from '@nestjs/common';
 import { SQSClient } from '@aws-sdk/client-sqs';
 import { MikroORM } from '@mikro-orm/postgresql';
 import type { AppConfig } from '../../config.ts';
+import type { OutboxBacklogRepositories } from '../../messaging/application/outbox-backlog.ts';
+import { UNIT_OF_WORK, type UnitOfWork } from '../../shared/application/unit-of-work.ts';
+import { WAGERING_METRICS } from '../../wagering/application/wagering-metrics.ts';
 import { CheckReadiness } from '../application/check-readiness.ts';
 import { DatabaseReadiness } from '../infrastructure/database-readiness.ts';
+import { PrometheusMetrics } from '../infrastructure/prometheus-metrics.ts';
 import { SqsQueueReadiness } from '../infrastructure/sqs-queue-readiness.ts';
 import { HealthController } from './health.controller.ts';
+import { MetricsController } from './metrics.controller.ts';
 
 const PROBE_SQS_CLIENT = Symbol('ProbeSQSClient');
 /** Each probe's time limit (`ARCHITECTURE.md` § Observabilidade). */
 const PROBE_TIMEOUT_MS = 1000;
 
+@Global()
 @Module({})
 export class HealthModule implements OnApplicationShutdown {
   constructor(@Inject(PROBE_SQS_CLIENT) private readonly sqs: SQSClient) {}
 
   /**
    * @param config - The SQS connection and the queues to probe.
-   * @returns The module, with its controller.
+   * @returns The module, with its controllers, exporting the metrics ports.
    */
   static forRoot(config: Pick<AppConfig, 'sqs'>): DynamicModule {
     const { sqs } = config;
     return {
       module: HealthModule,
-      controllers: [HealthController],
+      controllers: [HealthController, MetricsController],
       providers: [
+        {
+          provide: PrometheusMetrics,
+          inject: [UNIT_OF_WORK],
+          useFactory: (unitOfWork: UnitOfWork<OutboxBacklogRepositories>) =>
+            new PrometheusMetrics(() => unitOfWork.run(({ outboxBacklog }) => outboxBacklog.read())),
+        },
+        { provide: WAGERING_METRICS, useExisting: PrometheusMetrics },
         {
           provide: PROBE_SQS_CLIENT,
           useFactory: () =>
@@ -56,6 +71,7 @@ export class HealthModule implements OnApplicationShutdown {
             ),
         },
       ],
+      exports: [WAGERING_METRICS],
     };
   }
 
