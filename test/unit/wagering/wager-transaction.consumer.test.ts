@@ -81,6 +81,8 @@ function harness(
     recordFails?: boolean;
     maxReceives?: number;
     retryMaxSeconds?: number;
+    receive?: (signal?: AbortSignal) => Promise<ReceivedMessage[]>;
+    drainTimeoutMs?: number;
   } = {},
 ): Harness {
   const h = {
@@ -93,7 +95,7 @@ function harness(
     gaveUp: 0,
   };
   const queue: InputQueue = {
-    receive: async () => [],
+    receive: options.receive ?? (async () => []),
     acknowledge: async (message) => void h.acknowledged.push(message.receipt),
     changeVisibility: async (message, seconds) => void h.visibility.push([message.receipt, seconds]),
   };
@@ -138,10 +140,10 @@ function harness(
       faults: { inject: async () => undefined },
     },
     {
-      enabled: false,
+      enabled: options.receive !== undefined,
       maxReceives: options.maxReceives ?? 5,
       retryMaxSeconds: options.retryMaxSeconds ?? 60,
-      drainTimeoutMs: 1000,
+      drainTimeoutMs: options.drainTimeoutMs ?? 1000,
     },
   );
   return Object.assign(h, { consumer });
@@ -347,6 +349,92 @@ describe('a submission not admitted', () => {
 
     await h.consumer.handle(messageOf());
 
+    expect(h.acknowledged).toEqual([]);
+  });
+});
+
+/** A long poll that waits until aborted, then resolves with what it is given. */
+function abortableReceive(onAbort: () => ReceivedMessage[], started: () => void) {
+  let calls = 0;
+  return (signal?: AbortSignal) =>
+    new Promise<ReceivedMessage[]>((resolve) => {
+      if (calls++ === 0) started();
+      signal?.addEventListener('abort', () => resolve(onAbort()));
+    });
+}
+
+describe('on shutdown', () => {
+  test('the long poll in progress is cut short, and the messages it brought are handed back at once, unprocessed', async () => {
+    let processed = 0;
+    let polling!: () => void;
+    const pollStarted = new Promise<void>((resolve) => (polling = resolve));
+    const h = harness({
+      receive: abortableReceive(() => [messageOf(1)], polling),
+      execute: async () => {
+        processed++;
+        return outcome('PROCESSED');
+      },
+    });
+    h.consumer.onApplicationBootstrap();
+    await pollStarted;
+
+    await h.consumer.beforeApplicationShutdown();
+
+    expect(processed).toBe(0);
+    expect(h.visibility).toEqual([['receipt-1', 0]]);
+    expect(h.acknowledged).toEqual([]);
+  });
+
+  test('the messages in progress are waited for, and acknowledged', async () => {
+    let finish!: () => void;
+    let inProgress!: () => void;
+    const started = new Promise<void>((resolve) => (inProgress = resolve));
+    let delivered = false;
+    const h = harness({
+      receive: async (signal) => {
+        if (!delivered) {
+          delivered = true;
+          return [messageOf(1)];
+        }
+        return new Promise((resolve) => signal?.addEventListener('abort', () => resolve([])));
+      },
+      execute: () =>
+        new Promise((resolve) => {
+          finish = () => resolve(outcome('PROCESSED'));
+          inProgress();
+        }),
+    });
+    h.consumer.onApplicationBootstrap();
+    await started;
+
+    let stopped = false;
+    const stopping = h.consumer.beforeApplicationShutdown().then(() => (stopped = true));
+    await Bun.sleep(20);
+    expect(stopped).toBe(false);
+
+    finish();
+    await stopping;
+    expect(h.acknowledged).toEqual(['receipt-1']);
+  });
+
+  test('the wait for the messages in progress ends at the drain timeout', async () => {
+    let inProgress!: () => void;
+    const started = new Promise<void>((resolve) => (inProgress = resolve));
+    const h = harness({
+      receive: async () => [messageOf(1)],
+      execute: () => {
+        inProgress();
+        return new Promise(() => undefined);
+      },
+      drainTimeoutMs: 50,
+    });
+    h.consumer.onApplicationBootstrap();
+    await started;
+
+    const began = performance.now();
+    await h.consumer.beforeApplicationShutdown();
+
+    expect(performance.now() - began).toBeLessThan(1000);
     expect(h.acknowledged).toEqual([]);
   });
 });
