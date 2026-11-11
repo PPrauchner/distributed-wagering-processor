@@ -89,6 +89,7 @@ export class InvalidTransactionStateError extends Error {
   override readonly name = 'InvalidTransactionStateError';
 }
 
+const MAX_IDENTIFIER_LENGTH = 255;
 const TERMINAL_STATUSES = new Set([
   WagerTransactionStatus.Processed,
   WagerTransactionStatus.Rejected,
@@ -129,8 +130,10 @@ export class WagerTransaction {
    *
    * @param props - The transaction as submitted.
    * @returns The new transaction.
-   * @throws {@link InvalidWagerTransactionError} If the amount is not positive
-   *   (zero is allowed only for `LOSS`), or the reference is missing on a
+   * @throws {@link InvalidWagerTransactionError} If an identifier — of the
+   *   provider, the transaction, the key, the player, the round, the game or the
+   *   reference — is empty or longer than 255 characters, the amount is not
+   *   positive (zero is allowed only for `LOSS`), or the reference is missing on a
    *   `REFUND`/`ROLLBACK`, present on an `OPENING`/`BET`/`LOSS`, or equal to
    *   the transaction's own external id.
    */
@@ -369,8 +372,9 @@ export class WagerTransaction {
     return this.payloadHash === payloadHash;
   }
 
-  /** The rules of its kind on the transaction as submitted: reference and amount floor. */
+  /** The rules on the transaction as submitted: its identifiers, then the reference and amount floor of its kind. */
   private assertCreatable(): void {
+    this.assertIdentifierLengths();
     const hasReference = this.referenceExternalTransactionId !== undefined;
     if (this.requiresReference() && !hasReference) {
       throw new InvalidWagerTransactionError(`${this.kind} requires a reference`);
@@ -385,6 +389,23 @@ export class WagerTransaction {
     const amountFloorOk = this.affectsBalance() ? this.money.isPositive() : !this.money.isNegative();
     if (!amountFloorOk) {
       throw new InvalidWagerTransactionError(`amount ${this.money} is not allowed for ${this.kind}`);
+    }
+  }
+
+  private assertIdentifierLengths(): void {
+    const identifiers: [string, string | undefined][] = [
+      ['providerId', this.providerId],
+      ['externalTransactionId', this.externalTransactionId],
+      ['idempotencyKey', this.idempotencyKey],
+      ['playerId', this.playerId],
+      ['roundId', this.roundId],
+      ['gameId', this.gameId],
+      ['referenceExternalTransactionId', this.referenceExternalTransactionId],
+    ];
+    for (const [name, value] of identifiers) {
+      if (value !== undefined && (value.length === 0 || value.length > MAX_IDENTIFIER_LENGTH)) {
+        throw new InvalidWagerTransactionError(`${name} must have between 1 and ${MAX_IDENTIFIER_LENGTH} characters`);
+      }
     }
   }
 
