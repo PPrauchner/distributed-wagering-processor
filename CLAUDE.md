@@ -33,6 +33,8 @@ bun run test                    # unit + integration (exige o Compose de pé)
 bun run test:unit               # só domínio, sem I/O
 bun run test:integration        # app em processo contra PostgreSQL e LocalStack reais; recria o
                                 # banco <db>_test a cada execução
+bun run test:concurrency        # os 8 cenários do §13, com processos reais do app;
+                                # à mão, fora do `test` (exige o Compose de pé)
 bun run db:migrate up|down      # migrations por script Bun, sem o CLI do MikroORM
 bun src/main.ts                 # app local, fora do Compose (PORT, DATABASE_URL)
 bun run spike                   # testes do spike do ADR 0001, contra o banco real
@@ -40,7 +42,7 @@ bun run spike:migrate up|down   # migrations do spike, sem o CLI do MikroORM
 ```
 
 A conexão com o banco usa `127.0.0.1`, nunca `localhost` (ver ADR 0001). Os demais
-comandos (testes de concorrência, `test:load`) entram aqui quando forem criados.
+comandos (`test:load`) entram aqui quando forem criados.
 
 ## Estrutura
 
