@@ -3,7 +3,8 @@
  * outcome or error of the use case does to the message — `ack`, a retry with
  * `min(2^receiveCount s, ceiling)` of visibility, `FAILED` + DLQ, or the DLQ
  * as a submission not admitted, with its `rejected_submissions` row — a
- * transient failure out of receives included — and the
+ * transient failure out of receives included —, the batch processed one
+ * message at a time within each FIFO group and the groups in parallel, and the
  * shutdown that drains the messages in progress. The queue, the DLQ and the
  * use cases are fakes; the end to end lives in the integration tests.
  *
@@ -494,5 +495,140 @@ describe('on shutdown', () => {
 
     expect(performance.now() - began).toBeLessThan(1000);
     expect(h.acknowledged).toEqual([]);
+  });
+});
+
+/** A delivery in the FIFO group `groupId`, told apart by its `externalTransactionId`. */
+function grouped(name: string, groupId?: string, receiveCount = 1): ReceivedMessage {
+  const message = messageOf(receiveCount, envelope({ ...DATA, externalTransactionId: name }), `delivery-${name}`);
+  return { ...message, receipt: name, groupId };
+}
+
+/** Hands the batch over once, then long-polls until the shutdown cuts it short. */
+function oneBatch(batch: ReceivedMessage[]) {
+  let delivered = false;
+  return (signal?: AbortSignal) => {
+    if (!delivered) {
+      delivered = true;
+      return Promise.resolve(batch);
+    }
+    return new Promise<ReceivedMessage[]>((resolve) => signal?.addEventListener('abort', () => resolve([])));
+  };
+}
+
+interface Gate {
+  /** The messages the use case was called with, in order. */
+  started: string[];
+  /** Finishes the call of that message with its answer. */
+  finish: (name: string, answer?: Answer) => void;
+  execute: Answer;
+}
+
+/** A use case whose every call waits until the test finishes it. */
+function gate(): Gate {
+  const started: string[] = [];
+  const pending = new Map<string, (answer: Answer) => void>();
+  return {
+    started,
+    finish: (name, answer = async () => outcome('PROCESSED')) => pending.get(name)!(answer),
+    execute: ((command: { externalTransactionId: string }) => {
+      started.push(command.externalTransactionId);
+      return new Promise<Answer>((resolve) => pending.set(command.externalTransactionId, resolve)).then((answer) => answer());
+    }) as unknown as Answer,
+  };
+}
+
+describe('a batch with FIFO groups', () => {
+  test('the messages of a group run one at a time, in order, and distinct groups run in parallel', async () => {
+    const use = gate();
+    const h = harness({ receive: oneBatch([grouped('a1', 'A'), grouped('a2', 'A'), grouped('b1', 'B')]), execute: use.execute });
+
+    h.consumer.onApplicationBootstrap();
+    await waitUntilTrue(() => use.started.length === 2);
+    expect(use.started).toEqual(['a1', 'b1']);
+
+    use.finish('b1');
+    use.finish('a1');
+    await waitUntilTrue(() => use.started.length === 3);
+    expect(use.started).toEqual(['a1', 'b1', 'a2']);
+
+    use.finish('a2');
+    await waitUntilTrue(() => h.acknowledged.length === 3);
+    await h.consumer.beforeApplicationShutdown();
+    expect(h.acknowledged.sort()).toEqual(['a1', 'a2', 'b1']);
+  });
+});
+
+async function waitUntilTrue(condition: () => boolean): Promise<void> {
+  for (let tries = 0; !condition(); tries++) {
+    if (tries > 200) throw new Error('condition not met');
+    await Bun.sleep(5);
+  }
+}
+
+describe('a group whose message is left in the queue', () => {
+  test('the first goes to a retry: the next never reaches the use case and comes back with the same delay, after it', async () => {
+    const use = gate();
+    const h = harness({ receive: oneBatch([grouped('a1', 'A', 2), grouped('a2', 'A')]), execute: use.execute });
+
+    h.consumer.onApplicationBootstrap();
+    await waitUntilTrue(() => use.started.length === 1);
+    use.finish('a1', failWith(new TransientFailureError(FailureCode.TransientLockTimeout)));
+    await waitUntilTrue(() => h.visibility.length === 2);
+    await h.consumer.beforeApplicationShutdown();
+
+    expect(use.started).toEqual(['a1']);
+    expect(h.visibility).toEqual([
+      ['a1', 4],
+      ['a2', 4],
+    ]);
+    expect(h.acknowledged).toEqual([]);
+  });
+
+  test('a message that cannot be settled holds the rest of its group, left to its visibility too, not the other groups', async () => {
+    const use = gate();
+    const h = harness({
+      receive: oneBatch([grouped('a1', 'A'), grouped('a2', 'A'), grouped('b1', 'B')]),
+      execute: use.execute,
+      dlqFails: true,
+    });
+
+    h.consumer.onApplicationBootstrap();
+    await waitUntilTrue(() => use.started.length === 2);
+    use.finish('a1', async () => outcome('FAILED', FailureCode.InfraUnexpected));
+    use.finish('b1');
+    await waitUntilTrue(() => h.acknowledged.length === 1);
+    await h.consumer.beforeApplicationShutdown();
+
+    expect(use.started).toEqual(['a1', 'b1']);
+    expect(h.visibility).toEqual([]);
+    expect(h.acknowledged).toEqual(['b1']);
+  });
+
+  test('messages with no group are each processed on their own, in parallel', async () => {
+    const use = gate();
+    const h = harness({ receive: oneBatch([grouped('x1'), grouped('x2')]), execute: use.execute });
+
+    h.consumer.onApplicationBootstrap();
+    await waitUntilTrue(() => use.started.length === 2);
+    use.finish('x1');
+    use.finish('x2');
+    await waitUntilTrue(() => h.acknowledged.length === 2);
+    await h.consumer.beforeApplicationShutdown();
+  });
+
+  test('on shutdown, the rest of a group not started yet is handed back, unprocessed', async () => {
+    const use = gate();
+    const h = harness({ receive: oneBatch([grouped('a1', 'A'), grouped('a2', 'A')]), execute: use.execute });
+
+    h.consumer.onApplicationBootstrap();
+    await waitUntilTrue(() => use.started.length === 1);
+    const stopping = h.consumer.beforeApplicationShutdown();
+    use.finish('a1');
+    await stopping;
+
+    expect(use.started).toEqual(['a1']);
+    expect(h.acknowledged).toEqual(['a1']);
+    expect(h.visibility).toEqual([['a2', 0]]);
   });
 });
