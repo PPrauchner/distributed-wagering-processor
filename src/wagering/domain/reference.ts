@@ -62,3 +62,14 @@ export function resolveReference(
   }
   return { outcome: 'resolved', reference };
 }
+
+/**
+ * The reference is absent, or itself waiting: a `PENDING` transaction starts
+ * waiting; a pending reference keeps waiting, with no transition.
+ *
+ * @param transaction - The transaction citing the reference.
+ * @throws {@link InvalidTransactionStateError} If the transaction is terminal.
+ */
+export function waitForReference(transaction: WagerTransaction): void {
+  if (transaction.status !== WagerTransactionStatus.PendingReference) transaction.markPendingReference();
+}
