@@ -1,13 +1,17 @@
 /**
  * `DeadLetterQueue` over a FIFO SQS queue: `SendMessage` with the original
  * body and attributes plus the `failureCode` attribute, the group and the
- * deduplication id the consumer chose. The queue URL is resolved by name on
- * first use and kept once found.
+ * deduplication id the consumer chose — within the 10 attributes SQS takes,
+ * `correlationId` kept first when the originals are too many. The queue URL
+ * is resolved by name on first use and kept once found.
  *
  * @packageDocumentation
  */
 import { GetQueueUrlCommand, SendMessageCommand, type SQSClient } from '@aws-sdk/client-sqs';
 import type { DeadLetter, DeadLetterQueue } from '../application/dead-letter-queue.ts';
+
+/** How many attributes SQS takes per message. */
+const MAX_ATTRIBUTES = 10;
 
 export class SqsDeadLetterQueue implements DeadLetterQueue {
   private queueUrl: string | undefined;
@@ -18,7 +22,7 @@ export class SqsDeadLetterQueue implements DeadLetterQueue {
   ) {}
 
   async send(letter: DeadLetter): Promise<void> {
-    const attributes = { ...letter.attributes, failureCode: letter.failureCode };
+    const attributes = { ...keptAttributes(letter.attributes), failureCode: letter.failureCode };
     await this.sqs.send(
       new SendMessageCommand({
         QueueUrl: await this.resolveQueueUrl(),
@@ -40,4 +44,11 @@ export class SqsDeadLetterQueue implements DeadLetterQueue {
     }
     return this.queueUrl;
   }
+}
+
+/** The original attributes that fit beside `failureCode`, `correlationId` first. */
+function keptAttributes(attributes: Readonly<Record<string, string>>): Record<string, string> {
+  const entries = Object.entries(attributes).filter(([name]) => name !== 'failureCode');
+  entries.sort(([a], [b]) => Number(b === 'correlationId') - Number(a === 'correlationId'));
+  return Object.fromEntries(entries.slice(0, MAX_ATTRIBUTES - 1));
 }
