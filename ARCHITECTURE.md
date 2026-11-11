@@ -559,6 +559,13 @@ a falha transitória nunca vira `FAILED`, nem esgotada.
   gravado numa transação SQL curta. Se a instância morre entre o envio e a gravação,
   o lease expira e outra reenvia: **at-least-once**, e o consumidor deduplica pelo
   `eventId`, estável desde o `enqueue`.
+- **Contrato com o consumidor dos eventos:** o mesmo evento pode chegar mais de
+  uma vez, sempre com o mesmo `eventId` e o mesmo corpo; o consumidor **deduplica
+  por `eventId`**. O `MessageDeduplicationId` do FIFO só cobre reenvios dentro da
+  janela de 5 min do SQS — fora dela, a duplicata chega. O teste de integração do
+  publicador prova o reenvio idêntico: dois publicadores com lease expirado
+  publicam o mesmo item, e um cliente SQS real que registra os envios (sem mock)
+  mostra o mesmo `eventId` e o mesmo corpo nas duas publicações.
 - Polling a cada 500 ms, lotes de até 10, lease de 30 s. Falha → `scheduleRetry`
   com `min(1 s × 2^attempts, 5 min)` e jitter. **Sem limite de tentativas** —
   desistir perderia evento confirmado; a partir de 10 tentativas, métrica e log de
@@ -738,7 +745,11 @@ Keycloak.
   "desconhecido" quer dizer fora da outbox.
 - Todo teste de integração e de concorrência termina verificando que o saldo é igual
   ao saldo reconstruído e que a sequência de versões não tem buracos.
-- Sem `sleep` fixo: espera por condição com timeout.
+- Sem `sleep` fixo: espera por condição com timeout, por um helper único
+  (`test/support/wait-until.ts`) compartilhado por integração e concorrência.
+- Além das checagens por arquivo, um `afterAll` global no preload reconcilia todas
+  as carteiras do banco de teste ao fim da execução; as corrompidas de propósito
+  saem dessa checagem por `excludeFromLedgerInvariant`.
 - O teste do `SIGTERM` sobe o app como processo real (`Bun.spawn` de
   `src/main.ts`). No Windows não há sinal POSIX — `kill('SIGTERM')` encerra o
   processo na hora —, então lá o teste manda `SIGTERM` por IPC e o preload
@@ -777,7 +788,8 @@ Keycloak.
   grava `FAILED`; a falha transitória esgotada não.
 - Eventos de uma mesma carteira podem ser publicados fora de ordem por publicadores
   concorrentes; o consumidor ordena por `walletVersion`/`occurredAt`.
-- Eventos são publicados pelo menos uma vez; duplicatas carregam o mesmo `eventId`.
+- Eventos são publicados pelo menos uma vez; duplicatas carregam o mesmo `eventId`
+  e o mesmo corpo, e o consumidor deduplica por `eventId`.
 - Linhas publicadas da outbox não são expurgadas.
 - A chave de idempotência da criação de carteira é global, não por provedor: a
   carteira não tem provedor e a autenticação está fora do escopo.
