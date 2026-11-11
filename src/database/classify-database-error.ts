@@ -4,8 +4,8 @@
  * unique violation, by constraint name — to a closed category and its failure
  * code. `REJECTED` never comes from here: it comes only from the domain.
  *
- * Some constraints of the table do not exist yet (inbox, single reversal,
- * wallet creation key); they are mapped already so the classifier stays the
+ * Some constraints of the table do not exist yet (inbox, wallet creation
+ * key); they are mapped already so the classifier stays the
  * only place that knows the names, and the slices that create them add their
  * integration tests.
  *

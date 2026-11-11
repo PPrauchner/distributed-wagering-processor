@@ -66,6 +66,7 @@ const ALL_MIGRATIONS = [
   'Migration0006RejectedSubmissions',
   'Migration0007OutboxMessages',
   'Migration0008WagerTransactionReference',
+  'Migration0009WagerTransactionSingleReversal',
 ];
 const TABLES = ['wallets', 'wager_transactions', 'wallet_ledger_entries', 'rejected_submissions', 'outbox_messages'];
 
