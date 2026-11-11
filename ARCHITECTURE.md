@@ -583,6 +583,21 @@ latência da pendente é limitada pelo intervalo do worker.
   unidade de trabalho, com alerta. O desfecho é gravado na transação SQL que trava a
   carteira, e o item é relido sob lock: se outro worker já o resolveu, sai sem
   efeito.
+- **Agendamento:** `attempts` e `next_attempt_at` em `wager_transactions`; a
+  chegada grava `attempts = 0` e `next_attempt_at` pelo backoff, com o
+  `WagerTransactionPendingReference` na mesma transação SQL. A reivindicação é um
+  único `UPDATE … FROM (SELECT … FOR UPDATE SKIP LOCKED LIMIT 10)` que empurra
+  `next_attempt_at` para `now() + lease`; um lote cheio dispara o ciclo seguinte
+  na hora. Pendente que continua esperando conta a tentativa e reagenda, sem mudar
+  de estado.
+- **Parada:** em `beforeApplicationShutdown` o worker para de reivindicar, deixa
+  os itens do lote ainda não iniciados (seguem com lease, que expira) e espera o
+  item em processamento, antes de o ORM fechar. É o ponto que o desligamento geral
+  (`SIGTERM`) chama.
+- **Configuração por ambiente:** `PENDING_REFERENCES_WORKER_ENABLED` (padrão
+  `true`), `PENDING_REFERENCE_TTL_MS` (300000), `PENDING_REFERENCES_POLL_INTERVAL_MS`
+  (1000), `PENDING_REFERENCES_LEASE_MS` (30000), `PENDING_REFERENCES_RETRY_BASE_MS`
+  (1000) e `PENDING_REFERENCES_RETRY_MAX_MS` (60000).
 
 ## Autenticação
 
@@ -645,14 +660,20 @@ Keycloak.
   commit, altera a transação de aposta terminal recém-gravada, que o trigger
   recusa, para o erro verdadeiro passar pelo classificador —; `crash-after-send` —
   o publicador "morre" entre o envio e o `published_at`: lança
-  `SimulatedCrashError` antes de gravar, e a transação SQL da gravação desfaz —; e
+  `SimulatedCrashError` antes de gravar, e a transação SQL da gravação desfaz —;
   `crash-after-commit` — o consumidor "morre" depois do commit do desfecho e antes
-  do `ack`: a mensagem volta quando a visibilidade expira e o inbox a reconhece.
+  do `ack`: a mensagem volta quando a visibilidade expira e o inbox a reconhece —;
+  e `transient-failure-in-resolution` — o worker de referências pendentes, já com
+  o lock da carteira, recebe `lock_not_available` do banco: transitório real, e o
+  item é reagendado. O `invariant-violation-before-commit` vale também para a
+  resolução de uma pendente, que grava então `FAILED`.
   Os pontos de queda fora de uma unidade de trabalho vêm do `CrashFaultInjector`.
 - Os apps dos testes sobem sem publicador da outbox (`OUTBOX_PUBLISHER_ENABLED=false`
   no preload) e sem consumidor da fila de entrada
-  (`WAGER_TRANSACTIONS_CONSUMER_ENABLED=false`); os testes do publicador e do
-  consumidor ligam o seu, com filas próprias. Como o banco
+  (`WAGER_TRANSACTIONS_CONSUMER_ENABLED=false`) nem worker de referências
+  pendentes (`PENDING_REFERENCES_WORKER_ENABLED=false`); os testes do publicador e
+  do consumidor ligam o seu, com filas próprias, e os das pendentes chamam o ciclo
+  do worker direto, com TTL e backoff curtos. Como o banco
   de teste é compartilhado entre os arquivos, um publicador de teste pode entregar
   eventos de outros arquivos: as verificações olham os eventos do próprio teste, e
   "desconhecido" quer dizer fora da outbox.
