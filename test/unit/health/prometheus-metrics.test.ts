@@ -39,7 +39,27 @@ describe('PrometheusMetrics', () => {
     expect(log.lines.length).toBeGreaterThan(0);
   });
 
-  test('a backlog read that hangs → the scrape answers within the time limit', async () => {
+  test('a scrape reads the backlog once: both gauges come from the same read, a failure is logged once', async () => {
+    const log = recordingLog();
+    let reads = 0;
+    let read: () => Promise<OutboxBacklog> = async () => ({ pending: ++reads, lagSeconds: reads * 10 });
+    const metrics = new PrometheusMetrics(() => read(), { timeoutMs: 50, log });
+
+    const text = await metrics.registry.metrics();
+
+    expect(reads).toBe(1);
+    expect(gauge(text, 'outbox_pending')).toBe(1);
+    expect(gauge(text, 'outbox_lag_seconds')).toBe(10);
+
+    read = async () => {
+      throw new Error('connection refused');
+    };
+    await metrics.registry.metrics();
+
+    expect(log.lines).toHaveLength(1);
+  });
+
+  test('a backlog read that hangs →the scrape answers within the time limit', async () => {
     const log = recordingLog();
     const metrics = new PrometheusMetrics(() => new Promise<OutboxBacklog>(() => {}), { timeoutMs: 50, log });
 

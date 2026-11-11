@@ -39,6 +39,8 @@ export class PrometheusMetrics implements WageringMetrics, ReconciliationDiverge
   private readonly latency: Histogram<'channel' | 'kind'>;
   private readonly divergences: Counter;
   private lastBacklog: OutboxBacklog = { pending: 0, lagSeconds: 0 };
+  /** The read in flight, shared by both gauges of one scrape. */
+  private backlogInFlight: Promise<OutboxBacklog> | undefined;
 
   /**
    * @param readBacklog - Reads the outbox backlog; called on each scrape.
@@ -96,8 +98,8 @@ export class PrometheusMetrics implements WageringMetrics, ReconciliationDiverge
       help: 'Reconciliations that found the stored balance or the ledger sequence divergent.',
       registers,
     });
-    // Each gauge reads its own value: the scrape gives no order between them.
-    const backlog = () => this.boundedBacklog();
+    // Both gauges are collected in the same scrape: they share one read.
+    const backlog = () => this.sharedBacklog();
     new Gauge({
       name: 'outbox_pending',
       help: 'Outbox messages not published yet.',
@@ -114,6 +116,14 @@ export class PrometheusMetrics implements WageringMetrics, ReconciliationDiverge
         this.set((await backlog()).lagSeconds);
       },
     });
+  }
+
+  /** The read in flight, or a new one: one read per scrape, one snapshot for both gauges. */
+  private sharedBacklog(): Promise<OutboxBacklog> {
+    this.backlogInFlight ??= this.boundedBacklog().finally(() => {
+      this.backlogInFlight = undefined;
+    });
+    return this.backlogInFlight;
   }
 
   /** The backlog read within the time limit, or the last one read when it fails. */
