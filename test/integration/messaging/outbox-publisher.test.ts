@@ -3,7 +3,8 @@
  * LocalStack: events committed while no publisher runs are delivered once one
  * starts; a publisher that dies between the send and `published_at`
  * (`crash-after-send`) is replaced, after the lease, by another that resends
- * the same `eventId`; two concurrent publishers lose nothing; a failed send is
+ * the same `eventId` and the same body — recorded from the real SQS client —;
+ * two concurrent publishers lose nothing; a failed send is
  * rescheduled and delivered once SQS answers. Every test reads the events from
  * a `wagering-events` FIFO queue of its own, with a random suffix, and waits by
  * condition, never by a fixed sleep.
@@ -22,12 +23,16 @@ import {
   DeleteMessageBatchCommand,
   DeleteQueueCommand,
   ReceiveMessageCommand,
+  SendMessageBatchCommand,
   SQSClient,
 } from '@aws-sdk/client-sqs';
 import { createApp } from '../../../src/app.ts';
 import { loadConfig, type AppConfig } from '../../../src/config.ts';
 import { PublishOutbox } from '../../../src/messaging/application/publish-outbox.ts';
-import { FaultPoint, SimulatedCrashError } from '../../../src/shared/application/fault-injector.ts';
+import { SqsEventPublisher } from '../../../src/messaging/infrastructure/sqs-event-publisher.ts';
+import { FaultPoint, SimulatedCrashError, type FaultInjection } from '../../../src/shared/application/fault-injector.ts';
+import { UNIT_OF_WORK, type UnitOfWork } from '../../../src/shared/application/unit-of-work.ts';
+import type { OutboxRepositories } from '../../../src/messaging/application/outbox-repository.ts';
 import { expectLedgerConsistent } from '../ledger-invariant.ts';
 import { waitUntil } from '../../support/wait-until.ts';
 
@@ -47,6 +52,8 @@ let config: AppConfig;
 let baseUrl: string;
 let sql: SQL;
 let sqs: SQSClient;
+/** The recording clients a test made; destroyed at the end. */
+const recordingClients: SQSClient[] = [];
 const touchedWallets: string[] = [];
 
 beforeAll(async () => {
@@ -70,6 +77,7 @@ afterAll(async () => {
   await Promise.all(apps.map((app) => app.close()));
   await Promise.all(queues.map((QueueUrl) => sqs.send(new DeleteQueueCommand({ QueueUrl })).catch(() => undefined)));
   sqs?.destroy();
+  for (const client of recordingClients) client.destroy();
   await sql?.close();
 });
 
@@ -268,6 +276,43 @@ describe('a publisher that dies between the send and published_at', () => {
     expect((await outboxOf(wallet.id)).map((row) => row.id).sort()).toEqual([...ids].sort());
   }, 60_000);
 
+  test('two publishers with an expired lease publish the same item: same eventId and the same body to the real SQS', async () => {
+    const wallet = await createWallet('100.00');
+    const ids = (await outboxOf(wallet.id)).map((row) => row.id);
+    const queueName = randomQueueName();
+    await createQueue(queueName);
+    const leaseMs = 500;
+    const sends: SentEntry[] = [];
+    const first = await recordingPublisher(
+      withPublisher(config, { enabled: false, queue: queueName, leaseMs, faults: [FaultPoint.CrashAfterSend] }),
+      'first',
+      sends,
+    );
+    const second = await recordingPublisher(withPublisher(config, { enabled: false, queue: queueName, leaseMs }), 'second', sends);
+    const sentBy = (publisher: string, id: string) =>
+      sends.filter((entry) => entry.publisher === publisher && entry.deduplicationId === id);
+
+    // The first sends and dies before recording the publication: its lease expires.
+    await waitUntil(async () => {
+      await first.publishDue().catch((error: unknown) => {
+        if (!(error instanceof SimulatedCrashError)) throw error;
+      });
+      return ids.every((id) => sentBy('first', id).length > 0) ? true : undefined;
+    });
+    // The second claims the expired items and sends them again.
+    await waitUntil(async () => {
+      await second.publishDue();
+      return allPublished(wallet.id);
+    });
+
+    for (const id of ids) {
+      const both = [...sentBy('first', id), ...sentBy('second', id)];
+      expect(sentBy('second', id)).toHaveLength(1);
+      expect(new Set(both.map((entry) => entry.body)).size, id).toBe(1);
+      expect((JSON.parse(both[0]!.body) as JsonObject).eventId).toBe(id);
+    }
+  }, 60_000);
+
   /** One receive: what arrived, deleted from the queue. */
   async function receiveSome(queueUrl: string): Promise<Map<string, ReceivedEvent>> {
     const { Messages = [] } = await sqs.send(
@@ -301,6 +346,59 @@ describe('a publisher that dies between the send and published_at', () => {
     );
   }
 });
+
+/** One entry of a `SendMessageBatch` the real SQS accepted, as a publisher sent it. */
+interface SentEntry {
+  publisher: string;
+  deduplicationId: string;
+  body: string;
+}
+
+/**
+ * A real SQS client that records — not mocks — every batch entry the queue
+ * accepted: the call still goes to LocalStack.
+ */
+function recordingSqsClient(publisher: string, sends: SentEntry[]): SQSClient {
+  const client = new SQSClient({
+    endpoint: config.sqs.endpoint,
+    region: config.sqs.region,
+    credentials: { accessKeyId: config.sqs.accessKeyId, secretAccessKey: config.sqs.secretAccessKey },
+  });
+  recordingClients.push(client);
+  const send = client.send.bind(client) as (command: unknown) => Promise<unknown>;
+  client.send = (async (command: unknown) => {
+    const response = await send(command);
+    if (command instanceof SendMessageBatchCommand) {
+      const accepted = new Set(
+        ((response as { Successful?: { Id?: string }[] }).Successful ?? []).map((entry) => entry.Id),
+      );
+      for (const entry of command.input.Entries ?? []) {
+        if (accepted.has(entry.Id)) {
+          sends.push({ publisher, deduplicationId: entry.MessageDeduplicationId!, body: entry.MessageBody! });
+        }
+      }
+    }
+    return response;
+  }) as typeof client.send;
+  return client;
+}
+
+/**
+ * A publisher over the outbox of an app started with `appConfig` — its unit
+ * of work, its fault points —, sending through a recording SQS client.
+ */
+async function recordingPublisher(appConfig: AppConfig, name: string, sends: SentEntry[]): Promise<PublishOutbox> {
+  const app = await createApp(appConfig);
+  await app.init();
+  publishers.push(app);
+  const { leaseMs, retryBaseMs, retryMaxMs } = appConfig.outboxPublisher;
+  return new PublishOutbox(
+    app.get<UnitOfWork<OutboxRepositories & FaultInjection>>(UNIT_OF_WORK),
+    new SqsEventPublisher(recordingSqsClient(name, sends), appConfig.sqs.wageringEventsQueue),
+    { leaseMs, backoff: { baseMs: retryBaseMs, maxMs: retryMaxMs } },
+    { warn: () => undefined },
+  );
+}
 
 describe('two concurrent publishers over the same outbox', () => {
   test('every eventId reaches the queue, none is unknown, and every row ends published', async () => {
