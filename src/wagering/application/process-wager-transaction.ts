@@ -24,8 +24,7 @@
  */
 import type { InboxEntry, InboxRepositories } from '../../messaging/application/inbox-repository.ts';
 import { InboxMessage } from '../../messaging/domain/inbox-message.ts';
-import type { OutboxRepositories, OutboxRepository } from '../../messaging/application/outbox-repository.ts';
-import { OutboxMessage } from '../../messaging/domain/outbox-message.ts';
+import type { OutboxRepositories } from '../../messaging/application/outbox-repository.ts';
 import type { ContextLog } from '../../shared/application/context-log.ts';
 import { FaultPoint, type FaultInjection } from '../../shared/application/fault-injector.ts';
 import {
@@ -36,20 +35,7 @@ import {
 import type { UnitOfWork } from '../../shared/application/unit-of-work.ts';
 import { Money, type MoneyProps } from '../../shared/domain/money.ts';
 import type { WalletRepositories } from '../../wallet/application/wallet-repository.ts';
-import type { Wallet } from '../../wallet/domain/wallet.ts';
-import { WalletBalanceChanged } from '../../wallet/domain/wallet-balance-changed.ts';
-import type { WalletLedgerEntry } from '../../wallet/domain/wallet-ledger-entry.ts';
-import { applyBet } from '../domain/bet.ts';
-import { applyDependentTransaction, type CitedReference } from '../domain/dependent-transaction.ts';
-import { applyLoss } from '../domain/loss.ts';
 import type { SubmissionChannel } from '../domain/rejected-submission.ts';
-import { applyWin } from '../domain/win.ts';
-import type { ReferenceRetryBackoff } from '../domain/reference-wait.ts';
-import {
-  WagerTransactionPendingReference,
-  WagerTransactionProcessed,
-  WagerTransactionRejected,
-} from '../domain/wager-transaction-events.ts';
 import {
   InvalidWagerTransactionError,
   WagerTransaction,
@@ -57,6 +43,7 @@ import {
   WagerTransactionStatus,
   type CreateWagerTransactionProps,
 } from '../domain/wager-transaction.ts';
+import { enqueueOutcomeEvents, settleOnWallet, type ReferenceWaitPolicy } from './settle-wager-transaction.ts';
 import { hashWagerPayload, type WagerPayload } from './wager-payload.ts';
 import type { WagerTransactionRepository, WageringRepositories } from './wager-transaction-repository.ts';
 import type { WageringMetrics } from './wagering-metrics.ts';
@@ -90,14 +77,6 @@ export interface SubmitWagerTransactionCommand {
 export interface WagerTransactionOutcome {
   transaction: WagerTransaction;
   idempotentReplay: boolean;
-}
-
-/** How a transaction citing a reference not there yet waits for it. */
-export interface ReferenceWaitPolicy {
-  /** How long it waits from its creation. */
-  ttlMs: number;
-  /** When the worker tries it next. */
-  backoff: ReferenceRetryBackoff;
 }
 
 const MAX_IDENTIFIER_LENGTH = 255;
@@ -227,87 +206,22 @@ export class ProcessWagerTransaction {
       const committedMeanwhile = await findEarlier(transactions, submitted);
       if (committedMeanwhile) return recorded(committedMeanwhile);
 
-      const entry = await this.settle(submitted, wallet, transactions);
+      // Step 8 of the order: the rules of the kind, on the locked wallet.
+      const entry = await settleOnWallet(submitted, wallet, transactions, this.generateId);
       if (submitted.status === WagerTransactionStatus.PendingReference) {
         submitted.scheduleReferenceAttempt(new Date(), this.referenceWait.backoff);
       }
       transactions.add(submitted);
       if (entry) ledger.add(entry);
-      this.enqueueEvents(outbox, submitted, wallet, entry);
+      enqueueOutcomeEvents(
+        outbox,
+        { transaction: submitted, wallet, entry },
+        { generateId: this.generateId, ttlMs: this.referenceWait.ttlMs },
+      );
       const outcome = recorded({ transaction: submitted, idempotentReplay: false });
       await faults.inject(FaultPoint.InvariantViolationBeforeCommit, { transactionId: submitted.id });
       return outcome;
     });
-  }
-
-  /**
-   * Step 8 of the order: the rules of the transaction's kind, on its locked
-   * wallet. A transaction citing a reference reads it by its provider and
-   * external id; a refund or rollback also reads, under the same lock, whether
-   * it was already undone.
-   *
-   * @returns The ledger entry to persist, when the balance moved.
-   */
-  private async settle(
-    transaction: WagerTransaction,
-    wallet: Wallet,
-    transactions: WagerTransactionRepository,
-  ): Promise<WalletLedgerEntry | undefined> {
-    const ids = { entryId: this.generateId() };
-    switch (transaction.kind) {
-      case WagerTransactionKind.Bet:
-        return applyBet(transaction, wallet, ids);
-      case WagerTransactionKind.Win: {
-        const { referenceExternalTransactionId } = transaction;
-        const reference =
-          referenceExternalTransactionId === undefined
-            ? undefined
-            : ((await transactions.findByExternalId(transaction.providerId, referenceExternalTransactionId)) ??
-              undefined);
-        return applyWin(transaction, wallet, reference, ids);
-      }
-      case WagerTransactionKind.Loss:
-        applyLoss(transaction, wallet);
-        return undefined;
-      case WagerTransactionKind.Refund:
-      case WagerTransactionKind.Rollback:
-        return applyDependentTransaction(transaction, wallet, await citedReference(transactions, transaction), ids);
-      default:
-        throw new UnsupportedKindError(transaction.kind);
-    }
-  }
-
-  /**
-   * The outcome's integration events: processed, with its balance change when
-   * the balance moved; rejected; waiting for a reference, with when the wait
-   * expires. Added
-   * before anything that may still fail in the unit of work, so they are
-   * committed or rolled back with the outcome.
-   */
-  private enqueueEvents(
-    outbox: OutboxRepository,
-    transaction: WagerTransaction,
-    wallet: Wallet,
-    entry: WalletLedgerEntry | undefined,
-  ): void {
-    const context = { correlationId: transaction.correlationId, causationId: transaction.id };
-    if (transaction.status === WagerTransactionStatus.Rejected) {
-      const rejected = WagerTransactionRejected.from(transaction, context, { eventId: this.generateId(), at: new Date() });
-      outbox.add(OutboxMessage.enqueue(rejected));
-      return;
-    }
-    if (transaction.status === WagerTransactionStatus.PendingReference) {
-      const { ttlMs } = this.referenceWait;
-      const pending = WagerTransactionPendingReference.from(transaction, context, { eventId: this.generateId(), ttlMs });
-      outbox.add(OutboxMessage.enqueue(pending));
-      return;
-    }
-    if (transaction.status !== WagerTransactionStatus.Processed) return;
-    const processed = WagerTransactionProcessed.from(transaction, context, { eventId: this.generateId() });
-    outbox.add(OutboxMessage.enqueue(processed));
-    if (entry === undefined) return;
-    const changed = WalletBalanceChanged.from(wallet, entry, context, { eventId: this.generateId() });
-    outbox.add(OutboxMessage.enqueue(changed));
   }
 
   /** The second unit of work: `FAILED`, with nothing observed and no ledger entry. */
@@ -412,23 +326,6 @@ async function findEarlier(
     throw new IdempotencyConflictError(submitted.providerId, submitted.idempotencyKey, submitted.payloadHash);
   }
   return { transaction: earlier, idempotentReplay: true };
-}
-
-/**
- * The reference a refund or rollback cites, and whether it was already undone
- * — asked only of a processed one, the only kind that can have been.
- */
-async function citedReference(
-  transactions: WagerTransactionRepository,
-  transaction: WagerTransaction,
-): Promise<CitedReference | undefined> {
-  const { providerId, referenceExternalTransactionId } = transaction;
-  if (referenceExternalTransactionId === undefined) return undefined;
-  const reference = await transactions.findByExternalId(providerId, referenceExternalTransactionId);
-  if (!reference) return undefined;
-  const alreadyReversed =
-    reference.status === WagerTransactionStatus.Processed && (await transactions.isReversed(reference.id));
-  return { transaction: reference, alreadyReversed };
 }
 
 function assertIdentifiers(command: SubmitWagerTransactionCommand): void {
