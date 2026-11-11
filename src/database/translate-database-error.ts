@@ -5,6 +5,7 @@
  *
  * @packageDocumentation
  */
+import { InboxRedeliveryError } from '../messaging/application/inbox-repository.ts';
 import { PermanentFailureError, TransientFailureError } from '../shared/application/infrastructure-failures.ts';
 import { FailureCode } from '../shared/domain/failure-code.ts';
 import {
@@ -41,7 +42,6 @@ export function translateDatabaseError(error: unknown): unknown {
         ? new DuplicateIdempotencyKeyError(message)
         : error;
     case 'redelivery':
-      // The inbox arrives with the queue consumer.
-      return error;
+      return new InboxRedeliveryError(message, { cause: error });
   }
 }
