@@ -68,6 +68,7 @@ const ALL_MIGRATIONS = [
   'Migration0008WagerTransactionReference',
   'Migration0009WagerTransactionSingleReversal',
   'Migration0010InboxMessages',
+  'Migration0011WagerTransactionReferenceSchedule',
 ];
 const TABLES = [
   'wallets',
