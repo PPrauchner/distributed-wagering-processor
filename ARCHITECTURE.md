@@ -716,8 +716,12 @@ Keycloak.
   recusa, para o erro verdadeiro passar pelo classificador —; `crash-after-send` —
   o publicador "morre" entre o envio e o `published_at`: lança
   `SimulatedCrashError` antes de gravar, e a transação SQL da gravação desfaz —;
-  `crash-after-commit` — o consumidor "morre" depois do commit do desfecho e antes
-  do `ack`: a mensagem volta quando a visibilidade expira e o inbox a reconhece —;
+  `crash-after-commit` — o consumidor morre depois do commit do desfecho e antes
+  do `ack`: o app rodando como processo (`main.ts`) leva `SIGKILL` de si mesmo,
+  por uma função de queda que a raiz de composição injeta no `CrashFaultInjector`;
+  em processo (integração e unidade), lança `SimulatedCrashError`, para não
+  derrubar o test runner. A mensagem volta quando a visibilidade expira e o inbox
+  a reconhece —;
   e `transient-failure-in-resolution` — o worker de referências pendentes, já com
   o lock da carteira, recebe `lock_not_available` do banco: transitório real, e o
   item é reagendado. O `invariant-violation-before-commit` vale também para a
