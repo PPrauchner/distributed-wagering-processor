@@ -62,6 +62,8 @@ export interface ReconciliationResponse {
 const DEFAULT_LEDGER_LIMIT = 50;
 const MAX_LEDGER_LIMIT = 200;
 const LIMIT_PATTERN = /^[1-9]\d{0,2}$/;
+/** The `creation_idempotency_key` column's size, as on a submission's key. */
+const MAX_CREATION_KEY_LENGTH = 255;
 
 /**
  * @param body - The untrusted request body.
@@ -70,14 +72,17 @@ const LIMIT_PATTERN = /^[1-9]\d{0,2}$/;
  * @returns The create-wallet command.
  * @throws {@link EmptyCreationKeyError} If the key is present but empty — the
  *   submission's rule; checked before the body.
- * @throws {@link InvalidPayloadError} If the body has a wrong shape, a wrong type
- *   or any unknown field, at any level.
+ * @throws {@link InvalidPayloadError} If the key is longer than 255 characters,
+ *   or the body has a wrong shape, a wrong type or any unknown field, at any level.
  */
 export function parseCreateWalletRequest(
   body: unknown,
   headers: { correlationId?: string; idempotencyKey?: string } = {},
 ): CreateWalletCommand {
   if (headers.idempotencyKey === '') throw new EmptyCreationKeyError();
+  if (headers.idempotencyKey !== undefined && headers.idempotencyKey.length > MAX_CREATION_KEY_LENGTH) {
+    throw new InvalidPayloadError(`Idempotency-Key must have between 1 and ${MAX_CREATION_KEY_LENGTH} characters`);
+  }
   const request = expectExactObject(body, ['playerId', 'initialBalance'], 'body');
   const balance = expectExactObject(
     request.initialBalance,

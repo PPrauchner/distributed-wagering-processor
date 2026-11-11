@@ -291,6 +291,16 @@ describe('POST /wallets with Idempotency-Key', () => {
     expect((await countRows(playerId)).wallets).toBe(0);
   });
 
+  test('a key longer than 255 characters is refused like on a submission, and creates nothing', async () => {
+    const playerId = Bun.randomUUIDv7();
+
+    const response = await postWallet({ playerId, initialBalance: zeroBrl }, withKey('k'.repeat(256)));
+
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ failureCode: 'INVALID_PAYLOAD', message: expect.any(String) });
+    expect((await countRows(playerId)).wallets).toBe(0);
+  });
+
   test('a conflicting key wins over the wallet that already exists for that player and currency', async () => {
     const key = Bun.randomUUIDv7();
     const playerId = Bun.randomUUIDv7();
