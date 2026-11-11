@@ -85,7 +85,6 @@ export interface WagerTransactionOutcome {
   idempotentReplay: boolean;
 }
 
-const MAX_IDENTIFIER_LENGTH = 255;
 const KINDS = new Set<string>(Object.values(WagerTransactionKind));
 const SUPPORTED_KINDS = new Set([
   WagerTransactionKind.Bet,
@@ -311,7 +310,7 @@ export class ProcessWagerTransaction {
     props: CreateWagerTransactionProps;
     submitted: WagerTransaction;
   } {
-    assertIdentifiers(command);
+    assertWalletId(command.walletId);
     const money = Money.from(command.money);
     if (!KINDS.has(command.kind)) {
       throw new InvalidWagerTransactionError(`kind must be one of ${[...KINDS].join(', ')}, got "${command.kind}"`);
@@ -335,7 +334,7 @@ export class ProcessWagerTransaction {
       payloadHash: hashWagerPayload(payload),
       correlationId: command.correlationId ?? this.generateId(),
     };
-    // `create` enforces the rules of the kind: amount floor and reference.
+    // `create` enforces the identifiers and the rules of the kind: amount floor and reference.
     const submitted = WagerTransaction.create(props);
     if (props.kind === WagerTransactionKind.Opening) throw new InternalKindNotAllowedError(props.kind, props.payloadHash);
     if (!SUPPORTED_KINDS.has(props.kind)) throw new UnsupportedKindError(props.kind);
@@ -382,22 +381,8 @@ async function findEarlier(
   return { transaction: earlier, idempotentReplay: true };
 }
 
-function assertIdentifiers(command: SubmitWagerTransactionCommand): void {
-  const identifiers: [string, string | undefined][] = [
-    ['Idempotency-Key', command.idempotencyKey],
-    ['providerId', command.providerId],
-    ['externalTransactionId', command.externalTransactionId],
-    ['playerId', command.playerId],
-    ['roundId', command.roundId],
-    ['gameId', command.gameId],
-    ['referenceExternalTransactionId', command.referenceExternalTransactionId],
-  ];
-  for (const [name, value] of identifiers) {
-    if (value !== undefined && (value.length === 0 || value.length > MAX_IDENTIFIER_LENGTH)) {
-      throw new InvalidWagerTransactionError(`${name} must have between 1 and ${MAX_IDENTIFIER_LENGTH} characters`);
-    }
-  }
-  if (!isUuid(command.walletId)) {
-    throw new InvalidWagerTransactionError(`walletId must be a UUID, got "${command.walletId}"`);
+function assertWalletId(walletId: string): void {
+  if (!isUuid(walletId)) {
+    throw new InvalidWagerTransactionError(`walletId must be a UUID, got "${walletId}"`);
   }
 }
