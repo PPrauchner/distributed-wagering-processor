@@ -140,31 +140,28 @@ Worker morto: o lease expira e outra instância assume. Ver
 
 ## Invariantes no schema
 
-| Tabela | Garantias |
-|---|---|
-| `wallets` | `CHECK (balance_amount >= 0)`, `CHECK (version >= 1)`, `CHECK (currency = balance_currency)`; `UNIQUE (player_id, currency)`; `UNIQUE (id, currency)` (alvo da FK de moeda); `UNIQUE (creation_idempotency_key)` (anulável) e `CHECK` de chave e hash da criação ambos nulos ou ambos preenchidos; `initial_balance` |
-| `wager_transactions` | `UNIQUE (provider_id, idempotency_key)`; `UNIQUE (provider_id, external_transaction_id)`; FK `wallet_id NOT NULL`; FK `reference_transaction_id` na própria tabela; índice único parcial da reversão; `CHECK`s de coerência (`REFUND`/`ROLLBACK` ⇒ referência externa preenchida, `BET`/`LOSS`/`OPENING` ⇒ nula, `WIN` livre; `PENDING_REFERENCE` só para `REFUND`, `ROLLBACK` e `WIN`; `PROCESSED` ⇔ `processed_at`; `REJECTED`/`FAILED` ⇔ `failure_code`; `failure_message` só com `failure_code`; `PROCESSED`/`REJECTED` ⇔ `balance_after` e `wallet_version_observed` preenchidos; `status <> 'PENDING'`); `amount > 0`, exceto `LOSS` (`>= 0`); `correlation_id NOT NULL`; índice parcial `WHERE status = 'PENDING_REFERENCE'` |
-| `wallet_ledger_entries` | `UNIQUE (transaction_id, wallet_id)`; `UNIQUE (wallet_id, wallet_version)`; FK composta e `CHECK` de moeda; `amount > 0`; `CHECK` da aritmética (`balance_after = balance_before ± amount` pela `direction`, saldos `>= 0`) |
-| `inbox_messages` | PK `(consumer_name, message_id)` |
-| `outbox_messages` | `wallet_id NOT NULL` (o `MessageGroupId`); índice parcial `WHERE published_at IS NULL` em `next_attempt_at`; `CHECK (attempts >= 0)`; sem FK |
-| `rejected_submissions` | append-only, sem FK nem unicidade (a PK é um UUID substituto); só `failure_code`, `channel` (`HTTP` ou `QUEUE`, por `CHECK`) e `received_at` obrigatórios — `correlation_id` e o resto anuláveis |
+O diagrama das tabelas e o mapa completo **invariante → nome da constraint,
+índice ou trigger → tabela → migration**, conferido no catálogo do PostgreSQL
+depois de aplicar as migrations, estão em [`docs/data-model.md`](docs/data-model.md).
+Em resumo, o banco garante sozinho:
 
-**Triggers:**
-
-- **Livro-razão imutável:** `UPDATE`, `DELETE` e `TRUNCATE` em
-  `wallet_ledger_entries` são recusados.
-- **Saldo ↔ livro-razão:** *constraint trigger* deferido em `wallets` exige, no
-  commit, um lançamento que leve do saldo antigo ao novo com a versão nova, e a
-  versão subindo exatamente 1 quando o saldo muda. Ver
-  [ADR 0003](docs/adr/0003-versao-da-carteira-como-sequencia-do-livro-razao.md).
-- **Transação terminal imutável:** em `wager_transactions`, linha em `PROCESSED`,
-  `REJECTED` ou `FAILED` não muda; colunas de identidade (chave, hash, valor, tipo,
-  carteira, `correlation_id`…) não mudam em estado nenhum; nenhuma linha é apagada.
-  O único `UPDATE` de status aceito parte de `PENDING_REFERENCE`.
-- **Identidade da carteira imutável:** em `wallets`, `player_id`, `currency`,
-  `initial_balance` e chave e hash da criação não mudam.
-- **Auditoria append-only:** `UPDATE`, `DELETE` e `TRUNCATE` em
-  `rejected_submissions` são recusados.
+- **Unicidade:** uma carteira por jogador e moeda; a chave de criação da
+  carteira; `(provider_id, idempotency_key)` e `(provider_id,
+  external_transaction_id)` por transação; um lançamento por transação e
+  carteira e um por versão da carteira; uma reversão processada por referência;
+  uma entrega por `(consumer_name, message_id)` na inbox.
+- **`CHECK`s:** saldo e saldo inicial `>= 0`, versão `>= 1`, moeda repetida
+  igual à da carteira, aritmética do lançamento, `amount > 0` (`LOSS` `>= 0`),
+  coerência tipo × referência × status e `status <> 'PENDING'`.
+- **FKs:** transação → carteira, referência → transação, lançamento →
+  transação e a FK composta `(wallet_id, currency)` → `wallets (id, currency)`,
+  que amarra a moeda do lançamento à da carteira. Inbox, outbox e
+  `rejected_submissions` não têm FK.
+- **Triggers:** livro-razão imutável; saldo ↔ livro-razão (*constraint trigger*
+  deferido, ver
+  [ADR 0003](docs/adr/0003-versao-da-carteira-como-sequencia-do-livro-razao.md));
+  transação terminal imutável; identidade da carteira imutável; auditoria
+  append-only.
 
 **Saldo máximo:** `99999999999999999.99`, o limite de `numeric(19,2)`. Não há
 `CHECK` próprio: o tipo da coluna já recusa o valor acima dele (`22003`) antes de
