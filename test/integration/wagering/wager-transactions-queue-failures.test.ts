@@ -1,0 +1,542 @@
+/**
+ * The consumer of `wager-transactions.fifo` on its failure path and at
+ * shutdown, end to end against the real PostgreSQL and the real LocalStack: a
+ * transient failure comes back with its backoff and is processed later; five
+ * receives of it end `FAILED` `INFRA_RETRIES_EXHAUSTED` in the DLQ; a
+ * permanent error ends `FAILED` in the DLQ, and its redelivery has no effect;
+ * submissions not admitted go to the DLQ with their `failureCode` and a
+ * `rejected_submissions` row — a `BET` sent before its wallet exists only once
+ * its receives run out —; a real process given `SIGTERM` with messages in
+ * progress loses and duplicates none. Every input queue has a DLQ of its own,
+ * with the redrive of the Compose (`maxReceiveCount` 6), and a random suffix;
+ * the backoff ceiling is 1 s, so five receives take seconds. Waits by
+ * condition, never by a fixed sleep. Ends checking the ledger invariant of
+ * every wallet it touched.
+ *
+ * @packageDocumentation
+ */
+import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
+import type { INestApplication } from '@nestjs/common';
+import { SQL } from 'bun';
+import {
+  CreateQueueCommand,
+  DeleteMessageBatchCommand,
+  DeleteQueueCommand,
+  GetQueueAttributesCommand,
+  ReceiveMessageCommand,
+  SendMessageCommand,
+  SQSClient,
+} from '@aws-sdk/client-sqs';
+import { createApp } from '../../../src/app.ts';
+import { loadConfig, type AppConfig } from '../../../src/config.ts';
+import { FaultPoint } from '../../../src/shared/application/fault-injector.ts';
+import { UNIT_OF_WORK, type UnitOfWork } from '../../../src/shared/application/unit-of-work.ts';
+import type { OutboxRepositories } from '../../../src/messaging/application/outbox-repository.ts';
+import type { WageringRepositories } from '../../../src/wagering/application/wager-transaction-repository.ts';
+import { CreateWallet } from '../../../src/wallet/application/create-wallet.ts';
+import type { WalletRepositories } from '../../../src/wallet/application/wallet-repository.ts';
+import { expectLedgerConsistent } from '../ledger-invariant.ts';
+
+type JsonObject = Record<string, unknown>;
+
+interface TestWallet {
+  id: string;
+  playerId: string;
+}
+
+interface QueuePair {
+  name: string;
+  url: string;
+  dlqName: string;
+  dlqUrl: string;
+}
+
+interface DeadLetter {
+  body: JsonObject | string;
+  failureCode: string | undefined;
+}
+
+const CONSUMER = 'wager-transactions-consumer';
+/** The redrive of the Compose: the safety net past the consumer's five receives. */
+const MAX_RECEIVE_COUNT = '6';
+
+const apps: INestApplication[] = [];
+const queueUrls: string[] = [];
+const touchedWallets: string[] = [];
+const letters = new Map<string, DeadLetter[]>();
+let config: AppConfig;
+let sql: SQL;
+let sqs: SQSClient;
+
+/** The main instance: HTTP and the consumer of its own input queue. */
+let app: INestApplication;
+let baseUrl: string;
+let main: QueuePair;
+
+beforeAll(async () => {
+  config = loadConfig();
+  sql = new SQL(config.databaseUrl);
+  sqs = new SQSClient({
+    endpoint: config.sqs.endpoint,
+    region: config.sqs.region,
+    credentials: { accessKeyId: config.sqs.accessKeyId, secretAccessKey: config.sqs.secretAccessKey },
+  });
+  main = await createQueuePair();
+  app = await startApp(instanceConfig(main));
+  await app.listen(0, '127.0.0.1');
+  baseUrl = await app.getUrl();
+});
+
+afterAll(async () => {
+  await expectLedgerConsistent(sql, touchedWallets);
+  await Promise.all(apps.map((instance) => instance.close()));
+  await Promise.all(queueUrls.map((QueueUrl) => sqs.send(new DeleteQueueCommand({ QueueUrl })).catch(() => undefined)));
+  sqs?.destroy();
+  await sql?.close();
+});
+
+function instanceConfig(queues: QueuePair, faults: FaultPoint[] = []): AppConfig {
+  return {
+    ...config,
+    faultPoints: faults,
+    sqs: { ...config.sqs, wagerTransactionsQueue: queues.name, wagerTransactionsDlq: queues.dlqName },
+    wagerTransactionsConsumer: {
+      ...config.wagerTransactionsConsumer,
+      enabled: true,
+      waitTimeSeconds: 1,
+      visibilityTimeoutSeconds: 5,
+      maxReceives: 5,
+      retryMaxSeconds: 1,
+    },
+  };
+}
+
+async function startApp(appConfig: AppConfig): Promise<INestApplication> {
+  const instance = await createApp(appConfig);
+  apps.push(instance);
+  return instance;
+}
+
+/** An input queue with its own DLQ, by the redrive of the Compose. */
+async function createQueuePair(): Promise<QueuePair> {
+  const suffix = Bun.randomUUIDv7().slice(-12);
+  const dlqName = `wager-transactions-dlq-${suffix}.fifo`;
+  const { QueueUrl: dlqUrl } = await sqs.send(
+    new CreateQueueCommand({ QueueName: dlqName, Attributes: { FifoQueue: 'true' } }),
+  );
+  const { Attributes = {} } = await sqs.send(
+    new GetQueueAttributesCommand({ QueueUrl: dlqUrl, AttributeNames: ['QueueArn'] }),
+  );
+  const name = `wager-transactions-${suffix}.fifo`;
+  const { QueueUrl: url } = await sqs.send(
+    new CreateQueueCommand({
+      QueueName: name,
+      Attributes: {
+        FifoQueue: 'true',
+        RedrivePolicy: JSON.stringify({ deadLetterTargetArn: Attributes.QueueArn, maxReceiveCount: MAX_RECEIVE_COUNT }),
+      },
+    }),
+  );
+  queueUrls.push(url!, dlqUrl!);
+  return { name, url: url!, dlqName, dlqUrl: dlqUrl! };
+}
+
+async function waitFor<T>(probe: () => Promise<T | undefined>, timeoutMs = 30_000): Promise<T> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const value = await probe();
+    if (value !== undefined) return value;
+    if (Date.now() > deadline) throw new Error('condition not met in time');
+    await Bun.sleep(25);
+  }
+}
+
+async function createWallet(amount: string): Promise<TestWallet> {
+  const playerId = Bun.randomUUIDv7();
+  const response = await fetch(`${baseUrl}/wallets`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ playerId, initialBalance: { amount, currency: 'BRL' } }),
+  });
+  expect(response.status).toBe(201);
+  const { id } = (await response.json()) as { id: string };
+  touchedWallets.push(id);
+  return { id, playerId };
+}
+
+/** Creates the wallet under an id chosen beforehand, as if the provider created it meanwhile. */
+async function createWalletWithId(wallet: TestWallet, amount: string): Promise<void> {
+  let first = true;
+  const generateId = () => {
+    if (!first) return Bun.randomUUIDv7();
+    first = false;
+    return wallet.id;
+  };
+  const unitOfWork = app.get<UnitOfWork<WalletRepositories & WageringRepositories & OutboxRepositories>>(UNIT_OF_WORK);
+  await new CreateWallet(unitOfWork, generateId).execute({
+    playerId: wallet.playerId,
+    initialBalance: { amount, currency: 'BRL' },
+  });
+  touchedWallets.push(wallet.id);
+}
+
+function betData(wallet: TestWallet, amount = '25.00', overrides: JsonObject = {}): JsonObject {
+  const externalTransactionId = Bun.randomUUIDv7();
+  return {
+    providerId: 'provider-a',
+    externalTransactionId,
+    idempotencyKey: `provider-a:${externalTransactionId}`,
+    playerId: wallet.playerId,
+    walletId: wallet.id,
+    roundId: 'round-987',
+    gameId: 'fortune-chimp',
+    kind: 'BET',
+    money: { amount, currency: 'BRL' },
+    ...overrides,
+  };
+}
+
+/** Sends a §10 envelope — or any body — as a new SQS message. */
+async function send(
+  queueUrl: string,
+  data: JsonObject,
+  options: { messageId?: string; body?: string } = {},
+): Promise<string> {
+  const messageId = options.messageId ?? Bun.randomUUIDv7();
+  await sqs.send(
+    new SendMessageCommand({
+      QueueUrl: queueUrl,
+      MessageBody:
+        options.body ??
+        JSON.stringify({ messageId, type: 'WagerTransactionRequested', occurredAt: new Date().toISOString(), data }),
+      MessageGroupId: typeof data.walletId === 'string' ? data.walletId : Bun.randomUUIDv7(),
+      MessageDeduplicationId: Bun.randomUUIDv7(),
+    }),
+  );
+  return messageId;
+}
+
+async function messagesLeft(queueUrl: string): Promise<number> {
+  const { Attributes = {} } = await sqs.send(
+    new GetQueueAttributesCommand({
+      QueueUrl: queueUrl,
+      AttributeNames: ['ApproximateNumberOfMessages', 'ApproximateNumberOfMessagesNotVisible'],
+    }),
+  );
+  return Number(Attributes.ApproximateNumberOfMessages) + Number(Attributes.ApproximateNumberOfMessagesNotVisible);
+}
+
+async function drained(queueUrl: string): Promise<true | undefined> {
+  return (await messagesLeft(queueUrl)) === 0 ? true : undefined;
+}
+
+/** Receives — and deletes — the DLQ's messages until one matches. */
+async function deadLetter(dlqUrl: string, matches: (letter: DeadLetter) => boolean): Promise<DeadLetter> {
+  const seen = letters.get(dlqUrl) ?? [];
+  letters.set(dlqUrl, seen);
+  return waitFor(async () => {
+    const { Messages = [] } = await sqs.send(
+      new ReceiveMessageCommand({
+        QueueUrl: dlqUrl,
+        MaxNumberOfMessages: 10,
+        WaitTimeSeconds: 1,
+        MessageAttributeNames: ['All'],
+      }),
+    );
+    for (const message of Messages) {
+      let body: JsonObject | string;
+      try {
+        body = JSON.parse(message.Body!) as JsonObject;
+      } catch {
+        body = message.Body!;
+      }
+      seen.push({ body, failureCode: message.MessageAttributes?.failureCode?.StringValue });
+    }
+    if (Messages.length > 0) {
+      await sqs.send(
+        new DeleteMessageBatchCommand({
+          QueueUrl: dlqUrl,
+          Entries: Messages.map((message, index) => ({ Id: `${index}`, ReceiptHandle: message.ReceiptHandle! })),
+        }),
+      );
+    }
+    return seen.find(matches);
+  }, 45_000);
+}
+
+function withMessageId(messageId: string): (letter: DeadLetter) => boolean {
+  return (letter) => typeof letter.body === 'object' && letter.body.messageId === messageId;
+}
+
+interface TransactionRow {
+  id: string;
+  status: string;
+  failure_code: string | null;
+}
+
+async function transactionsOf(data: JsonObject): Promise<TransactionRow[]> {
+  const rows: TransactionRow[] = await sql`
+    select id, status, failure_code from wager_transactions
+     where provider_id = ${data.providerId as string} and external_transaction_id = ${data.externalTransactionId as string}
+  `;
+  // A plain array: the result's own fields (count, command) would fail toMatchObject.
+  return [...rows];
+}
+
+async function oneTransactionOf(data: JsonObject): Promise<TransactionRow> {
+  const [row] = await waitFor(async () => {
+    const rows = await transactionsOf(data);
+    return rows.length > 0 ? rows : undefined;
+  });
+  return row!;
+}
+
+async function inboxRow(messageId: string): Promise<{ payload_hash: string } | undefined> {
+  const [row] = await sql`
+    select payload_hash from inbox_messages where consumer_name = ${CONSUMER} and message_id = ${messageId}
+  `;
+  return row;
+}
+
+async function rejectedRows(messageId: string): Promise<{ failure_code: string; channel: string }[]> {
+  return [...(await sql`select failure_code, channel from rejected_submissions where message_id = ${messageId}`)];
+}
+
+async function walletState(walletId: string): Promise<{ balance_amount: string; version: number }> {
+  const [row] = await sql`select balance_amount::text, version from wallets where id = ${walletId}`;
+  return row;
+}
+
+async function counter(name: string, failureCode: string): Promise<number> {
+  const text = await (await fetch(`${baseUrl}/metrics`)).text();
+  const line = text.split('\n').find((row) => row.startsWith(`${name}{failure_code="${failureCode}"} `));
+  return line === undefined ? 0 : Number(line.split(' ')[1]);
+}
+
+const retries = (failureCode: string) => counter('wager_transactions_consumer_retries_total', failureCode);
+const deadLettered = (failureCode: string) => counter('wager_transactions_dlq_messages_total', failureCode);
+
+/**
+ * Holds the wallet's row lock — the one the use case waits for, but not the
+ * key share an insert's foreign key takes — until `release` resolves.
+ */
+async function holdWalletLock(walletId: string, release: Promise<void>): Promise<{ released: Promise<void> }> {
+  let held!: () => void;
+  const locked = new Promise<void>((resolve) => (held = resolve));
+  const released = sql.begin(async (tx) => {
+    await tx`select id from wallets where id = ${walletId} for no key update`;
+    held();
+    await release;
+  });
+  await locked;
+  return { released: released.then(() => undefined) };
+}
+
+describe('a transient failure', () => {
+  test('the wallet locked past 2 s: the message comes back with its backoff and is processed later, once', async () => {
+    const wallet = await createWallet('100.00');
+    const data = betData(wallet);
+    const retriesBefore = await retries('TRANSIENT_LOCK_TIMEOUT');
+    let release!: () => void;
+    const lock = await holdWalletLock(wallet.id, new Promise((resolve) => (release = resolve)));
+
+    await send(main.url, data);
+    await waitFor(async () => ((await retries('TRANSIENT_LOCK_TIMEOUT')) > retriesBefore ? true : undefined));
+    expect(await transactionsOf(data)).toEqual([]);
+    release();
+    await lock.released;
+
+    const transaction = await oneTransactionOf(data);
+    await waitFor(() => drained(main.url));
+    expect(transaction.status).toBe('PROCESSED');
+    expect(await transactionsOf(data)).toHaveLength(1);
+    expect(await walletState(wallet.id)).toEqual({ balance_amount: '75.00', version: 2 });
+  }, 60_000);
+
+  test('five receives of it: FAILED INFRA_RETRIES_EXHAUSTED with its inbox row, in the DLQ, gone from the input queue', async () => {
+    const wallet = await createWallet('100.00');
+    const data = betData(wallet);
+    let release!: () => void;
+    const lock = await holdWalletLock(wallet.id, new Promise((resolve) => (release = resolve)));
+
+    const messageId = await send(main.url, data);
+    const letter = await deadLetter(main.dlqUrl, withMessageId(messageId));
+    release();
+    await lock.released;
+
+    expect(letter.failureCode).toBe('INFRA_RETRIES_EXHAUSTED');
+    expect(await transactionsOf(data)).toMatchObject([{ status: 'FAILED', failure_code: 'INFRA_RETRIES_EXHAUSTED' }]);
+    expect(await inboxRow(messageId)).toBeDefined();
+    await waitFor(() => drained(main.url));
+    expect(await walletState(wallet.id)).toEqual({ balance_amount: '100.00', version: 1 });
+  }, 90_000);
+});
+
+describe('a permanent error', () => {
+  test('ends FAILED with the classifier code, in the DLQ with it; a redelivery of the messageId has no second effect', async () => {
+    const queues = await createQueuePair();
+    const faulty = await startApp(instanceConfig(queues, [FaultPoint.InvariantViolationBeforeCommit]));
+    await faulty.init();
+    const wallet = await createWallet('100.00');
+    const data = betData(wallet);
+
+    const messageId = await send(queues.url, data);
+    const letter = await deadLetter(queues.dlqUrl, withMessageId(messageId));
+    await waitFor(() => drained(queues.url));
+
+    expect(letter.failureCode).toBe('INFRA_INVARIANT_VIOLATION');
+    expect(await transactionsOf(data)).toMatchObject([{ status: 'FAILED', failure_code: 'INFRA_INVARIANT_VIOLATION' }]);
+    expect(await rejectedRows(messageId)).toEqual([]);
+
+    await send(queues.url, data, { messageId });
+    await waitFor(() => drained(queues.url));
+    expect(await transactionsOf(data)).toHaveLength(1);
+    expect(await walletState(wallet.id)).toEqual({ balance_amount: '100.00', version: 1 });
+  }, 60_000);
+});
+
+describe('a submission not admitted', () => {
+  test('an invalid payload goes straight to the DLQ with INVALID_PAYLOAD and a rejected row of the queue channel', async () => {
+    const wallet = await createWallet('100.00');
+    const data = betData(wallet, '25.00', { money: 25 });
+    const before = await deadLettered('INVALID_PAYLOAD');
+
+    const messageId = await send(main.url, data);
+    const letter = await deadLetter(main.dlqUrl, withMessageId(messageId));
+    await waitFor(() => drained(main.url));
+
+    expect(letter.failureCode).toBe('INVALID_PAYLOAD');
+    expect(await rejectedRows(messageId)).toEqual([{ failure_code: 'INVALID_PAYLOAD', channel: 'QUEUE' }]);
+    expect(await transactionsOf(data)).toEqual([]);
+    expect(await deadLettered('INVALID_PAYLOAD')).toBe(before + 1);
+  }, 60_000);
+
+  test('a BET sent before its wallet exists is retried, and PROCESSED once the wallet is created in time', async () => {
+    const wallet = { id: Bun.randomUUIDv7(), playerId: Bun.randomUUIDv7() };
+    const data = betData(wallet);
+    const retriesBefore = await retries('WALLET_NOT_FOUND');
+
+    const messageId = await send(main.url, data);
+    await waitFor(async () => ((await retries('WALLET_NOT_FOUND')) > retriesBefore ? true : undefined));
+    await createWalletWithId(wallet, '100.00');
+
+    const transaction = await oneTransactionOf(data);
+    await waitFor(() => drained(main.url));
+    expect(transaction.status).toBe('PROCESSED');
+    expect(await rejectedRows(messageId)).toEqual([]);
+    expect(await walletState(wallet.id)).toEqual({ balance_amount: '75.00', version: 2 });
+  }, 60_000);
+
+  test('a wallet never created: after five receives, the DLQ with WALLET_NOT_FOUND, a rejected row and no transaction', async () => {
+    const data = betData({ id: Bun.randomUUIDv7(), playerId: Bun.randomUUIDv7() });
+
+    const messageId = await send(main.url, data);
+    const letter = await deadLetter(main.dlqUrl, withMessageId(messageId));
+    await waitFor(() => drained(main.url));
+
+    expect(letter.failureCode).toBe('WALLET_NOT_FOUND');
+    expect(await rejectedRows(messageId)).toEqual([{ failure_code: 'WALLET_NOT_FOUND', channel: 'QUEUE' }]);
+    expect(await transactionsOf(data)).toEqual([]);
+  }, 60_000);
+
+  test('the same messageId with another payload: the DLQ with MESSAGE_ID_CONFLICT, and the first outcome intact', async () => {
+    const wallet = await createWallet('100.00');
+    const data = betData(wallet);
+    const messageId = await send(main.url, data);
+    await oneTransactionOf(data);
+    await waitFor(() => drained(main.url));
+    const before = await walletState(wallet.id);
+
+    const other = betData(wallet, '10.00');
+    await send(main.url, other, { messageId });
+    const letter = await deadLetter(main.dlqUrl, (candidate) =>
+      withMessageId(messageId)(candidate) && (candidate.body as { data: JsonObject }).data.externalTransactionId === other.externalTransactionId,
+    );
+    await waitFor(() => drained(main.url));
+
+    expect(letter.failureCode).toBe('MESSAGE_ID_CONFLICT');
+    expect(await rejectedRows(messageId)).toEqual([{ failure_code: 'MESSAGE_ID_CONFLICT', channel: 'QUEUE' }]);
+    expect(await transactionsOf(data)).toMatchObject([{ status: 'PROCESSED' }]);
+    expect(await transactionsOf(other)).toEqual([]);
+    expect(await walletState(wallet.id)).toEqual(before);
+  }, 60_000);
+
+  test('an idempotency conflict, an external id conflict and an OPENING go straight to the DLQ with their code', async () => {
+    const wallet = await createWallet('100.00');
+    const first = betData(wallet);
+    await send(main.url, first);
+    await oneTransactionOf(first);
+    await waitFor(() => drained(main.url));
+
+    const cases: [JsonObject, string][] = [
+      [{ ...first, money: { amount: '5.00', currency: 'BRL' } }, 'IDEMPOTENCY_CONFLICT'],
+      [{ ...betData(wallet), externalTransactionId: first.externalTransactionId }, 'EXTERNAL_ID_CONFLICT'],
+      [betData(wallet, '25.00', { kind: 'OPENING' }), 'INTERNAL_KIND_NOT_ALLOWED'],
+    ];
+    for (const [data, failureCode] of cases) {
+      const messageId = await send(main.url, data);
+      const letter = await deadLetter(main.dlqUrl, withMessageId(messageId));
+      // The row is recorded after the DLQ send, before the ack.
+      await waitFor(() => drained(main.url));
+      expect(letter.failureCode).toBe(failureCode);
+      expect(await rejectedRows(messageId)).toEqual([{ failure_code: failureCode, channel: 'QUEUE' }]);
+    }
+    expect(await walletState(wallet.id)).toEqual({ balance_amount: '75.00', version: 2 });
+  }, 60_000);
+});
+
+describe('SIGTERM with messages in progress', () => {
+  test('the process ends in time, and every message ends processed exactly once, a new instance included', async () => {
+    const queues = await createQueuePair();
+    const wallets = await Promise.all(Array.from({ length: 10 }, () => createWallet('100.00')));
+    const sent = wallets.flatMap((wallet) => [1, 2, 3, 4, 5].map(() => betData(wallet, '5.00')));
+    const windows = process.platform === 'win32';
+    const child = Bun.spawn(['bun', '--preload', './test/integration/support/shutdown-on-ipc.ts', 'src/main.ts'], {
+      env: {
+        ...process.env,
+        PORT: '0',
+        WAGER_TRANSACTIONS_CONSUMER_ENABLED: 'true',
+        WAGER_TRANSACTIONS_QUEUE: queues.name,
+        WAGER_TRANSACTIONS_DLQ: queues.dlqName,
+        WAGER_TRANSACTIONS_WAIT_SECONDS: '1',
+        WAGER_TRANSACTIONS_VISIBILITY_SECONDS: '5',
+      },
+      stdout: 'ignore',
+      stderr: 'ignore',
+      ipc: () => undefined,
+    });
+
+    for (const data of sent) await send(queues.url, data);
+    await waitFor(async () => {
+      const [row] = await sql`
+        select count(*)::int as settled from wager_transactions
+         where wallet_id in ${sql(wallets.map((wallet) => wallet.id))} and kind = 'BET'
+      `;
+      return row.settled > 0 ? true : undefined;
+    });
+    const signalled = performance.now();
+    if (windows) child.send('SIGTERM');
+    else child.kill('SIGTERM');
+    const ended = await Promise.race([child.exited.then(() => true), Bun.sleep(25_000).then(() => false)]);
+    if (!ended) child.kill('SIGKILL');
+    expect(ended).toBe(true);
+    expect(performance.now() - signalled).toBeLessThan(25_000);
+
+    const survivor = await startApp(instanceConfig(queues));
+    await survivor.init();
+    await waitFor(() => drained(queues.url), 45_000);
+
+    for (const data of sent) expect(await transactionsOf(data)).toMatchObject([{ status: 'PROCESSED' }]);
+    for (const wallet of wallets) expect(await walletState(wallet.id)).toEqual({ balance_amount: '75.00', version: 6 });
+  }, 90_000);
+});
+
+describe('the metrics of the consumer', () => {
+  test('the retries and the DLQ sends by failureCode moved in /metrics', async () => {
+    expect(await retries('TRANSIENT_LOCK_TIMEOUT')).toBeGreaterThan(0);
+    expect(await retries('WALLET_NOT_FOUND')).toBeGreaterThan(0);
+    expect(await deadLettered('INFRA_RETRIES_EXHAUSTED')).toBeGreaterThan(0);
+    expect(await deadLettered('WALLET_NOT_FOUND')).toBeGreaterThan(0);
+    expect(await deadLettered('MESSAGE_ID_CONFLICT')).toBeGreaterThan(0);
+  });
+});
