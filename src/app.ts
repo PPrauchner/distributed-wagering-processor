@@ -15,6 +15,8 @@ import { HttpErrorFilter } from './http/http-error.filter.ts';
 import { logContextMiddleware } from './http/log-context.middleware.ts';
 import { MessagingModule } from './messaging/interface/messaging.module.ts';
 import { CONTEXT_LOG, type ContextLog } from './shared/application/context-log.ts';
+import { PROVIDER_IDENTITY, type ProviderIdentity } from './shared/application/provider-identity.ts';
+import { DeclaredProviderIdentity } from './shared/infrastructure/declared-provider-identity.ts';
 import {
   LogContextStore,
   PinoContextLog,
@@ -39,13 +41,32 @@ class LoggingModule {
   }
 }
 
+/** Global: offers the guard's `ProviderIdentity` by token; the no-op by default. */
+@Module({})
+class ProviderIdentityModule {
+  static forRoot(identity: ProviderIdentity): DynamicModule {
+    return {
+      module: ProviderIdentityModule,
+      global: true,
+      providers: [{ provide: PROVIDER_IDENTITY, useValue: identity }],
+      exports: [PROVIDER_IDENTITY],
+    };
+  }
+}
+
 @Module({})
 class AppModule {
-  static forConfig(config: AppConfig, contextLog: ContextLog, crash?: Crash): DynamicModule {
+  static forConfig(
+    config: AppConfig,
+    contextLog: ContextLog,
+    identity: ProviderIdentity,
+    crash?: Crash,
+  ): DynamicModule {
     return {
       module: AppModule,
       imports: [
         LoggingModule.forRoot(contextLog),
+        ProviderIdentityModule.forRoot(identity),
         DatabaseModule.forRoot(config),
         WalletModule,
         WageringModule.forRoot(config, crash),
@@ -65,17 +86,28 @@ export interface CreateAppOptions {
    * `SimulatedCrashError` keeps the test runner alive.
    */
   crash?: Crash;
+  /**
+   * Who the requests are authenticated as; by default, the no-op that trusts
+   * the provider the request declares. The tests swap in a fake one.
+   */
+  providerIdentity?: ProviderIdentity;
 }
 
 /**
  * @param config - Service configuration.
- * @param options - Where the logs go, and how a crash fault point dies.
+ * @param options - Where the logs go, how a crash fault point dies, and who
+ *   the requests are authenticated as.
  * @returns The application, initialized but not listening yet.
  */
 export async function createApp(config: AppConfig, options: CreateAppOptions = {}): Promise<INestApplication> {
   const logContext = new LogContextStore();
   const logger = createPinoLogger(logContext, options.logDestination);
-  const appModule = AppModule.forConfig(config, new PinoContextLog(logger, logContext), options.crash);
+  const appModule = AppModule.forConfig(
+    config,
+    new PinoContextLog(logger, logContext),
+    options.providerIdentity ?? new DeclaredProviderIdentity(),
+    options.crash,
+  );
   const app = await NestFactory.create(appModule, {
     logger: new PinoLoggerService(logger),
   });

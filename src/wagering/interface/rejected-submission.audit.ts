@@ -27,6 +27,7 @@ const NOT_ADMITTED = new Set<string>([
   FailureCode.WalletNotFound,
   FailureCode.IdempotencyConflict,
   FailureCode.ExternalIdConflict,
+  FailureCode.ProviderIdentityMismatch,
 ]);
 
 export class RejectedSubmissionAudit {
