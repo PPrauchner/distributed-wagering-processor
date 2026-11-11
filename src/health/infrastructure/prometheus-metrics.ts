@@ -2,7 +2,9 @@
  * The service's metrics over prom-client, in a registry of their own per
  * application — the tests run several in one process. Implements the metrics
  * ports of the other modules; the outbox gauges are read from the database on
- * each scrape (`ARCHITECTURE.md` § Observabilidade).
+ * each scrape, bounded in time: a read that fails or hangs keeps the gauges at
+ * their last value and is logged, so the rest of the registry is still scraped
+ * while the database is down (`ARCHITECTURE.md` § Observabilidade).
  *
  * @packageDocumentation
  */
@@ -16,6 +18,17 @@ import type { ReconciliationDivergenceCounter } from '../../wallet/application/r
 /** Latency buckets, in seconds: a submission takes milliseconds, up to the 2 s lock timeout. */
 const LATENCY_BUCKETS = [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2, 5];
 
+/** Where a failed backlog read is reported. */
+export interface MetricsLog {
+  warn(message: string): void;
+}
+
+export interface BacklogReadOptions {
+  /** How long a scrape waits for the backlog before keeping the last value. */
+  timeoutMs: number;
+  log: MetricsLog;
+}
+
 export class PrometheusMetrics implements WageringMetrics, ReconciliationDivergenceCounter {
   readonly registry = new Registry();
   private readonly transactions: Counter<'kind' | 'status' | 'channel'>;
@@ -25,11 +38,16 @@ export class PrometheusMetrics implements WageringMetrics, ReconciliationDiverge
   private readonly lockConflicts: Counter<'reason'>;
   private readonly latency: Histogram<'channel' | 'kind'>;
   private readonly divergences: Counter;
+  private lastBacklog: OutboxBacklog = { pending: 0, lagSeconds: 0 };
 
   /**
    * @param readBacklog - Reads the outbox backlog; called on each scrape.
+   * @param options - The read's time limit and where its failures are logged.
    */
-  constructor(readBacklog: () => Promise<OutboxBacklog>) {
+  constructor(
+    private readonly readBacklog: () => Promise<OutboxBacklog>,
+    private readonly options: BacklogReadOptions,
+  ) {
     const registers = [this.registry];
     this.transactions = new Counter({
       name: 'wager_transactions_total',
@@ -79,12 +97,13 @@ export class PrometheusMetrics implements WageringMetrics, ReconciliationDiverge
       registers,
     });
     // Each gauge reads its own value: the scrape gives no order between them.
+    const backlog = () => this.boundedBacklog();
     new Gauge({
       name: 'outbox_pending',
       help: 'Outbox messages not published yet.',
       registers,
       async collect() {
-        this.set((await readBacklog()).pending);
+        this.set((await backlog()).pending);
       },
     });
     new Gauge({
@@ -92,9 +111,29 @@ export class PrometheusMetrics implements WageringMetrics, ReconciliationDiverge
       help: 'Age of the oldest outbox message not published yet; 0 when there is none.',
       registers,
       async collect() {
-        this.set((await readBacklog()).lagSeconds);
+        this.set((await backlog()).lagSeconds);
       },
     });
+  }
+
+  /** The backlog read within the time limit, or the last one read when it fails. */
+  private async boundedBacklog(): Promise<OutboxBacklog> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(
+        () => reject(new Error(`timed out after ${this.options.timeoutMs} ms`)),
+        this.options.timeoutMs,
+      );
+    });
+    try {
+      this.lastBacklog = await Promise.race([this.readBacklog(), timeout]);
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      this.options.log.warn(`outbox backlog read failed, keeping the last value: ${reason}`);
+    } finally {
+      clearTimeout(timer);
+    }
+    return this.lastBacklog;
   }
 
   transactionSettled(observation: WagerTransactionObservation): void {

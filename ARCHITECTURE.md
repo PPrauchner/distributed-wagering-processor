@@ -598,7 +598,9 @@ Keycloak.
   - `lock_conflicts_total{reason}` — `lock_timeout`, `deadlock` ou
     `serialization_failure`, que o classificador distingue pelo SQLSTATE;
   - `outbox_pending` e `outbox_lag_seconds` (`now() − min(occurred_at)` das não
-    publicadas), lidos do banco a cada scrape;
+    publicadas), lidos do banco a cada scrape com limite de 1 s — se a leitura
+    falha ou estoura o prazo, os gauges ficam no último valor lido e a falha vai
+    para o log, e o resto do `/metrics` continua sendo coletado;
   - `wager_transaction_processing_seconds{channel,kind}` — histograma da latência
     das submissões que terminaram numa transação;
   - `reconciliation_divergences_total`.

@@ -7,7 +7,7 @@
  *
  * @packageDocumentation
  */
-import { Global, Inject, Module, type DynamicModule, type OnApplicationShutdown } from '@nestjs/common';
+import { Global, Inject, Logger, Module, type DynamicModule, type OnApplicationShutdown } from '@nestjs/common';
 import { SQSClient } from '@aws-sdk/client-sqs';
 import { MikroORM } from '@mikro-orm/postgresql';
 import type { AppConfig } from '../../config.ts';
@@ -23,7 +23,7 @@ import { HealthController } from './health.controller.ts';
 import { MetricsController } from './metrics.controller.ts';
 
 const PROBE_SQS_CLIENT = Symbol('ProbeSQSClient');
-/** Each probe's time limit (`ARCHITECTURE.md` § Observabilidade). */
+/** Each probe's time limit, and the outbox gauges' read limit (`ARCHITECTURE.md` § Observabilidade). */
 const PROBE_TIMEOUT_MS = 1000;
 
 @Global()
@@ -45,7 +45,10 @@ export class HealthModule implements OnApplicationShutdown {
           provide: PrometheusMetrics,
           inject: [UNIT_OF_WORK],
           useFactory: (unitOfWork: UnitOfWork<OutboxBacklogRepositories>) =>
-            new PrometheusMetrics(() => unitOfWork.run(({ outboxBacklog }) => outboxBacklog.read())),
+            new PrometheusMetrics(() => unitOfWork.run(({ outboxBacklog }) => outboxBacklog.read()), {
+              timeoutMs: PROBE_TIMEOUT_MS,
+              log: new Logger('Metrics'),
+            }),
         },
         { provide: WAGERING_METRICS, useExisting: PrometheusMetrics },
         { provide: RECONCILIATION_DIVERGENCE_COUNTER, useExisting: PrometheusMetrics },
