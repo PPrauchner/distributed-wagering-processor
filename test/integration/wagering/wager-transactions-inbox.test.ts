@@ -3,7 +3,9 @@
  * by the queue — against the real PostgreSQL: the inbox row is recorded in the
  * SQL transaction of the outcome; the same message again is a redelivery,
  * recognized by the inbox's primary key, with no effect; a submission first
- * recorded by HTTP and then received by the queue is a replay. Ends checking
+ * recorded by HTTP and then received by the queue is a replay; a `FAILED`
+ * outcome records no inbox row, so its message is never taken for a
+ * redelivery and acknowledged. Ends checking
  * the ledger invariant of every wallet it touched.
  *
  * @packageDocumentation
@@ -14,6 +16,7 @@ import { SQL } from 'bun';
 import { createApp } from '../../../src/app.ts';
 import { loadConfig } from '../../../src/config.ts';
 import { InboxRedeliveryError, type InboxEntry } from '../../../src/messaging/application/inbox-repository.ts';
+import { FaultPoint } from '../../../src/shared/application/fault-injector.ts';
 import {
   ProcessWagerTransaction,
   type SubmitWagerTransactionCommand,
@@ -140,5 +143,46 @@ describe('a submission received by the queue', () => {
     expect(replay.transaction.id).toBe(first.transaction.id);
     expect(await walletState(wallet.id)).toEqual(before);
     expect(await inboxRow(entry.messageId)).toBeDefined();
+  });
+});
+
+describe('a submission that ended FAILED', () => {
+  let faultyApp: INestApplication;
+  let faulty: ProcessWagerTransaction;
+
+  beforeAll(async () => {
+    faultyApp = await createApp({ ...loadConfig(), faultPoints: [FaultPoint.InvariantViolationBeforeCommit] });
+    await faultyApp.init();
+    faulty = faultyApp.get(ProcessWagerTransaction);
+  });
+
+  afterAll(async () => {
+    await faultyApp?.close();
+  });
+
+  test('received again and again, it keeps answering FAILED, never a redelivery, with no inbox row', async () => {
+    const wallet = await createWallet('100.00');
+    const command = betOn(wallet);
+    const entry = inboxEntry();
+
+    for (let delivery = 0; delivery < 3; delivery++) {
+      const outcome = await faulty.execute(command, SubmissionChannel.Queue, entry);
+      expect(outcome.transaction.status).toBe(WagerTransactionStatus.Failed);
+    }
+    expect(await inboxRow(entry.messageId)).toBeUndefined();
+  });
+
+  test('recorded first by HTTP, the queue keeps answering FAILED, with no inbox row', async () => {
+    const wallet = await createWallet('100.00');
+    const command = betOn(wallet);
+    const first = await faulty.execute(command, SubmissionChannel.Http);
+    expect(first.transaction.status).toBe(WagerTransactionStatus.Failed);
+    const entry = inboxEntry();
+
+    for (let delivery = 0; delivery < 2; delivery++) {
+      const outcome = await useCase.execute(command, SubmissionChannel.Queue, entry);
+      expect(outcome.transaction.id).toBe(first.transaction.id);
+    }
+    expect(await inboxRow(entry.messageId)).toBeUndefined();
   });
 });

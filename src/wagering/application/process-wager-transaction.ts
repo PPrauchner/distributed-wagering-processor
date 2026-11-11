@@ -112,7 +112,7 @@ export class ProcessWagerTransaction {
    * @param channel - Where it came from, for the metrics.
    * @param inbox - The queue message it came in, when it came by the queue:
    *   recorded in the inbox, in the SQL transaction of the outcome — a replay's
-   *   too.
+   *   too, unless the outcome is `FAILED`.
    * @returns The transaction it ended in — `PROCESSED`, `REJECTED`,
    *   `PENDING_REFERENCE` or, after a permanent error, `FAILED` — new or replayed;
    *   a replay of a pending one answers its current status.
@@ -192,26 +192,33 @@ export class ProcessWagerTransaction {
    * Steps 4 to 8 of the order, in one unit of work. The inbox row, when the
    * submission came by the queue, is written with whatever the unit of work
    * commits — a new outcome or nothing but the row, on a replay —, so a
-   * redelivery fails the commit on the inbox's primary key.
+   * redelivery fails the commit on the inbox's primary key. A `FAILED` replay
+   * records no row: its message stays a retry, never a redelivery.
    */
   private record(submitted: WagerTransaction, received?: InboxEntry): Promise<WagerTransactionOutcome> {
     return this.unitOfWork.run(async ({ wallets, ledger, transactions, outbox, inbox, faults }) => {
-      if (received) inbox.add(processedInboxMessage(received));
+      const recorded = (outcome: WagerTransactionOutcome): WagerTransactionOutcome => {
+        if (received && outcome.transaction.status !== WagerTransactionStatus.Failed) {
+          inbox.add(processedInboxMessage(received));
+        }
+        return outcome;
+      };
       const earlier = await findEarlier(transactions, submitted);
-      if (earlier) return earlier;
+      if (earlier) return recorded(earlier);
 
       const wallet = await wallets.findByIdForUpdate(submitted.walletId);
       if (!wallet) throw new SubmissionWalletNotFoundError(submitted.walletId, submitted.payloadHash);
       // A concurrent submission may have committed while this one waited for the lock.
       const committedMeanwhile = await findEarlier(transactions, submitted);
-      if (committedMeanwhile) return committedMeanwhile;
+      if (committedMeanwhile) return recorded(committedMeanwhile);
 
       const entry = await this.settle(submitted, wallet, transactions);
       transactions.add(submitted);
       if (entry) ledger.add(entry);
       this.enqueueEvents(outbox, submitted, wallet, entry);
+      const outcome = recorded({ transaction: submitted, idempotentReplay: false });
       await faults.inject(FaultPoint.InvariantViolationBeforeCommit, { transactionId: submitted.id });
-      return { transaction: submitted, idempotentReplay: false };
+      return outcome;
     });
   }
 
