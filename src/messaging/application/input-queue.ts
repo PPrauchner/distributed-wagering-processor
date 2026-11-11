@@ -13,6 +13,11 @@ export interface ReceivedMessage {
   body: string;
   /** The message attributes with a string value, by name. */
   attributes: Readonly<Record<string, string>>;
+  /**
+   * The broker's id of this queue message: the same on each redelivery of
+   * it, another when the same body is sent again — by a DLQ redrive, say.
+   */
+  deliveryId: string;
   /** What acknowledging this delivery takes; opaque to the consumer. */
   receipt: string;
   /** How many times the message was received, this delivery included: 1 on the first. */

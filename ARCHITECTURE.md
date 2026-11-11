@@ -317,7 +317,8 @@ comum às duas entradas.
 Toda submissão que **não vira transação de aposta** é gravada numa tabela própria,
 append-only e sem FK: payload inválido (HTTP ou fila), carteira inexistente,
 `OPENING` vindo de fora, conflito de idempotência, `EXTERNAL_ID_CONFLICT` e, na
-fila, `MESSAGE_ID_CONFLICT`. Colunas: `provider_id`, `idempotency_key`,
+fila, `MESSAGE_ID_CONFLICT` e as tentativas transitórias esgotadas
+(`INFRA_RETRIES_EXHAUSTED`). Colunas: `provider_id`, `idempotency_key`,
 `external_transaction_id`, `payload_hash`, código de falha, canal, `message_id`
 (quando houver), `correlation_id` e `received_at` — o que der para
 extrair, já que um payload inválido pode não ter chave. O insert roda numa unidade
@@ -407,7 +408,7 @@ Enum fechado em `shared/domain`.
 | `WALLET_NOT_FOUND` | não admitida (422; fila: retry, depois DLQ) | cria a carteira e reenvia |
 | `MESSAGE_ID_CONFLICT` | não admitida (fila → DLQ) | não reusa `messageId` com outro conteúdo |
 | `NOT_FOUND` | consulta (404) | — |
-| `INFRA_RETRIES_EXHAUSTED` | falha (500) | reenvia com chave nova depois de normalizado |
+| `INFRA_RETRIES_EXHAUSTED` | sem desfecho (fila → DLQ) | reenvia **com a mesma chave** depois de normalizado (redrive da DLQ ou HTTP) |
 | `INFRA_INVARIANT_VIOLATION` | falha (500, alerta) | bug nosso; reenvia com chave nova depois da correção |
 | `INFRA_UNEXPECTED` | falha (500) | idem |
 | `TRANSIENT_LOCK_TIMEOUT` | transitório (503) | reenvia com a mesma chave após `Retry-After` |
@@ -459,12 +460,16 @@ unidade de trabalho relê a chave antes de gravar: se um concorrente já a gravo
 se ela cai no `23505` da chave, responde como replay ou conflito; se falha de forma
 transitória, 503 sem gravar nada. Na fila, a
 mensagem é enviada explicitamente à DLQ e apagada da fila principal (se a remoção
-falhar, a redelivery é reconhecida pelo inbox).
+falhar, a redelivery é reconhecida pelo inbox). Só o erro permanente grava `FAILED`:
+a falha transitória nunca vira `FAILED`, nem esgotada.
 
 - **Transitório na fila:** sem `ack`; backoff por `ChangeMessageVisibility`
-  (`min(2^receiveCount s, 60 s)`). Esgotados **5 recebimentos** com o banco de pé,
-  vira permanente (`INFRA_RETRIES_EXHAUSTED`). O `maxReceiveCount` do redrive é
-  **6**: rede de segurança para o banco fora do ar.
+  (`min(2^receiveCount s, 60 s)`). Esgotados **5 recebimentos**, a mensagem termina
+  **sem desfecho**: vai à DLQ com `failureCode` `INFRA_RETRIES_EXHAUSTED`, com linha
+  em `rejected_submissions` e sem transação de aposta nem inbox — o mesmo caminho da
+  carteira inexistente. A chave fica livre: reprocessar a mensagem da DLQ, ou
+  reenviá-la por HTTP com a mesma chave, aplica a transação normalmente. O
+  `maxReceiveCount` do redrive é **6**: rede de segurança para o banco fora do ar.
 - **Payload inválido na fila:** direto à DLQ, sem gravar transação — não há chave
   nem hash confiáveis —, com log, métrica e uma linha de
   [submissão não admitida](#submissões-não-admitidas).
@@ -495,25 +500,31 @@ falhar, a redelivery é reconhecida pelo inbox).
 - **Desfecho de cada mensagem:** `PROCESSED`, `REJECTED` ou `PENDING_REFERENCE` →
   `ack`. Transitório (`TRANSIENT_LOCK_TIMEOUT`, `TRANSIENT_UNAVAILABLE`) e
   `WALLET_NOT_FOUND` → sem `ack`, `ChangeMessageVisibility` de
-  `min(2^ApproximateReceiveCount s, 60 s)`. No 5º recebimento, o transitório vira
-  `FAILED` `INFRA_RETRIES_EXHAUSTED` (`giveUp` do use case, segunda unidade de
-  trabalho, com inbox) e vai à DLQ; a carteira ainda inexistente vai à DLQ como
-  submissão não admitida, sem `FAILED` (a FK impede). Se nem a desistência grava
-  (banco fora), a mensagem fica para o redrive (`maxReceiveCount` 6) e chega à DLQ
-  sem desfecho — limitação aceita. `FAILED` (erro permanente, ou o replay de um)
+  `min(2^ApproximateReceiveCount s, 60 s)`. No 5º recebimento, os dois terminam sem
+  desfecho, como submissão não admitida: DLQ com `INFRA_RETRIES_EXHAUSTED` ou
+  `WALLET_NOT_FOUND`, linha em `rejected_submissions` (canal fila, `payload_hash`
+  da mensagem), `ack` — sem transação de aposta nem inbox, então a chave fica livre
+  para o redrive da DLQ ou um reenvio por HTTP. Se o envio à DLQ ou a gravação da
+  recusa falhar (banco fora), a mensagem fica para o redrive nativo
+  (`maxReceiveCount` 6) e chega à DLQ sem o atributo `failureCode` e sem linha de
+  auditoria — limitação aceita. `FAILED` (erro permanente, ou o replay de um)
   → DLQ com o código do classificador. Submissão não admitida → DLQ direto.
 - **Envio à DLQ:** feito pela aplicação (`SendMessage` em
   `wager-transactions-dlq.fifo`, porta `DeadLetterQueue`), com o corpo e os
   atributos originais mais o atributo `failureCode`; `MessageGroupId` = `walletId`
-  (ou `unroutable`), `MessageDeduplicationId` = `messageId` do envelope (ou o
-  SHA-256 do corpo, quando nem ele se extrai). Valor extraído que o SQS não aceita
-  como id (mais de 128 caracteres, ou fora de ASCII alfanumérico e pontuação) conta
-  como ausente. Dos atributos originais vão até 9, `correlationId` primeiro: o SQS
+  (ou `unroutable`), `MessageDeduplicationId` = `MessageId` do SQS da mensagem
+  recebida — não o `messageId` do envelope: a reentrega da mesma mensagem tem o
+  mesmo id e é absorvida, mas o mesmo corpo reenviado à fila (o redrive da DLQ) é
+  outra mensagem, e se esgotar de novo dentro da janela de 5 min do FIFO precisa
+  chegar à DLQ de novo, em vez de ser descartado pela deduplicação. `walletId`
+  extraído que o SQS não aceita como id (mais de 128 caracteres, ou fora de ASCII
+  alfanumérico e pontuação) conta como ausente. Dos atributos originais vão até 9, `correlationId` primeiro: o SQS
   aceita 10 por mensagem, contando o `failureCode`. Ordem: DLQ, linha em
   `rejected_submissions` (só nas não admitidas, com canal fila, `message_id` e
   `correlation_id`), `ack`. Se qualquer passo falha, a mensagem fica e é
   decidida de novo na reentrega — pelo inbox, quando já há desfecho; o
-  `MessageDeduplicationId` absorve o reenvio à DLQ dentro de 5 min.
+  `MessageDeduplicationId` absorve o reenvio à DLQ da mesma mensagem dentro de
+  5 min.
 - O contexto de log de cada mensagem abre com o `messageId` do envelope e o
   `correlationId` (atributo da mensagem, ou o `messageId`).
 - **Configuração por ambiente:** `WAGER_TRANSACTIONS_CONSUMER_ENABLED` (padrão
@@ -742,11 +753,16 @@ Keycloak.
   `lock_timeout` (`55P03`); ele é reconhecido pelo código.
 - A vazão de uma única carteira é limitada pela duração da transação, por causa do
   lock pessimista.
-- Com o PostgreSQL fora até o fim das tentativas, o redrive do SQS leva a mensagem
-  à DLQ sem desfecho gravado: a transação de aposta não existe. Reprocessar a DLQ é
-  seguro pela idempotência.
+- Esgotadas as tentativas transitórias na fila, a mensagem vai à DLQ sem desfecho
+  (`INFRA_RETRIES_EXHAUSTED`): a transação de aposta não existe, e reprocessar a DLQ
+  — ou reenviar por HTTP com a mesma chave — aplica a transação. Se, no último
+  recebimento, o envio à DLQ ou a gravação da recusa também falhar (PostgreSQL ou
+  SQS fora), o redrive nativo do SQS leva a mensagem à DLQ sem o atributo
+  `failureCode` e sem linha em `rejected_submissions`; reprocessá-la continua seguro
+  pela idempotência.
 - `FAILED` é terminal para a chave de idempotência, inclusive quando a causa foi um
-  bug: corrigido o bug, o provedor reenvia com uma chave nova.
+  bug: corrigido o bug, o provedor reenvia com uma chave nova. Só erro permanente
+  grava `FAILED`; a falha transitória esgotada não.
 - Eventos de uma mesma carteira podem ser publicados fora de ordem por publicadores
   concorrentes; o consumidor ordena por `walletVersion`/`occurredAt`.
 - Eventos são publicados pelo menos uma vez; duplicatas carregam o mesmo `eventId`.

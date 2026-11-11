@@ -2,7 +2,8 @@
  * The consumer of `wager-transactions.fifo` on its failure path and at
  * shutdown, end to end against the real PostgreSQL and the real LocalStack: a
  * transient failure comes back with its backoff and is processed later; five
- * receives of it end `FAILED` `INFRA_RETRIES_EXHAUSTED` in the DLQ; a
+ * receives of it end with no outcome in the DLQ, as `INFRA_RETRIES_EXHAUSTED`,
+ * and the key stays free for the DLQ redrive or an HTTP resend; a
  * permanent error ends `FAILED` in the DLQ, and its redelivery has no effect;
  * submissions not admitted go to the DLQ with their `failureCode` and a
  * `rejected_submissions` row — a `BET` sent before its wallet exists only once
@@ -332,6 +333,27 @@ async function holdWalletLock(walletId: string, release: Promise<void>): Promise
   return { released: released.then(() => undefined) };
 }
 
+async function ledgerEntriesOf(transactionId: string): Promise<number> {
+  const [row] = await sql`select count(*)::int as entries from wallet_ledger_entries where transaction_id = ${transactionId}`;
+  return row.entries;
+}
+
+/**
+ * Sends the message with its wallet locked until its five receives run out,
+ * then frees the wallet once it is in the DLQ and gone from the input queue.
+ */
+async function exhaustRetries(data: JsonObject): Promise<{ messageId: string; letter: DeadLetter }> {
+  let release!: () => void;
+  const lock = await holdWalletLock(data.walletId as string, new Promise((resolve) => (release = resolve)));
+  const messageId = await send(main.url, data);
+  const letter = await deadLetter(main.dlqUrl, withMessageId(messageId));
+  // The rejected row is recorded after the DLQ send, before the ack.
+  await waitFor(() => drained(main.url));
+  release();
+  await lock.released;
+  return { messageId, letter };
+}
+
 describe('a transient failure', () => {
   test('the wallet locked past 2 s: the message comes back with its backoff and is processed later, once', async () => {
     const wallet = await createWallet('100.00');
@@ -353,22 +375,55 @@ describe('a transient failure', () => {
     expect(await walletState(wallet.id)).toEqual({ balance_amount: '75.00', version: 2 });
   }, 60_000);
 
-  test('five receives of it: FAILED INFRA_RETRIES_EXHAUSTED with its inbox row, in the DLQ, gone from the input queue', async () => {
+  test('five receives of it: no outcome — the DLQ with INFRA_RETRIES_EXHAUSTED, a rejected row, no transaction, no inbox row', async () => {
     const wallet = await createWallet('100.00');
     const data = betData(wallet);
-    let release!: () => void;
-    const lock = await holdWalletLock(wallet.id, new Promise((resolve) => (release = resolve)));
 
-    const messageId = await send(main.url, data);
-    const letter = await deadLetter(main.dlqUrl, withMessageId(messageId));
-    release();
-    await lock.released;
+    const { messageId, letter } = await exhaustRetries(data);
 
     expect(letter.failureCode).toBe('INFRA_RETRIES_EXHAUSTED');
-    expect(await transactionsOf(data)).toMatchObject([{ status: 'FAILED', failure_code: 'INFRA_RETRIES_EXHAUSTED' }]);
-    expect(await inboxRow(messageId)).toBeDefined();
-    await waitFor(() => drained(main.url));
+    expect(await rejectedRows(messageId)).toEqual([{ failure_code: 'INFRA_RETRIES_EXHAUSTED', channel: 'QUEUE' }]);
+    expect(await transactionsOf(data)).toEqual([]);
+    expect(await inboxRow(messageId)).toBeUndefined();
     expect(await walletState(wallet.id)).toEqual({ balance_amount: '100.00', version: 1 });
+  }, 90_000);
+
+  test('once the wallet is free, the message from the DLQ sent again is PROCESSED, with exactly one ledger entry', async () => {
+    const wallet = await createWallet('100.00');
+    const data = betData(wallet);
+    const { messageId } = await exhaustRetries(data);
+
+    // The same messageId and body; a new deduplication id, past the FIFO window.
+    await send(main.url, data, { messageId });
+    const transaction = await oneTransactionOf(data);
+    await waitFor(() => drained(main.url));
+
+    expect(transaction.status).toBe('PROCESSED');
+    expect(await transactionsOf(data)).toHaveLength(1);
+    expect(await ledgerEntriesOf(transaction.id)).toBe(1);
+    expect(await inboxRow(messageId)).toBeDefined();
+    expect(await walletState(wallet.id)).toEqual({ balance_amount: '75.00', version: 2 });
+    await expectLedgerConsistent(sql, [wallet.id]);
+  }, 90_000);
+
+  test('once the wallet is free, the same key and payload by HTTP are applied, not a 500 replay', async () => {
+    const wallet = await createWallet('100.00');
+    const data = betData(wallet);
+    await exhaustRetries(data);
+
+    const { idempotencyKey, ...body } = data;
+    const response = await fetch(`${baseUrl}/wagering/transactions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'idempotency-key': idempotencyKey as string },
+      body: JSON.stringify(body),
+    });
+
+    expect(response.status).toBe(200);
+    const [transaction] = await transactionsOf(data);
+    expect(transaction).toMatchObject({ status: 'PROCESSED' });
+    expect(await ledgerEntriesOf(transaction!.id)).toBe(1);
+    expect(await walletState(wallet.id)).toEqual({ balance_amount: '75.00', version: 2 });
+    await expectLedgerConsistent(sql, [wallet.id]);
   }, 90_000);
 });
 

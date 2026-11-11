@@ -4,7 +4,7 @@
  * SQL transaction of the outcome; the same message again is a redelivery,
  * recognized by the inbox's primary key, with no effect; a submission first
  * recorded by HTTP and then received by the queue is a replay; a `FAILED`
- * outcome — a permanent error or retries given up on — records its inbox row
+ * outcome — a permanent error — records its inbox row
  * in the second unit of work, so a redelivery of its message, once it went to
  * the DLQ, has no effect. Ends checking the ledger invariant of every wallet
  * it touched.
@@ -18,7 +18,6 @@ import { createApp } from '../../../src/app.ts';
 import { loadConfig } from '../../../src/config.ts';
 import { InboxRedeliveryError, MessageIdConflictError, type InboxEntry } from '../../../src/messaging/application/inbox-repository.ts';
 import { FaultPoint } from '../../../src/shared/application/fault-injector.ts';
-import { FailureCode } from '../../../src/shared/domain/failure-code.ts';
 import {
   ProcessWagerTransaction,
   type SubmitWagerTransactionCommand,
@@ -206,34 +205,5 @@ describe('a submission that ended FAILED', () => {
 
     expect(replay).toMatchObject({ idempotentReplay: true, transaction: { id: first.transaction.id } });
     expect(await inboxRow(entry.messageId)).toBeDefined();
-  });
-});
-
-describe('a submission whose retries were given up on', () => {
-  test('is recorded FAILED INFRA_RETRIES_EXHAUSTED, with its inbox row and no effect on the wallet', async () => {
-    const wallet = await createWallet('100.00');
-    const before = await walletState(wallet.id);
-    const command = betOn(wallet);
-    const entry = inboxEntry();
-
-    const outcome = await useCase.giveUp(command, entry);
-
-    expect(outcome.transaction.status).toBe(WagerTransactionStatus.Failed);
-    expect(outcome.transaction.failureCode).toBe(FailureCode.InfraRetriesExhausted);
-    expect(await inboxRow(entry.messageId)).toEqual({ payload_hash: entry.payloadHash, processed: true });
-    expect(await walletState(wallet.id)).toEqual(before);
-  });
-
-  test('already settled meanwhile, it answers that outcome as a replay', async () => {
-    const wallet = await createWallet('100.00');
-    const command = betOn(wallet);
-    const settled = await useCase.execute(command, SubmissionChannel.Http);
-
-    const outcome = await useCase.giveUp(command, inboxEntry());
-
-    expect(outcome).toMatchObject({
-      idempotentReplay: true,
-      transaction: { id: settled.transaction.id, status: WagerTransactionStatus.Processed },
-    });
   });
 });

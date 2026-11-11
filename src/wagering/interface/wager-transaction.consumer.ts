@@ -9,9 +9,9 @@
  *   redelivery the inbox already holds: `ack`, after the commit — a redelivery
  *   of a `FAILED` goes to the DLQ again first;
  * - a transient failure, or a wallet not there yet: no `ack`, the delivery
- *   comes back after `min(2^receiveCount s, ceiling)`; on the last receive, the
- *   use case gives up — `FAILED` `INFRA_RETRIES_EXHAUSTED` — or, for the
- *   wallet, the message is not admitted;
+ *   comes back after `min(2^receiveCount s, ceiling)`; on the last receive, it
+ *   ends with no outcome, as a submission not admitted — `INFRA_RETRIES_EXHAUSTED`,
+ *   or `WALLET_NOT_FOUND` for the wallet —, and its key stays free;
  * - `FAILED`: sent to the DLQ with its code, then `ack`;
  * - a submission not admitted: sent to the DLQ with its code and recorded in
  *   `rejected_submissions`, then `ack`.
@@ -27,7 +27,6 @@
  *
  * @packageDocumentation
  */
-import { createHash } from 'node:crypto';
 import { Logger, type BeforeApplicationShutdown, type OnApplicationBootstrap } from '@nestjs/common';
 import type { ConsumerMetrics } from '../../messaging/application/consumer-metrics.ts';
 import type { DeadLetterQueue } from '../../messaging/application/dead-letter-queue.ts';
@@ -39,11 +38,7 @@ import { PermanentFailureError, TransientFailureError } from '../../shared/appli
 import { FailureCode } from '../../shared/domain/failure-code.ts';
 import { CurrencyMismatchError, InvalidMoneyError } from '../../shared/domain/money.ts';
 import { InvalidPayloadError } from '../../shared/interface/invalid-payload.error.ts';
-import type {
-  ProcessWagerTransaction,
-  SubmitWagerTransactionCommand,
-  WagerTransactionOutcome,
-} from '../application/process-wager-transaction.ts';
+import type { ProcessWagerTransaction, WagerTransactionOutcome } from '../application/process-wager-transaction.ts';
 import type { RecordRejectedSubmission } from '../application/record-rejected-submission.ts';
 import {
   ExternalIdConflictError,
@@ -66,7 +61,7 @@ const RECEIVE_RETRY_MS = 1000;
 /** The DLQ group of a message that names no wallet. */
 const UNROUTABLE_GROUP = 'unroutable';
 
-/** What SQS takes as a group or deduplication id: 1 to 128 ASCII letters, digits and punctuation. */
+/** What SQS takes as a group id: 1 to 128 ASCII letters, digits and punctuation. */
 const SQS_ID = /^[!-~]{1,128}$/;
 
 export interface WagerTransactionConsumerDependencies {
@@ -184,13 +179,9 @@ export class WagerTransactionConsumer implements OnApplicationBootstrap, BeforeA
       if (error instanceof SubmissionWalletNotFoundError) {
         return this.notAdmitted(message, facts, FailureCode.WalletNotFound, error.payloadHash);
       }
-      try {
-        outcome = await this.giveUp(command, inbox, error);
-      } catch (giveUpError) {
-        // Still transient: left for the redrive. Anything else — a redelivery, a conflict — settles as refused.
-        if (isRetryable(giveUpError)) throw giveUpError;
-        return this.refused(message, facts, giveUpError);
-      }
+      // Out of receives: no outcome, the key stays free for the DLQ redrive or a resend.
+      this.deps.log.warn('queue message out of receives', { failureCode: retryCodeOf(error) });
+      return this.notAdmitted(message, facts, FailureCode.InfraRetriesExhausted, payloadHash);
     }
     await this.settled(message, facts, outcome);
   }
@@ -206,19 +197,9 @@ export class WagerTransactionConsumer implements OnApplicationBootstrap, BeforeA
     await this.deps.queue.acknowledge(message);
   }
 
-  /** Records the submission `FAILED` `INFRA_RETRIES_EXHAUSTED`; if that fails too, the message waits for the redrive. */
-  private async giveUp(
-    command: SubmitWagerTransactionCommand,
-    inbox: { consumerName: string; messageId: string; payloadHash: string },
-    lastError: unknown,
-  ): Promise<WagerTransactionOutcome> {
-    this.deps.log.warn('queue message out of receives, giving up', { failureCode: retryCodeOf(lastError) });
-    return this.deps.processWagerTransaction.giveUp(command, inbox);
-  }
-
   /** The use case refused the message without an outcome. */
   private async refused(message: ReceivedMessage, facts: MessageFacts, error: unknown): Promise<void> {
-    // Its first send to the DLQ may be what failed; the deduplication id absorbs a second one.
+    // Its first send to the DLQ may be what failed; the deduplication id absorbs a second one of the same delivery.
     if (error instanceof FailedRedeliveryError) {
       this.deps.metrics.inboxDuplicate();
       await this.deadLetter(message, facts, error.failureCode);
@@ -277,7 +258,8 @@ export class WagerTransactionConsumer implements OnApplicationBootstrap, BeforeA
       attributes: message.attributes,
       failureCode,
       groupId: sqsIdOrUndefined(facts.walletId) ?? UNROUTABLE_GROUP,
-      deduplicationId: sqsIdOrUndefined(facts.messageId) ?? createHash('sha256').update(message.body).digest('hex'),
+      // The delivery, not the envelope: a message out of receives again after a redrive must reach the DLQ again.
+      deduplicationId: message.deliveryId,
     });
     this.deps.metrics.deadLettered(failureCode);
     this.deps.log.warn('queue message sent to the DLQ', { failureCode });
@@ -346,7 +328,7 @@ function factsOf(message: ReceivedMessage): MessageFacts {
   };
 }
 
-/** The value, if SQS takes it as a group or deduplication id: one from an untrusted body may not be. */
+/** The value, if SQS takes it as a group id: one from an untrusted body may not be. */
 function sqsIdOrUndefined(value: string | undefined): string | undefined {
   return value !== undefined && SQS_ID.test(value) ? value : undefined;
 }

@@ -16,7 +16,10 @@ export interface DeadLetter {
   failureCode: string;
   /** Orders the DLQ: the wallet, when the body names one. */
   groupId: string;
-  /** Deduplicates resends of the same message: its envelope's `messageId`, when there is one. */
+  /**
+   * Deduplicates resends of the same delivery — its queue message's id —,
+   * never a new delivery of the same body, as a DLQ redrive is.
+   */
   deduplicationId: string;
 }
 
