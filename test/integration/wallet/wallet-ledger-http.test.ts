@@ -11,8 +11,10 @@ import type { INestApplication } from '@nestjs/common';
 import { SQL } from 'bun';
 import { createApp } from '../../../src/app.ts';
 import { loadConfig } from '../../../src/config.ts';
-import type { InMemoryReconciliationDivergenceCounter } from '../../../src/wallet/application/reconciliation.ts';
-import { RECONCILIATION_DIVERGENCE_COUNTER } from '../../../src/wallet/interface/wallet.module.ts';
+import {
+  RECONCILIATION_DIVERGENCE_COUNTER,
+  type InMemoryReconciliationDivergenceCounter,
+} from '../../../src/wallet/application/reconciliation.ts';
 import { expectLedgerConsistent } from '../ledger-invariant.ts';
 
 let app: INestApplication;

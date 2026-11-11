@@ -25,7 +25,10 @@ export interface ReconciliationReport {
   versionGaps: VersionGap[];
 }
 
-/** Counts divergences; the observability slice exposes it as a metric. */
+/** Injection token of the divergence counter. */
+export const RECONCILIATION_DIVERGENCE_COUNTER = Symbol('ReconciliationDivergenceCounter');
+
+/** Counts divergences; exposed as the `reconciliation_divergences_total` metric. */
 export interface ReconciliationDivergenceCounter {
   increment(): void;
 }

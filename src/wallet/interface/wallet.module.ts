@@ -13,18 +13,13 @@ import { GetLedgerPage } from '../application/get-ledger-page.ts';
 import { GetWallet } from '../application/get-wallet.ts';
 import {
   InMemoryReconciliationDivergenceCounter,
+  RECONCILIATION_DIVERGENCE_COUNTER,
   Reconciliation,
   type ReconciliationDivergenceCounter,
 } from '../application/reconciliation.ts';
 import type { WageringRepositories } from '../../wagering/application/wager-transaction-repository.ts';
 import type { WalletRepositories } from '../application/wallet-repository.ts';
 import { WalletController } from './wallet.controller.ts';
-
-/**
- * Injection token of the reconciliation divergence counter: in memory until the
- * observability slice binds it to a metric.
- */
-export const RECONCILIATION_DIVERGENCE_COUNTER = Symbol('ReconciliationDivergenceCounter');
 
 @Module({
   controllers: [WalletController],
