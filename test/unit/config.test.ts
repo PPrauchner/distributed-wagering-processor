@@ -144,3 +144,50 @@ describe('the wager transactions consumer', () => {
     expect(() => loadConfig({ [name]: value })).toThrow(new RegExp(name));
   });
 });
+
+describe('the pending references worker', () => {
+  test('defaults: enabled, 5 min TTL, polling every 1 s, 30 s lease, backoff from 1 s up to 60 s', () => {
+    expect(loadConfig({}).pendingReferences).toEqual({
+      enabled: true,
+      ttlMs: 300_000,
+      pollIntervalMs: 1000,
+      leaseMs: 30_000,
+      retryBaseMs: 1000,
+      retryMaxMs: 60_000,
+    });
+  });
+
+  test('every setting comes from the environment', () => {
+    const config = loadConfig({
+      PENDING_REFERENCES_WORKER_ENABLED: 'false',
+      PENDING_REFERENCE_TTL_MS: '2000',
+      PENDING_REFERENCES_POLL_INTERVAL_MS: '50',
+      PENDING_REFERENCES_LEASE_MS: '1000',
+      PENDING_REFERENCES_RETRY_BASE_MS: '10',
+      PENDING_REFERENCES_RETRY_MAX_MS: '100',
+    });
+
+    expect(config.pendingReferences).toEqual({
+      enabled: false,
+      ttlMs: 2000,
+      pollIntervalMs: 50,
+      leaseMs: 1000,
+      retryBaseMs: 10,
+      retryMaxMs: 100,
+    });
+  });
+
+  test.each([
+    'PENDING_REFERENCE_TTL_MS',
+    'PENDING_REFERENCES_POLL_INTERVAL_MS',
+    'PENDING_REFERENCES_LEASE_MS',
+    'PENDING_REFERENCES_RETRY_BASE_MS',
+    'PENDING_REFERENCES_RETRY_MAX_MS',
+  ])('%s must be a positive integer', (name) => {
+    expect(() => loadConfig({ [name]: '0' })).toThrow(name);
+  });
+
+  test('PENDING_REFERENCES_WORKER_ENABLED takes only true or false', () => {
+    expect(() => loadConfig({ PENDING_REFERENCES_WORKER_ENABLED: 'maybe' })).toThrow(/PENDING_REFERENCES_WORKER_ENABLED/);
+  });
+});
