@@ -512,15 +512,19 @@ a falha transitória nunca vira `FAILED`, nem esgotada.
 - **Envio à DLQ:** feito pela aplicação (`SendMessage` em
   `wager-transactions-dlq.fifo`, porta `DeadLetterQueue`), com o corpo e os
   atributos originais mais o atributo `failureCode`; `MessageGroupId` = `walletId`
-  (ou `unroutable`), `MessageDeduplicationId` = `messageId` do envelope (ou o
-  SHA-256 do corpo, quando nem ele se extrai). Valor extraído que o SQS não aceita
-  como id (mais de 128 caracteres, ou fora de ASCII alfanumérico e pontuação) conta
-  como ausente. Dos atributos originais vão até 9, `correlationId` primeiro: o SQS
+  (ou `unroutable`), `MessageDeduplicationId` = `MessageId` do SQS da mensagem
+  recebida — não o `messageId` do envelope: a reentrega da mesma mensagem tem o
+  mesmo id e é absorvida, mas o mesmo corpo reenviado à fila (o redrive da DLQ) é
+  outra mensagem, e se esgotar de novo dentro da janela de 5 min do FIFO precisa
+  chegar à DLQ de novo, em vez de ser descartado pela deduplicação. `walletId`
+  extraído que o SQS não aceita como id (mais de 128 caracteres, ou fora de ASCII
+  alfanumérico e pontuação) conta como ausente. Dos atributos originais vão até 9, `correlationId` primeiro: o SQS
   aceita 10 por mensagem, contando o `failureCode`. Ordem: DLQ, linha em
   `rejected_submissions` (só nas não admitidas, com canal fila, `message_id` e
   `correlation_id`), `ack`. Se qualquer passo falha, a mensagem fica e é
   decidida de novo na reentrega — pelo inbox, quando já há desfecho; o
-  `MessageDeduplicationId` absorve o reenvio à DLQ dentro de 5 min.
+  `MessageDeduplicationId` absorve o reenvio à DLQ da mesma mensagem dentro de
+  5 min.
 - O contexto de log de cada mensagem abre com o `messageId` do envelope e o
   `correlationId` (atributo da mensagem, ou o `messageId`).
 - **Configuração por ambiente:** `WAGER_TRANSACTIONS_CONSUMER_ENABLED` (padrão
