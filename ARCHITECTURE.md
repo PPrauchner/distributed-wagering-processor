@@ -176,7 +176,11 @@ Unicidade da reversão: índice único parcial em `reference_transaction_id` com
 - **Criação idempotente, com header opcional:** o `POST /wallets` aceita
   `Idempotency-Key`. Mesma chave e mesmo hash (`playerId` e `initialBalance`, pela
   mesma função canônica) → replay da resposta original (201, saldo inicial, `version`
-  1, `idempotentReplay: true`); hash diferente → 409 `IDEMPOTENCY_CONFLICT`. Sem o
+  1, `idempotentReplay: true`), mesmo que a carteira já tenha movimentado; hash
+  diferente → 409 `IDEMPOTENCY_CONFLICT`, avaliado antes da existência da carteira.
+  Header presente e vazio → 400 `MISSING_IDEMPOTENCY_KEY`, como na submissão. Na
+  corrida de duas criações com a mesma chave, qualquer violação de unicidade relê
+  pela chave e compara o hash: uma resposta cria e as outras são replay. Sem o
   header, vale o contrato do §9 sem mudança — obrigatório, um cliente que segue o
   enunciado receberia 400. Em qualquer caso, carteira já existente para jogador e
   moeda → 409 `WALLET_ALREADY_EXISTS` **com o `walletId`**, para que o provedor que
@@ -439,9 +443,6 @@ legítimo; se o lock a serializa, o domínio teria visto antes, e é bug.
 | lançamento `(transaction_id, wallet_id)` — `wallet_ledger_entries_transaction_wallet_unique` | bug → permanente (`FAILED`, alerta) |
 | lançamento `(wallet_id, wallet_version)` — `wallet_ledger_entries_wallet_version_unique` | bug → permanente (`FAILED`, alerta) |
 | outra | permanente (`FAILED`, `INFRA_UNEXPECTED`) |
-
-A linha da chave da criação já está no classificador, embora a constraint ainda
-não exista: o nome é o contrato que a fatia que a cria segue.
 
 Estouro numérico (`22003`) também é permanente (`INFRA_INVARIANT_VIOLATION`,
 alerta): com o teto de entrada, só um saldo acumulado além de `numeric(19,2)` o
