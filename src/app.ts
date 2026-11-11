@@ -47,7 +47,7 @@ class AppModule {
         LoggingModule.forRoot(contextLog),
         DatabaseModule.forRoot(config),
         WalletModule,
-        WageringModule,
+        WageringModule.forRoot(config),
         MessagingModule.forRoot(config),
         HealthModule.forRoot(config),
       ],
