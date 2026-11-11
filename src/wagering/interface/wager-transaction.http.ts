@@ -1,6 +1,7 @@
 /**
- * HTTP contract of `POST /wagering/transactions`: request parsing and the
- * outcome response. Parsing checks the key first and then the body's shape
+ * HTTP contract of the wager transactions: the `POST` request parsing and its
+ * outcome response, and the view a query answers with — the same outcome plus
+ * the transaction's identity. Parsing checks the key first and then the body's shape
  * only; money, kind and identifier rules belong to the use case and the domain.
  *
  * @packageDocumentation
@@ -13,16 +14,39 @@ import type {
   WagerTransactionOutcome,
 } from '../application/process-wager-transaction.ts';
 import { MissingIdempotencyKeyError } from '../application/wagering-errors.ts';
-import { WagerTransactionStatus } from '../domain/wager-transaction.ts';
+import {
+  WagerTransactionStatus,
+  type WagerTransaction,
+  type WagerTransactionKind,
+} from '../domain/wager-transaction.ts';
 
-export interface WagerTransactionResponse {
+/** The outcome of a transaction, as both the submission and the query answer it. */
+interface WagerTransactionOutcomeBody {
   transactionId: string;
   status: WagerTransactionStatus;
   failureCode?: string;
   /** What the code alone does not say — the divergent field of a `REFERENCE_MISMATCH`. */
   message?: string;
   balance?: MoneyProps;
+}
+
+export interface WagerTransactionResponse extends WagerTransactionOutcomeBody {
   idempotentReplay: boolean;
+}
+
+/** A queried transaction: its outcome and its identity. */
+export interface WagerTransactionView extends Omit<WagerTransactionOutcomeBody, 'balance'> {
+  /** The balance the outcome observed; `null` when it observed none. */
+  balance: MoneyProps | null;
+  providerId: string;
+  externalTransactionId: string;
+  playerId: string;
+  walletId: string;
+  roundId: string;
+  gameId: string;
+  kind: WagerTransactionKind;
+  money: MoneyProps;
+  referenceExternalTransactionId?: string;
 }
 
 const FIELDS = [
@@ -94,15 +118,36 @@ export function toWagerTransactionResponse(outcome: WagerTransactionOutcome): {
   const { transaction, idempotentReplay } = outcome;
   const statusCode = STATUS_CODES[transaction.status];
   if (statusCode === undefined) throw new Error(`no HTTP outcome for status ${transaction.status}`);
+  return { statusCode, body: { ...toOutcomeBody(transaction), idempotentReplay } };
+}
+
+/**
+ * @param transaction - The queried transaction, in any status.
+ * @returns Its outcome — the balance it observed, not the wallet's current
+ *   one — and its identity.
+ */
+export function toWagerTransactionView(transaction: WagerTransaction): WagerTransactionView {
   return {
-    statusCode,
-    body: {
-      transactionId: transaction.id,
-      status: transaction.status,
-      failureCode: transaction.failureCode,
-      message: transaction.failureMessage,
-      balance: transaction.balanceAfter?.toJSON(),
-      idempotentReplay,
-    },
+    ...toOutcomeBody(transaction),
+    balance: transaction.balanceAfter?.toJSON() ?? null,
+    providerId: transaction.providerId,
+    externalTransactionId: transaction.externalTransactionId,
+    playerId: transaction.playerId,
+    walletId: transaction.walletId,
+    roundId: transaction.roundId,
+    gameId: transaction.gameId,
+    kind: transaction.kind,
+    money: transaction.money.toJSON(),
+    referenceExternalTransactionId: transaction.referenceExternalTransactionId,
+  };
+}
+
+function toOutcomeBody(transaction: WagerTransaction): WagerTransactionOutcomeBody {
+  return {
+    transactionId: transaction.id,
+    status: transaction.status,
+    failureCode: transaction.failureCode,
+    message: transaction.failureMessage,
+    balance: transaction.balanceAfter?.toJSON(),
   };
 }

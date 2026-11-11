@@ -17,6 +17,7 @@ import type { FaultInjection } from '../../shared/application/fault-injector.ts'
 import { UNIT_OF_WORK, type UnitOfWork } from '../../shared/application/unit-of-work.ts';
 import { CrashFaultInjector } from '../../shared/infrastructure/crash-fault-injector.ts';
 import type { WalletRepositories } from '../../wallet/application/wallet-repository.ts';
+import { GetWagerTransaction } from '../application/get-wager-transaction.ts';
 import { ProcessWagerTransaction } from '../application/process-wager-transaction.ts';
 import { RecordRejectedSubmission } from '../application/record-rejected-submission.ts';
 import { ResolvePendingReferences } from '../application/resolve-pending-references.ts';
@@ -55,6 +56,11 @@ export class WageringModule {
             metrics: WageringMetrics,
             log: ContextLog,
           ) => new ProcessWagerTransaction(unitOfWork, () => Bun.randomUUIDv7(), metrics, log, referenceWait),
+        },
+        {
+          provide: GetWagerTransaction,
+          inject: [UNIT_OF_WORK],
+          useFactory: (unitOfWork: UnitOfWork<WageringRepositories>) => new GetWagerTransaction(unitOfWork),
         },
         {
           provide: ResolvePendingReferences,

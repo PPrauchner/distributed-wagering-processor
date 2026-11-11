@@ -1,17 +1,21 @@
 /**
- * `POST /wagering/transactions`: submits a wager transaction and answers with
- * its outcome. Refused submissions are turned into responses by the global
- * HTTP error filter.
+ * `POST /wagering/transactions`, which submits a wager transaction and answers
+ * with its outcome, and `GET /wagering/transactions/:transactionId`, which
+ * queries one. Refused submissions and unknown transactions are turned into
+ * responses by the global HTTP error filter.
  *
  * @packageDocumentation
  */
-import { Body, Controller, Headers, Post, Res } from '@nestjs/common';
+import { Body, Controller, Get, Headers, Param, Post, Res } from '@nestjs/common';
+import { GetWagerTransaction } from '../application/get-wager-transaction.ts';
 import { ProcessWagerTransaction } from '../application/process-wager-transaction.ts';
 import { SubmissionChannel } from '../domain/rejected-submission.ts';
 import {
   parseSubmitWagerTransactionRequest,
   toWagerTransactionResponse,
+  toWagerTransactionView,
   type WagerTransactionResponse,
+  type WagerTransactionView,
 } from './wager-transaction.http.ts';
 
 // The slice of the platform response this controller uses; keeps it off Express types.
@@ -24,7 +28,15 @@ export const WAGER_TRANSACTIONS_PATH = 'wagering/transactions';
 
 @Controller(WAGER_TRANSACTIONS_PATH)
 export class WagerTransactionController {
-  constructor(private readonly processWagerTransaction: ProcessWagerTransaction) {}
+  constructor(
+    private readonly processWagerTransaction: ProcessWagerTransaction,
+    private readonly getWagerTransaction: GetWagerTransaction,
+  ) {}
+
+  @Get(':transactionId')
+  async show(@Param('transactionId') transactionId: string): Promise<WagerTransactionView> {
+    return toWagerTransactionView(await this.getWagerTransaction.byId(transactionId));
+  }
 
   @Post()
   async submit(
