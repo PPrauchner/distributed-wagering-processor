@@ -299,6 +299,20 @@ async function inboxRow(messageId: string): Promise<{ payload_hash: string } | u
   return row;
 }
 
+async function inboxRowsOf(messageId: string): Promise<{ processed: boolean }[]> {
+  return [
+    ...(await sql`
+      select processed_at is not null as processed from inbox_messages
+       where consumer_name = ${CONSUMER} and message_id = ${messageId}
+    `),
+  ];
+}
+
+async function outboxIds(walletId: string): Promise<string[]> {
+  const rows = await sql`select id::text from outbox_messages where wallet_id = ${walletId} order by id`;
+  return rows.map((row: { id: string }) => row.id);
+}
+
 async function rejectedRows(messageId: string): Promise<{ failure_code: string; channel: string }[]> {
   return [...(await sql`select failure_code, channel from rejected_submissions where message_id = ${messageId}`)];
 }
@@ -434,6 +448,7 @@ describe('a permanent error', () => {
     await faulty.init();
     const wallet = await createWallet('100.00');
     const data = betData(wallet);
+    const outboxBefore = await outboxIds(wallet.id);
 
     const messageId = await send(queues.url, data);
     const letter = await deadLetter(queues.dlqUrl, withMessageId(messageId));
@@ -442,6 +457,10 @@ describe('a permanent error', () => {
     expect(letter.failureCode).toBe('INFRA_INVARIANT_VIOLATION');
     expect(await transactionsOf(data)).toMatchObject([{ status: 'FAILED', failure_code: 'INFRA_INVARIANT_VIOLATION' }]);
     expect(await rejectedRows(messageId)).toEqual([]);
+    // Atomicity: the first unit of work left no event; the inbox holds only the
+    // row the second one — the FAILED write — recorded, processed.
+    expect(await outboxIds(wallet.id)).toEqual(outboxBefore);
+    expect(await inboxRowsOf(messageId)).toEqual([{ processed: true }]);
 
     await send(queues.url, data, { messageId });
     await waitFor(() => drained(queues.url));

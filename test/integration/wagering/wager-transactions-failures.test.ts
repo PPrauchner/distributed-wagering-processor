@@ -129,6 +129,16 @@ describe('transient failures: 503 with Retry-After, nothing recorded', () => {
   });
 });
 
+/**
+ * @returns The wallet's outbox rows and the inbox size: what a unit of work
+ *   that wrote an event or a queue message would have changed.
+ */
+async function messagingRows(walletId: string): Promise<{ outbox: string[]; inbox: number }> {
+  const outbox = await sql`select id::text from outbox_messages where wallet_id = ${walletId} order by id`;
+  const [{ inbox }] = await sql`select count(*)::int as inbox from inbox_messages`;
+  return { outbox: outbox.map((row: { id: string }) => row.id), inbox };
+}
+
 describe('a permanent error: FAILED, recorded by a second unit of work', () => {
   let faultyUrl: string;
 
@@ -136,8 +146,9 @@ describe('a permanent error: FAILED, recorded by a second unit of work', () => {
     faultyUrl = await startApp({ ...config, faultPoints: [FaultPoint.InvariantViolationBeforeCommit] });
   });
 
-  test('an invariant violated before the commit → 500 FAILED INFRA_INVARIANT_VIOLATION; balance, ledger untouched', async () => {
+  test('an invariant violated before the commit → 500 FAILED INFRA_INVARIANT_VIOLATION; balance, ledger, outbox and inbox untouched', async () => {
     const wallet = await createWallet('100.00');
+    const before = await messagingRows(wallet.id);
 
     const response = await submit(faultyUrl, betOn(wallet));
 
@@ -169,6 +180,8 @@ describe('a permanent error: FAILED, recorded by a second unit of work', () => {
         from wallets where id = ${wallet.id}
     `;
     expect(walletRow).toEqual({ balance: '100.00', version: 1, entries: 1 });
+    // Atomicity: the first unit of work left no event; the second, by HTTP, writes no inbox row.
+    expect(await messagingRows(wallet.id)).toEqual(before);
   });
 
   test('the replay answers the same 500, with idempotentReplay; another payload is a conflict', async () => {
