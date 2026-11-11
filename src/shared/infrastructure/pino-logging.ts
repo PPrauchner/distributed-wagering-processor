@@ -133,4 +133,8 @@ export class PinoContextLog implements ContextLog {
   info(message: string, details: LogDetails = {}): void {
     this.logger.info(details, message);
   }
+
+  warn(message: string, details: LogDetails = {}): void {
+    this.logger.warn(details, message);
+  }
 }
