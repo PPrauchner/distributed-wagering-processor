@@ -323,8 +323,8 @@ comum às duas entradas.
 
 Toda submissão que **não vira transação de aposta** é gravada numa tabela própria,
 append-only e sem FK: payload inválido (HTTP ou fila), carteira inexistente,
-`OPENING` vindo de fora, conflito de idempotência, `EXTERNAL_ID_CONFLICT` e, na
-fila, `MESSAGE_ID_CONFLICT` e as tentativas transitórias esgotadas
+`OPENING` vindo de fora, conflito de idempotência, `EXTERNAL_ID_CONFLICT`,
+`PROVIDER_IDENTITY_MISMATCH` (só HTTP) e, na fila, `MESSAGE_ID_CONFLICT` e as tentativas transitórias esgotadas
 (`INFRA_RETRIES_EXHAUSTED`). Colunas: `provider_id`, `idempotency_key`,
 `external_transaction_id`, `payload_hash`, código de falha, canal, `message_id`
 (quando houver), `correlation_id` e `received_at` — o que der para
@@ -371,6 +371,7 @@ mesma chave.
 | carteira criada | 201 |
 | `PENDING_REFERENCE` | 202 |
 | payload inválido, `Idempotency-Key` ausente, `OPENING` de fora, cursor inválido | 400 |
+| provedor declarado diferente da identidade (`PROVIDER_IDENTITY_MISMATCH`) | 403 |
 | recurso inexistente num `GET` | 404 |
 | conflito de idempotência, `EXTERNAL_ID_CONFLICT`, `WALLET_ALREADY_EXISTS` | 409 |
 | `REJECTED` (original ou replay), `WALLET_NOT_FOUND` | 422 |
@@ -414,6 +415,7 @@ Enum fechado em `shared/domain`.
 | `WALLET_ALREADY_EXISTS` | não admitida (409) | usa a carteira existente |
 | `WALLET_NOT_FOUND` | não admitida (422; fila: retry, depois DLQ) | cria a carteira e reenvia |
 | `MESSAGE_ID_CONFLICT` | não admitida (fila → DLQ) | não reusa `messageId` com outro conteúdo |
+| `PROVIDER_IDENTITY_MISMATCH` | não admitida (403; só HTTP) | declara o próprio `providerId` |
 | `NOT_FOUND` | consulta (404) | — |
 | `INFRA_RETRIES_EXHAUSTED` | sem desfecho (fila → DLQ) | reenvia **com a mesma chave** depois de normalizado (redrive da DLQ ou HTTP) |
 | `INFRA_INVARIANT_VIOLATION` | falha (500, alerta) | bug nosso; reenvia com chave nova depois da correção |
@@ -660,8 +662,27 @@ latência da pendente é limitada pelo intervalo do worker.
 ## Autenticação
 
 Fora do escopo implementado, como o §2 do enunciado permite: guard no-op atrás de
-uma porta de identidade do provedor. *A definir* — o desenho que seria adotado com
-Keycloak.
+uma porta de identidade do provedor. O ponto de extensão no código:
+
+- **Porta** `ProviderIdentity` (`src/shared/application/provider-identity.ts`):
+  resolve, a partir da requisição, o provedor autenticado. Ligada pelo token
+  `PROVIDER_IDENTITY` num módulo global da raiz de composição (`src/app.ts`);
+  trocar pela implementação real é trocar esse provider do Nest.
+- **No-op** `DeclaredProviderIdentity`
+  (`src/shared/infrastructure/declared-provider-identity.ts`): autentica a
+  requisição como o provedor que ela declara — nunca diverge.
+- **Guard** `ProviderIdentityGuard` (`src/shared/interface/provider-identity.guard.ts`),
+  nos controllers de transação de aposta e de carteira: chama a porta e deixa a
+  identidade para o controller (`@CurrentProvider()`). `/health/*` e `/metrics`
+  ficam sem guard; a fila também — é canal interno confiável.
+- **Conferência:** na submissão (depois do parse do corpo, antes do use case) e na
+  consulta por id externo, um `providerId` diferente da identidade é recusado com
+  403 `PROVIDER_IDENTITY_MISMATCH`, sem transação de aposta; na submissão, a recusa
+  é auditada como submissão não admitida. `MISSING_IDEMPOTENCY_KEY` e o
+  `INVALID_PAYLOAD` de forma vêm antes. As rotas de carteira e a consulta por id
+  interno não declaram provedor: o guard só resolve a identidade.
+
+*A definir* — o desenho que seria adotado com Keycloak.
 
 ## Observabilidade
 
