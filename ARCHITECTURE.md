@@ -438,7 +438,7 @@ legítimo; se o lock a serializa, o domínio teria visto antes, e é bug.
 | lançamento `(wallet_id, wallet_version)` — `wallet_ledger_entries_wallet_version_unique` | bug → permanente (`FAILED`, alerta) |
 | outra | permanente (`FAILED`, `INFRA_UNEXPECTED`) |
 
-As linhas do inbox, da reversão única e da chave da criação já estão no
+As linhas do inbox e da chave da criação já estão no
 classificador, embora as constraints ainda não existam: o nome é o contrato que as
 fatias que as criam seguem.
 
