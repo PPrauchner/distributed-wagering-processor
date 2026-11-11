@@ -41,18 +41,24 @@ async function tableExists(name: string): Promise<boolean> {
 }
 
 async function insertWallet(overrides: Record<string, unknown> = {}): Promise<string> {
-  const row = {
+  const row: Record<string, unknown> = {
     id: Bun.randomUUIDv7(),
     player_id: Bun.randomUUIDv7(),
     currency: 'BRL',
     balance_amount: '0.00',
     balance_currency: 'BRL',
     version: 1,
+    initial_balance_amount: '0.00',
+    creation_idempotency_key: null,
+    creation_payload_hash: null,
     ...overrides,
   };
+  const initialCurrency = row.initial_balance_currency ?? row.currency;
   await sql`
-    insert into wallets (id, player_id, currency, balance_amount, balance_currency, version, created_at, updated_at)
-    values (${row.id}, ${row.player_id}, ${row.currency}, ${row.balance_amount}, ${row.balance_currency}, ${row.version}, now(), now())
+    insert into wallets (id, player_id, currency, balance_amount, balance_currency, version, created_at, updated_at,
+                         initial_balance_amount, initial_balance_currency, creation_idempotency_key, creation_payload_hash)
+    values (${row.id}, ${row.player_id}, ${row.currency}, ${row.balance_amount}, ${row.balance_currency}, ${row.version}, now(), now(),
+            ${row.initial_balance_amount}, ${initialCurrency}, ${row.creation_idempotency_key}, ${row.creation_payload_hash})
   `;
   return row.id as string;
 }
@@ -69,6 +75,7 @@ const ALL_MIGRATIONS = [
   'Migration0009WagerTransactionSingleReversal',
   'Migration0010InboxMessages',
   'Migration0011WagerTransactionReferenceSchedule',
+  'Migration0012WalletCreationIdempotency',
 ];
 const TABLES = [
   'wallets',
@@ -146,6 +153,34 @@ describe('wallet mapping', () => {
     expect(loaded.updatedAt.getTime()).toBe(wallet.updatedAt.getTime());
   });
 
+  test('the initial balance and the creation key and hash load back as persisted', async () => {
+    const creation = { idempotencyKey: Bun.randomUUIDv7(), payloadHash: 'e'.repeat(64) };
+    const wallet = Wallet.open({
+      id: Bun.randomUUIDv7(),
+      playerId: Bun.randomUUIDv7(),
+      initialBalance: Money.zero('USD'),
+      creation,
+    });
+    await orm.em.fork().persist(wallet).flush();
+
+    const loaded = await orm.em.fork().findOneOrFail(Wallet, { creationIdempotencyKey: creation.idempotencyKey });
+
+    expect(loaded.id).toBe(wallet.id);
+    expect(loaded.initialBalance).toBeInstanceOf(Money);
+    expect(loaded.initialBalance.toJSON()).toEqual({ amount: '0.00', currency: 'USD' });
+    expect(loaded.creationPayloadHash).toBe(creation.payloadHash);
+  });
+
+  test('a wallet created without a key loads back with no key and no hash', async () => {
+    const wallet = Wallet.open({ id: Bun.randomUUIDv7(), playerId: Bun.randomUUIDv7(), initialBalance: Money.zero('BRL') });
+    await orm.em.fork().persist(wallet).flush();
+
+    const loaded = await orm.em.fork().findOneOrFail(Wallet, wallet.id);
+
+    expect(loaded.creationIdempotencyKey).toBeUndefined();
+    expect(loaded.creationPayloadHash).toBeUndefined();
+  });
+
   test('queries filter by the public name of a private field', async () => {
     const wallet = Wallet.open({
       id: Bun.randomUUIDv7(),
@@ -177,6 +212,37 @@ describe('schema invariants, by raw SQL', () => {
     await expect(insertWallet({ balance_currency: 'USD' })).rejects.toThrow(
       /wallets_balance_currency_matches/,
     );
+  });
+
+  test('the creation key and hash are both absent or both present', async () => {
+    await expect(insertWallet({ creation_idempotency_key: Bun.randomUUIDv7() })).rejects.toThrow(
+      /wallets_creation_key_and_hash_together/,
+    );
+    await expect(insertWallet({ creation_payload_hash: 'a'.repeat(64) })).rejects.toThrow(
+      /wallets_creation_key_and_hash_together/,
+    );
+  });
+
+  test('a creation key belongs to one wallet only', async () => {
+    const key = Bun.randomUUIDv7();
+    await insertWallet({ creation_idempotency_key: key, creation_payload_hash: 'a'.repeat(64) });
+
+    await expect(insertWallet({ creation_idempotency_key: key, creation_payload_hash: 'a'.repeat(64) })).rejects.toThrow(
+      /wallets_creation_idempotency_key_unique/,
+    );
+  });
+
+  test('the initial balance and the creation key and hash never change', async () => {
+    const id = await insertWallet({ creation_idempotency_key: Bun.randomUUIDv7(), creation_payload_hash: 'a'.repeat(64) });
+
+    for (const change of [
+      sql`update wallets set initial_balance_amount = 1.00 where id = ${id}`,
+      sql`update wallets set creation_idempotency_key = ${Bun.randomUUIDv7()} where id = ${id}`,
+      sql`update wallets set creation_idempotency_key = null, creation_payload_hash = null where id = ${id}`,
+      sql`update wallets set creation_payload_hash = ${'b'.repeat(64)} where id = ${id}`,
+    ]) {
+      await expect(change).rejects.toThrow(/wallets_identity_immutable/);
+    }
   });
 
   test('a player has at most one wallet per currency', async () => {
@@ -245,6 +311,9 @@ describe('opening mapping', () => {
     expect(loadedOpening.failureCode).toBeUndefined();
     expect(loadedOpening.correlationId).toBe('corr-mapping');
     expect(loadedOpening.walletId).toBe(wallet.id);
+
+    const loadedWallet = await em.findOneOrFail(Wallet, wallet.id);
+    expect(loadedWallet.initialBalance.toJSON()).toEqual(initialBalance.toJSON());
 
     const [loadedEntry] = await em.find(WalletLedgerEntry, { walletId: wallet.id });
     expect(loadedEntry).toBeInstanceOf(WalletLedgerEntry);
