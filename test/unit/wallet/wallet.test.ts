@@ -5,7 +5,7 @@
  */
 import { describe, expect, test } from 'bun:test';
 import { CurrencyMismatchError, Money } from '../../../src/shared/domain/money.ts';
-import { InvalidWalletError, Wallet } from '../../../src/wallet/domain/wallet.ts';
+import { BalanceLimitExceededError, InvalidWalletError, MAX_BALANCE, Wallet } from '../../../src/wallet/domain/wallet.ts';
 import { InvalidLedgerEntryError, LedgerDirection } from '../../../src/wallet/domain/wallet-ledger-entry.ts';
 
 const WALLET_ID = '0192f291-27dd-7d3f-8071-5f8685deef37';
@@ -186,5 +186,59 @@ describe('Wallet.canDebit', () => {
     const wallet = Wallet.open({ id: WALLET_ID, playerId: PLAYER_ID, initialBalance: brl('100.00') });
 
     expect(wallet.canDebit(brl(amount))).toBe(expected);
+  });
+});
+
+/** A wallet holding `amount` BRL, as read back from the database. */
+function walletHolding(amount: string): Wallet {
+  return Wallet.rehydrate({
+    id: WALLET_ID,
+    playerId: PLAYER_ID,
+    currency: 'BRL',
+    balance: Money.fromPersisted({ amount, currency: 'BRL' }),
+    version: 5,
+    createdAt: new Date('2026-11-01T10:00:00Z'),
+    updatedAt: new Date('2026-11-02T10:00:00Z'),
+    initialBalance: Money.zero('BRL'),
+  });
+}
+
+describe('maximum balance', () => {
+  test('is the limit of the numeric(19,2) column', () => {
+    expect(MAX_BALANCE).toBe('99999999999999999.99');
+  });
+
+  test.each([
+    ['below the maximum', '99999999999999998.98', '1.00', true],
+    ['exactly to the maximum', '99999999999999998.99', '1.00', true],
+    ['one cent past the maximum', '99999999999999999.00', '1.00', false],
+    ['from the maximum', '99999999999999999.99', '0.01', false],
+  ])('canCredit %s → %p', (_case, balance, amount, expected) => {
+    expect(walletHolding(balance).canCredit(brl(amount))).toBe(expected);
+  });
+
+  test('a credit up to exactly the maximum is accepted', () => {
+    const wallet = walletHolding('99999999999999998.99');
+
+    wallet.credit({ money: brl('1.00'), entryId: ENTRY_ID, transactionId: TRANSACTION_ID });
+
+    expect(wallet.balance.toJSON().amount).toBe('99999999999999999.99');
+    expect(wallet.version).toBe(6);
+  });
+
+  test('a credit past the maximum is refused and leaves the wallet untouched', () => {
+    const wallet = walletHolding('99999999999999999.00');
+
+    expect(() => wallet.credit({ money: brl('1.00'), entryId: ENTRY_ID, transactionId: TRANSACTION_ID })).toThrow(
+      BalanceLimitExceededError,
+    );
+    expect(wallet.balance.toJSON().amount).toBe('99999999999999999.00');
+    expect(wallet.version).toBe(5);
+  });
+
+  test('canCredit refuses another currency', () => {
+    expect(() => walletHolding('1.00').canCredit(Money.from({ amount: '1.00', currency: 'USD' }))).toThrow(
+      CurrencyMismatchError,
+    );
   });
 });

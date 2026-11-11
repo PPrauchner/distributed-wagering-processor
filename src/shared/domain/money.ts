@@ -81,6 +81,21 @@ export class Money {
   }
 
   /**
+   * Builds a money value read back from the database: a column value or the
+   * result of SQL arithmetic over them. Internal — never for input: it skips
+   * the 15-digit input ceiling and accepts a negative amount, so a balance past
+   * the input ceiling, up to the wallet's maximum balance, still reads back.
+   *
+   * @param props - Canonical decimal string amount, maybe negative, and currency code.
+   * @returns The money value.
+   * @throws {@link InvalidMoneyError} If the amount or the currency is malformed.
+   */
+  static fromPersisted(props: MoneyProps): Money {
+    assertCurrency(props.currency);
+    return new Money(fromCents(toCents(props.amount)), props.currency);
+  }
+
+  /**
    * @param currency - Three-letter currency code.
    * @returns The zero amount in that currency.
    * @throws {@link InvalidMoneyError} If the currency is malformed.

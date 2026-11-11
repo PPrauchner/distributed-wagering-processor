@@ -210,3 +210,57 @@ describe('applyWin citing the bet of its round', () => {
     expect(transaction.failureCode).toBe(FailureCode.WalletPlayerMismatch);
   });
 });
+
+/** A wallet holding `amount` BRL, as read back from the database at version 5. */
+const walletHolding = (amount: string): Wallet =>
+  Wallet.rehydrate({
+    id: WALLET_ID,
+    playerId: PLAYER_ID,
+    currency: 'BRL',
+    balance: Money.fromPersisted({ amount, currency: 'BRL' }),
+    version: 5,
+    createdAt: new Date('2026-11-01T10:00:00Z'),
+    updatedAt: new Date('2026-11-02T10:00:00Z'),
+    initialBalance: Money.zero('BRL'),
+  });
+
+describe('applyWin and the maximum balance', () => {
+  test.each([
+    ['without a reference', win],
+    ['citing the round bet', citing],
+  ])('%s, past the maximum: rejected BALANCE_LIMIT_EXCEEDED, the wallet untouched and observed', (_case, make) => {
+    const wallet = walletHolding('99999999999999900.00');
+    const transaction = make();
+
+    const entry = applyWin(transaction, wallet, betOfRound(), { entryId: ENTRY_ID });
+
+    expect(entry).toBeUndefined();
+    expect(transaction.status).toBe(WagerTransactionStatus.Rejected);
+    expect(transaction.failureCode).toBe(FailureCode.BalanceLimitExceeded);
+    expect(transaction.balanceAfter?.toJSON().amount).toBe('99999999999999900.00');
+    expect(transaction.walletVersionObserved).toBe(5);
+    expect(wallet.version).toBe(5);
+  });
+
+  test('up to exactly the maximum: processed', () => {
+    const wallet = walletHolding('99999999999999849.99');
+    const transaction = win();
+
+    applyWin(transaction, wallet, undefined, { entryId: ENTRY_ID });
+
+    expect(transaction.status).toBe(WagerTransactionStatus.Processed);
+    expect(wallet.balance.toJSON().amount).toBe('99999999999999999.99');
+  });
+
+  test('the reference comes first: a missing one waits, a mismatching one is rejected for it', () => {
+    const waiting = citing();
+    applyWin(waiting, walletHolding('99999999999999900.00'), undefined, { entryId: ENTRY_ID });
+    expect(waiting.status).toBe(WagerTransactionStatus.PendingReference);
+
+    const mismatching = citing();
+    applyWin(mismatching, walletHolding('99999999999999900.00'), betOfRound({ roundId: 'other' }), {
+      entryId: ENTRY_ID,
+    });
+    expect(mismatching.failureCode).toBe(FailureCode.ReferenceMismatch);
+  });
+});

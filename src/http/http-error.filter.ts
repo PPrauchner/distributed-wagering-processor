@@ -16,6 +16,7 @@ import {
   type ExceptionFilter,
 } from '@nestjs/common';
 import { PermanentFailureError, TransientFailureError } from '../shared/application/infrastructure-failures.ts';
+import { ProviderIdentityMismatchError } from '../shared/application/provider-identity.ts';
 import { FailureCode } from '../shared/domain/failure-code.ts';
 import { CurrencyMismatchError, InvalidMoneyError } from '../shared/domain/money.ts';
 import { InvalidPayloadError } from '../shared/interface/invalid-payload.error.ts';
@@ -88,6 +89,7 @@ const REFUSED_SUBMISSIONS: [new (...args: never[]) => Error, number, FailureCode
   [ExternalIdConflictError, HttpStatus.CONFLICT, FailureCode.ExternalIdConflict],
   [SubmissionWalletNotFoundError, HttpStatus.UNPROCESSABLE_ENTITY, FailureCode.WalletNotFound],
   [InvalidCursorError, HttpStatus.BAD_REQUEST, FailureCode.InvalidCursor],
+  [ProviderIdentityMismatchError, HttpStatus.FORBIDDEN, FailureCode.ProviderIdentityMismatch],
 ];
 
 @Catch()

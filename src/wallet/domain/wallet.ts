@@ -49,7 +49,19 @@ export class InvalidWalletError extends Error {
   override readonly name = 'InvalidWalletError';
 }
 
+/** Raised when a credit would take the balance past {@link MAX_BALANCE}. */
+export class BalanceLimitExceededError extends Error {
+  override readonly name = 'BalanceLimitExceededError';
+}
+
 const MAX_PLAYER_ID_LENGTH = 255;
+
+/**
+ * The maximum balance (`CONTEXT.md` § Saldo máximo), in any currency: the
+ * limit of the `numeric(19,2)` column. A credit past it is refused, never
+ * truncated.
+ */
+export const MAX_BALANCE = '99999999999999999.99';
 
 /** Every wallet is opened at this version (ADR 0003). */
 export const OPENING_VERSION = 1;
@@ -153,8 +165,13 @@ export class Wallet {
    * @returns The ledger entry of this credit.
    * @throws {@link CurrencyMismatchError} If the amount is in another currency.
    * @throws {@link InvalidLedgerEntryError} If the amount is not positive.
+   * @throws {@link BalanceLimitExceededError} If the balance would pass the
+   *   maximum — check {@link Wallet.canCredit} first.
    */
   credit(props: MovementProps): WalletLedgerEntry {
+    if (!this.canCredit(props.money)) {
+      throw new BalanceLimitExceededError(`crediting ${props.money} would take wallet ${this.id} past the maximum balance`);
+    }
     return this.move(LedgerDirection.Credit, props, this._balance.add(props.money));
   }
 
@@ -179,6 +196,16 @@ export class Wallet {
    */
   canDebit(money: Money): boolean {
     return !this._balance.isLessThan(money);
+  }
+
+  /**
+   * @param money - An amount in the wallet's currency.
+   * @returns Whether crediting it keeps the balance at {@link MAX_BALANCE} or less.
+   * @throws {@link CurrencyMismatchError} If the amount is in another currency.
+   */
+  canCredit(money: Money): boolean {
+    const maximum = Money.fromPersisted({ amount: MAX_BALANCE, currency: this.currency });
+    return !maximum.isLessThan(this._balance.add(money));
   }
 
   private move(direction: LedgerDirection, props: MovementProps, balanceAfter: Money): WalletLedgerEntry {

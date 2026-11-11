@@ -235,6 +235,32 @@ describe('GET /wallets/:walletId/ledger', () => {
   );
 });
 
+const INPUT_CEILING = '999999999999999.99';
+/** Up to a hundred sequential submissions per wallet: past bun's 5 s default. */
+const TEST_TIMEOUT_MS = 30_000;
+
+/** Credits the wallet `count` wins of the input ceiling, one after another. */
+async function winTheCeiling(wallet: TestWallet, count: number): Promise<void> {
+  for (let i = 0; i < count; i++) {
+    const externalTransactionId = Bun.randomUUIDv7();
+    const response = await fetch(`${baseUrl}/wagering/transactions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'idempotency-key': `provider-a:${externalTransactionId}` },
+      body: JSON.stringify({
+        providerId: 'provider-a',
+        externalTransactionId,
+        playerId: wallet.playerId,
+        walletId: wallet.id,
+        roundId: 'round-1',
+        gameId: 'fortune-chimp',
+        kind: 'WIN',
+        money: { amount: INPUT_CEILING, currency: 'BRL' },
+      }),
+    });
+    expect(response.status).toBe(200);
+  }
+}
+
 function reconcile(walletId: string): Promise<Response> {
   return fetch(`${baseUrl}/wallets/${walletId}/reconciliation`, { method: 'POST' });
 }
@@ -262,6 +288,26 @@ describe('POST /wallets/:walletId/reconciliation', () => {
       lastEntryVersion: entries === 0 ? null : entries,
     });
   });
+
+  test.each([
+    ['16', 9, '9999999999999999.90'],
+    ['17', 99, '99999999999999999.00'],
+  ])('a consistent balance of %s integer digits, past the input ceiling: the normal report', async (_digits, wins, balance) => {
+    const wallet = await createWallet(INPUT_CEILING);
+    await winTheCeiling(wallet, wins);
+
+    const response = await reconcile(wallet.id);
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      storedBalance: { amount: balance, currency: 'BRL' },
+      calculatedBalance: { amount: balance, currency: 'BRL' },
+      difference: { amount: '0.00', currency: 'BRL' },
+      consistent: true,
+      checkedEntries: wins + 1,
+      walletVersion: wins + 1,
+    });
+  }, TEST_TIMEOUT_MS);
 
   test('a divergence is still a 200: consistent false, counted, nothing corrected', async () => {
     const wallet = await createWallet('100.00');

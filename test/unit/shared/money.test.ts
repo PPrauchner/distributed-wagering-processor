@@ -52,6 +52,40 @@ describe('Money.from', () => {
   });
 });
 
+describe('Money.fromPersisted', () => {
+  test('keeps a value read back from the database exactly', () => {
+    expect(Money.fromPersisted({ amount: '25.00', currency: 'BRL' }).toJSON()).toEqual({
+      amount: '25.00',
+      currency: 'BRL',
+    });
+  });
+
+  test('accepts a negative amount, which arithmetic in SQL may produce', () => {
+    const money = Money.fromPersisted({ amount: '-12.34', currency: 'BRL' });
+
+    expect(money.isNegative()).toBe(true);
+    expect(money.toJSON().amount).toBe('-12.34');
+  });
+
+  test.each([['1000000000000000.00'], ['99999999999999999.99']])(
+    'accepts %p, past the 15-digit input ceiling, without losing precision',
+    (amount) => {
+      expect(Money.fromPersisted({ amount, currency: 'BRL' }).toJSON().amount).toBe(amount);
+    },
+  );
+
+  test.each([['NaN'], ['1e2'], [''], ['1'], ['1.0'], ['1.234'], ['.50'], ['+1.00'], ['1,00'], [' 1.00']])(
+    'rejects the malformed amount %p',
+    (amount) => {
+      expect(() => Money.fromPersisted({ amount, currency: 'BRL' })).toThrow(InvalidMoneyError);
+    },
+  );
+
+  test.each([['brl'], ['BR'], ['']])('rejects the malformed currency %p', (currency) => {
+    expect(() => Money.fromPersisted({ amount: '1.00', currency })).toThrow(InvalidMoneyError);
+  });
+});
+
 const brl = (amount: string): Money => Money.from({ amount, currency: 'BRL' });
 
 describe('arithmetic', () => {

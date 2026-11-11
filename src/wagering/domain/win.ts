@@ -2,10 +2,13 @@
  * The `WIN` rules: a credit of a round's prize, with no reference or citing the
  * round's `BET`. Citing is not undoing: the amount is free and several wins may
  * cite the same bet (`ARCHITECTURE.md` § Reembolso e reversão, "Referência do
- * ganho"). No round state machine: a win without a bet is accepted.
+ * ganho"). No round state machine: a win without a bet is accepted. A win
+ * that would take the balance past the maximum is rejected, after the
+ * reference is resolved.
  *
  * @packageDocumentation
  */
+import { FailureCode } from '../../shared/domain/failure-code.ts';
 import type { Wallet } from '../../wallet/domain/wallet.ts';
 import type { WalletLedgerEntry } from '../../wallet/domain/wallet-ledger-entry.ts';
 import { resolveReference, waitForReference } from './reference.ts';
@@ -55,6 +58,10 @@ export function applyWin(
       return undefined;
     }
     referenceTransactionId = resolution.reference.id;
+  }
+  if (!wallet.canCredit(transaction.money)) {
+    rejectOn(transaction, wallet, { code: FailureCode.BalanceLimitExceeded });
+    return undefined;
   }
   const entry = wallet.credit({ money: transaction.money, entryId: ids.entryId, transactionId: transaction.id });
   transaction.markProcessed({

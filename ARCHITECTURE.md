@@ -166,6 +166,17 @@ Worker morto: o lease expira e outra instância assume. Ver
 - **Auditoria append-only:** `UPDATE`, `DELETE` e `TRUNCATE` em
   `rejected_submissions` são recusados.
 
+**Saldo máximo:** `99999999999999999.99`, o limite de `numeric(19,2)`. Não há
+`CHECK` próprio: o tipo da coluna já recusa o valor acima dele (`22003`) antes de
+qualquer `CHECK`, que por isso nunca dispararia — o próprio tipo é a garantia no
+schema. O domínio barra antes (`Wallet.canCredit`): `WIN`, `REFUND` e `ROLLBACK`
+de `BET` que passariam do máximo terminam `REJECTED` `BALANCE_LIMIT_EXCEEDED`,
+sem lançamento, com o saldo observado e `WagerTransactionRejected`; o `22003`
+fica só como rede de segurança. A `OPENING` não alcança o máximo: o
+`initialBalance` passa pelo teto de 15 dígitos da entrada. A reconciliação lê os
+valores do banco por `Money.fromPersisted`, sem esse teto, e reporta saldos de
+16 e 17 dígitos normalmente.
+
 Tempos que dependem de relógio — TTL das pendentes e leases dos workers — usam o
 `now()` do banco, nunca o relógio da instância.
 
@@ -280,7 +291,9 @@ Com mais de uma violação, prevalece a primeira, na mesma ordem nos dois canais
    a referência é buscada pelo provedor da própria submissão;
    `REFERENCE_AMOUNT_MISMATCH`, exceto no `WIN`; `REFERENCE_ALREADY_REVERSED`, só na
    transação dependente); saldo (`INSUFFICIENT_FUNDS` ou
-   `REVERSAL_INSUFFICIENT_FUNDS`).
+   `REVERSAL_INSUFFICIENT_FUNDS` no débito; `BALANCE_LIMIT_EXCEEDED` no crédito
+   que passaria do saldo máximo — sempre depois da referência, então uma
+   referência ausente espera e nunca vira `BALANCE_LIMIT_EXCEEDED`).
 
 ## Idempotência e deduplicação
 
@@ -323,8 +336,8 @@ comum às duas entradas.
 
 Toda submissão que **não vira transação de aposta** é gravada numa tabela própria,
 append-only e sem FK: payload inválido (HTTP ou fila), carteira inexistente,
-`OPENING` vindo de fora, conflito de idempotência, `EXTERNAL_ID_CONFLICT` e, na
-fila, `MESSAGE_ID_CONFLICT` e as tentativas transitórias esgotadas
+`OPENING` vindo de fora, conflito de idempotência, `EXTERNAL_ID_CONFLICT`,
+`PROVIDER_IDENTITY_MISMATCH` (só HTTP) e, na fila, `MESSAGE_ID_CONFLICT` e as tentativas transitórias esgotadas
 (`INFRA_RETRIES_EXHAUSTED`). Colunas: `provider_id`, `idempotency_key`,
 `external_transaction_id`, `payload_hash`, código de falha, canal, `message_id`
 (quando houver), `correlation_id` e `received_at` — o que der para
@@ -371,6 +384,7 @@ mesma chave.
 | carteira criada | 201 |
 | `PENDING_REFERENCE` | 202 |
 | payload inválido, `Idempotency-Key` ausente, `OPENING` de fora, cursor inválido | 400 |
+| provedor declarado diferente da identidade (`PROVIDER_IDENTITY_MISMATCH`) | 403 |
 | recurso inexistente num `GET` | 404 |
 | conflito de idempotência, `EXTERNAL_ID_CONFLICT`, `WALLET_ALREADY_EXISTS` | 409 |
 | `REJECTED` (original ou replay), `WALLET_NOT_FOUND` | 422 |
@@ -405,6 +419,7 @@ Enum fechado em `shared/domain`.
 | `REFERENCE_MISMATCH` | rejeição (422) | corrige; jogador, carteira, moeda ou rodada divergem (campo no `message`) |
 | `REFERENCE_AMOUNT_MISMATCH` | rejeição (422) | corrige o valor; reversão parcial não existe |
 | `REFERENCE_ALREADY_REVERSED` | rejeição (422) | desiste; a referência já foi desfeita |
+| `BALANCE_LIMIT_EXCEEDED` | rejeição (422) | desiste; o crédito passaria do saldo máximo (`99999999999999999.99`) |
 | `INVALID_PAYLOAD` | não admitida (400) | corrige o payload |
 | `MISSING_IDEMPOTENCY_KEY` | não admitida (400) | envia o header |
 | `INTERNAL_KIND_NOT_ALLOWED` | não admitida (400) | não envia `OPENING` |
@@ -414,6 +429,7 @@ Enum fechado em `shared/domain`.
 | `WALLET_ALREADY_EXISTS` | não admitida (409) | usa a carteira existente |
 | `WALLET_NOT_FOUND` | não admitida (422; fila: retry, depois DLQ) | cria a carteira e reenvia |
 | `MESSAGE_ID_CONFLICT` | não admitida (fila → DLQ) | não reusa `messageId` com outro conteúdo |
+| `PROVIDER_IDENTITY_MISMATCH` | não admitida (403; só HTTP) | declara o próprio `providerId` |
 | `NOT_FOUND` | consulta (404) | — |
 | `INFRA_RETRIES_EXHAUSTED` | sem desfecho (fila → DLQ) | reenvia **com a mesma chave** depois de normalizado (redrive da DLQ ou HTTP) |
 | `INFRA_INVARIANT_VIOLATION` | falha (500, alerta) | bug nosso; reenvia com chave nova depois da correção |
@@ -453,8 +469,10 @@ legítimo; se o lock a serializa, o domínio teria visto antes, e é bug.
 | outra | permanente (`FAILED`, `INFRA_UNEXPECTED`) |
 
 Estouro numérico (`22003`) também é permanente (`INFRA_INVARIANT_VIOLATION`,
-alerta): com o teto de entrada, só um saldo acumulado além de `numeric(19,2)` o
-dispara.
+alerta), mas é só rede de segurança: o saldo acumulado além de `numeric(19,2)` é
+alcançável somando créditos, e o domínio o barra antes, como rejeição
+`BALANCE_LIMIT_EXCEEDED` (ver [Invariantes no schema](#invariantes-no-schema)).
+Disparar o `22003` é bug.
 
 **Quem grava `FAILED`: o use case**, nas duas entradas. Como a transação SQL do
 erro permanente já sofreu rollback, uma **segunda unidade de trabalho** grava a
@@ -660,8 +678,27 @@ latência da pendente é limitada pelo intervalo do worker.
 ## Autenticação
 
 Fora do escopo implementado, como o §2 do enunciado permite: guard no-op atrás de
-uma porta de identidade do provedor. *A definir* — o desenho que seria adotado com
-Keycloak.
+uma porta de identidade do provedor. O ponto de extensão no código:
+
+- **Porta** `ProviderIdentity` (`src/shared/application/provider-identity.ts`):
+  resolve, a partir da requisição, o provedor autenticado. Ligada pelo token
+  `PROVIDER_IDENTITY` num módulo global da raiz de composição (`src/app.ts`);
+  trocar pela implementação real é trocar esse provider do Nest.
+- **No-op** `DeclaredProviderIdentity`
+  (`src/shared/infrastructure/declared-provider-identity.ts`): autentica a
+  requisição como o provedor que ela declara — nunca diverge.
+- **Guard** `ProviderIdentityGuard` (`src/shared/interface/provider-identity.guard.ts`),
+  nos controllers de transação de aposta e de carteira: chama a porta e deixa a
+  identidade para o controller (`@CurrentProvider()`). `/health/*` e `/metrics`
+  ficam sem guard; a fila também — é canal interno confiável.
+- **Conferência:** na submissão (depois do parse do corpo, antes do use case) e na
+  consulta por id externo, um `providerId` diferente da identidade é recusado com
+  403 `PROVIDER_IDENTITY_MISMATCH`, sem transação de aposta; na submissão, a recusa
+  é auditada como submissão não admitida. `MISSING_IDEMPOTENCY_KEY` e o
+  `INVALID_PAYLOAD` de forma vêm antes. As rotas de carteira e a consulta por id
+  interno não declaram provedor: o guard só resolve a identidade.
+
+*A definir* — o desenho que seria adotado com Keycloak.
 
 ## Observabilidade
 
@@ -793,7 +830,10 @@ Keycloak.
 - Linhas publicadas da outbox não são expurgadas.
 - A chave de idempotência da criação de carteira é global, não por provedor: a
   carteira não tem provedor e a autenticação está fora do escopo.
-- Saldo acumulado além de `numeric(19,2)` vira `FAILED`
-  (`INFRA_INVARIANT_VIOLATION`), não rejeição — inalcançável com o teto de entrada.
+- O saldo máximo é o limite técnico da coluna (`99999999999999999.99`), não uma
+  regra de negócio configurável: o crédito que o passaria — alcançável somando
+  créditos no teto de entrada — é rejeitado com `BALANCE_LIMIT_EXCEEDED`, e a
+  carteira cheia só volta a receber crédito depois de um débito. Alargá-lo exige
+  alargar a coluna.
 - A auditoria das submissões não admitidas é de melhor esforço: com o banco fora do
   ar, a resposta sai igual e a linha se perde (o erro é logado).
