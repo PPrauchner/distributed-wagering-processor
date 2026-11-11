@@ -12,6 +12,7 @@ import { WalletLedgerEntrySchema } from '../wallet/infrastructure/wallet-ledger-
 import { WagerTransactionSchema } from '../wagering/infrastructure/wager-transaction.schema.ts';
 import { RejectedSubmissionSchema } from '../wagering/infrastructure/rejected-submission.schema.ts';
 import { OutboxMessageSchema } from '../messaging/infrastructure/outbox-message.schema.ts';
+import { InboxMessageSchema } from '../messaging/infrastructure/inbox-message.schema.ts';
 import { Migration0001Wallets } from '../wallet/infrastructure/migrations/0001-wallets.ts';
 import { Migration0002WagerTransactions } from '../wagering/infrastructure/migrations/0002-wager-transactions.ts';
 import { Migration0003WalletLedger } from '../wallet/infrastructure/migrations/0003-wallet-ledger.ts';
@@ -21,6 +22,7 @@ import { Migration0006RejectedSubmissions } from '../wagering/infrastructure/mig
 import { Migration0007OutboxMessages } from '../messaging/infrastructure/migrations/0007-outbox-messages.ts';
 import { Migration0008WagerTransactionReference } from '../wagering/infrastructure/migrations/0008-wager-transaction-reference.ts';
 import { Migration0009WagerTransactionSingleReversal } from '../wagering/infrastructure/migrations/0009-wager-transaction-single-reversal.ts';
+import { Migration0010InboxMessages } from '../messaging/infrastructure/migrations/0010-inbox-messages.ts';
 
 /**
  * @param databaseUrl - PostgreSQL connection URL.
@@ -36,6 +38,7 @@ export function createOrmConfig(databaseUrl: string): Options {
       WalletLedgerEntrySchema,
       RejectedSubmissionSchema,
       OutboxMessageSchema,
+      InboxMessageSchema,
     ],
     extensions: [Migrator],
     migrations: {
@@ -49,6 +52,7 @@ export function createOrmConfig(databaseUrl: string): Options {
         { name: 'Migration0007OutboxMessages', class: Migration0007OutboxMessages },
         { name: 'Migration0008WagerTransactionReference', class: Migration0008WagerTransactionReference },
         { name: 'Migration0009WagerTransactionSingleReversal', class: Migration0009WagerTransactionSingleReversal },
+        { name: 'Migration0010InboxMessages', class: Migration0010InboxMessages },
       ],
       // Hand-written migrations; the snapshot only serves automatic diffs.
       snapshot: false,
