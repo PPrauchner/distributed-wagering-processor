@@ -6,8 +6,9 @@
  * SQL transaction; the outbox publisher publishes them after the commit, never
  * this use case. Checks run in the documented
  * order, and the first violation decides (`ARCHITECTURE.md` § Ordem das
- * validações). This slice settles `BET`, `WIN` and `LOSS`; a `WIN` citing a
- * reference not there yet is recorded `PENDING_REFERENCE`, with no event.
+ * validações). It settles `BET`, `WIN`, `LOSS`, `REFUND` and `ROLLBACK`; a
+ * transaction citing a reference not there yet is recorded
+ * `PENDING_REFERENCE`, with no event.
  *
  * Error path (`ARCHITECTURE.md` § Classificação de falhas): a transient failure
  * records nothing and reaches the caller; a permanent one rolls the SQL
@@ -36,6 +37,7 @@ import type { Wallet } from '../../wallet/domain/wallet.ts';
 import { WalletBalanceChanged } from '../../wallet/domain/wallet-balance-changed.ts';
 import type { WalletLedgerEntry } from '../../wallet/domain/wallet-ledger-entry.ts';
 import { applyBet } from '../domain/bet.ts';
+import { applyDependentTransaction, type CitedReference } from '../domain/dependent-transaction.ts';
 import { applyLoss } from '../domain/loss.ts';
 import type { SubmissionChannel } from '../domain/rejected-submission.ts';
 import { applyWin } from '../domain/win.ts';
@@ -85,7 +87,13 @@ export interface WagerTransactionOutcome {
 const MAX_IDENTIFIER_LENGTH = 255;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const KINDS = new Set<string>(Object.values(WagerTransactionKind));
-const SUPPORTED_KINDS = new Set([WagerTransactionKind.Bet, WagerTransactionKind.Win, WagerTransactionKind.Loss]);
+const SUPPORTED_KINDS = new Set([
+  WagerTransactionKind.Bet,
+  WagerTransactionKind.Win,
+  WagerTransactionKind.Loss,
+  WagerTransactionKind.Refund,
+  WagerTransactionKind.Rollback,
+]);
 
 export class ProcessWagerTransaction {
   constructor(
@@ -192,7 +200,9 @@ export class ProcessWagerTransaction {
 
   /**
    * Step 8 of the order: the rules of the transaction's kind, on its locked
-   * wallet. A `WIN` citing a reference reads it by its provider and external id.
+   * wallet. A transaction citing a reference reads it by its provider and
+   * external id; a refund or rollback also reads, under the same lock, whether
+   * it was already undone.
    *
    * @returns The ledger entry to persist, when the balance moved.
    */
@@ -217,6 +227,9 @@ export class ProcessWagerTransaction {
       case WagerTransactionKind.Loss:
         applyLoss(transaction, wallet);
         return undefined;
+      case WagerTransactionKind.Refund:
+      case WagerTransactionKind.Rollback:
+        return applyDependentTransaction(transaction, wallet, await citedReference(transactions, transaction), ids);
       default:
         throw new UnsupportedKindError(transaction.kind);
     }
@@ -343,6 +356,23 @@ async function findEarlier(
     throw new IdempotencyConflictError(submitted.providerId, submitted.idempotencyKey, submitted.payloadHash);
   }
   return { transaction: earlier, idempotentReplay: true };
+}
+
+/**
+ * The reference a refund or rollback cites, and whether it was already undone
+ * — asked only of a processed one, the only kind that can have been.
+ */
+async function citedReference(
+  transactions: WagerTransactionRepository,
+  transaction: WagerTransaction,
+): Promise<CitedReference | undefined> {
+  const { providerId, referenceExternalTransactionId } = transaction;
+  if (referenceExternalTransactionId === undefined) return undefined;
+  const reference = await transactions.findByExternalId(providerId, referenceExternalTransactionId);
+  if (!reference) return undefined;
+  const alreadyReversed =
+    reference.status === WagerTransactionStatus.Processed && (await transactions.isReversed(reference.id));
+  return { transaction: reference, alreadyReversed };
 }
 
 function assertIdentifiers(command: SubmitWagerTransactionCommand): void {

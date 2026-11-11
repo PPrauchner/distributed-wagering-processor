@@ -19,6 +19,17 @@ export class MikroOrmWagerTransactionRepository implements WagerTransactionRepos
     return this.em.findOne(WagerTransaction, { providerId, externalTransactionId });
   }
 
+  async isReversed(referenceTransactionId: string): Promise<boolean> {
+    // The same predicate as the single reversal index.
+    const rows: unknown[] = await this.em.execute(
+      `select 1 from wager_transactions
+        where reference_transaction_id = ? and status = 'PROCESSED' and kind in ('REFUND', 'ROLLBACK')
+        limit 1`,
+      [referenceTransactionId],
+    );
+    return rows.length > 0;
+  }
+
   add(transaction: WagerTransaction): void {
     this.em.persist(transaction);
   }
