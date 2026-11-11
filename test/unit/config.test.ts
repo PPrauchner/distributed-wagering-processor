@@ -61,6 +61,7 @@ describe('the outbox publisher', () => {
       accessKeyId: 'test',
       secretAccessKey: 'test',
       wagerTransactionsQueue: 'wager-transactions.fifo',
+      wagerTransactionsDlq: 'wager-transactions-dlq.fifo',
       wageringEventsQueue: 'wagering-events.fifo',
     });
   });
@@ -75,6 +76,7 @@ describe('the outbox publisher', () => {
       SQS_ENDPOINT: 'http://localstack:4566',
       AWS_REGION: 'sa-east-1',
       WAGER_TRANSACTIONS_QUEUE: 'wager-transactions-abc.fifo',
+      WAGER_TRANSACTIONS_DLQ: 'wager-transactions-dlq-abc.fifo',
       WAGERING_EVENTS_QUEUE: 'wagering-events-abc.fifo',
     });
 
@@ -89,6 +91,7 @@ describe('the outbox publisher', () => {
       endpoint: 'http://localstack:4566',
       region: 'sa-east-1',
       wagerTransactionsQueue: 'wager-transactions-abc.fifo',
+      wagerTransactionsDlq: 'wager-transactions-dlq-abc.fifo',
       wageringEventsQueue: 'wagering-events-abc.fifo',
     });
   });
@@ -107,12 +110,15 @@ describe('the outbox publisher', () => {
 });
 
 describe('the wager transactions consumer', () => {
-  test('defaults: enabled, 20 s long polling, batches of 10, 30 s visibility', () => {
+  test('defaults: enabled, 20 s long polling, batches of 10, 30 s visibility, 5 receives, backoff up to 60 s, 20 s drain', () => {
     expect(loadConfig({}).wagerTransactionsConsumer).toEqual({
       enabled: true,
       waitTimeSeconds: 20,
       batchSize: 10,
       visibilityTimeoutSeconds: 30,
+      maxReceives: 5,
+      retryMaxSeconds: 60,
+      drainTimeoutMs: 20_000,
     });
   });
 
@@ -122,6 +128,9 @@ describe('the wager transactions consumer', () => {
       WAGER_TRANSACTIONS_WAIT_SECONDS: '0',
       WAGER_TRANSACTIONS_BATCH_SIZE: '3',
       WAGER_TRANSACTIONS_VISIBILITY_SECONDS: '5',
+      WAGER_TRANSACTIONS_MAX_RECEIVES: '3',
+      WAGER_TRANSACTIONS_RETRY_MAX_SECONDS: '1',
+      WAGER_TRANSACTIONS_DRAIN_TIMEOUT_MS: '500',
     });
 
     expect(config.wagerTransactionsConsumer).toEqual({
@@ -129,6 +138,9 @@ describe('the wager transactions consumer', () => {
       waitTimeSeconds: 0,
       batchSize: 3,
       visibilityTimeoutSeconds: 5,
+      maxReceives: 3,
+      retryMaxSeconds: 1,
+      drainTimeoutMs: 500,
     });
   });
 
@@ -140,6 +152,9 @@ describe('the wager transactions consumer', () => {
     ['WAGER_TRANSACTIONS_VISIBILITY_SECONDS', '0'],
     ['WAGER_TRANSACTIONS_VISIBILITY_SECONDS', '1.5'],
     ['WAGER_TRANSACTIONS_CONSUMER_ENABLED', 'yes'],
+    ['WAGER_TRANSACTIONS_MAX_RECEIVES', '0'],
+    ['WAGER_TRANSACTIONS_RETRY_MAX_SECONDS', '0'],
+    ['WAGER_TRANSACTIONS_DRAIN_TIMEOUT_MS', '0'],
   ])('%s=%s is refused', (name, value) => {
     expect(() => loadConfig({ [name]: value })).toThrow(new RegExp(name));
   });
