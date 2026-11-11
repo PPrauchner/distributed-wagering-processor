@@ -236,6 +236,8 @@ describe('GET /wallets/:walletId/ledger', () => {
 });
 
 const INPUT_CEILING = '999999999999999.99';
+/** Up to a hundred sequential submissions per wallet: past bun's 5 s default. */
+const TEST_TIMEOUT_MS = 30_000;
 
 /** Credits the wallet `count` wins of the input ceiling, one after another. */
 async function winTheCeiling(wallet: TestWallet, count: number): Promise<void> {
@@ -305,7 +307,7 @@ describe('POST /wallets/:walletId/reconciliation', () => {
       checkedEntries: wins + 1,
       walletVersion: wins + 1,
     });
-  });
+  }, TEST_TIMEOUT_MS);
 
   test('a divergence is still a 200: consistent false, counted, nothing corrected', async () => {
     const wallet = await createWallet('100.00');
