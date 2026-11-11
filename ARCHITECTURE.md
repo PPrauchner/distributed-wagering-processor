@@ -194,8 +194,9 @@ Unicidade da reversão: índice único parcial em `reference_transaction_id` com
   `createdAt`. Páginas já servidas nunca mudam.
 - **Reconciliação** (`POST /wallets/:walletId/reconciliation`): só leitura, sem
   lock, numa única consulta (snapshot consistente) — saldo, soma com sinal dos
-  lançamentos, contagem e buracos na sequência. A resposta do §9 ganha
-  `versionGaps`. Divergência de valor ou buraco → `consistent: false`, log `error`
+  lançamentos, contagem, buracos na sequência e maior versão lançada. A resposta
+  do §9 ganha `versionGaps`, `walletVersion` e `lastEntryVersion`. Divergência de
+  valor, buraco ou lançamento acima da versão da carteira → `consistent: false`, log `error`
   e métrica; nada é corrigido; HTTP 200, porque o achado é o relatório.
 
 ## Reembolso e reversão

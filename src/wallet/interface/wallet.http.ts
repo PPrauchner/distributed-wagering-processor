@@ -49,6 +49,8 @@ export interface ReconciliationResponse {
   consistent: boolean;
   checkedEntries: number;
   versionGaps: VersionGap[];
+  walletVersion: number;
+  lastEntryVersion: number | null;
 }
 
 const DEFAULT_LEDGER_LIMIT = 50;
@@ -137,5 +139,7 @@ export function toReconciliationResponse(report: ReconciliationReport): Reconcil
     consistent: report.consistent,
     checkedEntries: report.checkedEntries,
     versionGaps: report.versionGaps,
+    walletVersion: report.walletVersion,
+    lastEntryVersion: report.lastEntryVersion,
   };
 }

@@ -139,6 +139,37 @@ describe('Reconciliation', () => {
     expect(await stateOf(walletId)).toEqual(before);
   });
 
+  test('an entry above the wallet version: reported, logged and counted', async () => {
+    const walletId = await walletWith('100.00');
+    // Version 2 credits 10.00 on top of the opening, but the wallet stays at version 1.
+    await bypassingTriggers(async (tx) => {
+      await tx`update wallets set balance_amount = 110.00 where id = ${walletId}`;
+      await tx`
+        insert into wallet_ledger_entries (
+          id, wallet_id, transaction_id, direction, amount, currency,
+          balance_before_amount, balance_before_currency, balance_after_amount, balance_after_currency,
+          wallet_version, created_at
+        ) values (
+          ${Bun.randomUUIDv7()}, ${walletId}, ${Bun.randomUUIDv7()}, 'CREDIT', 10.00, 'BRL',
+          100.00, 'BRL', 110.00, 'BRL', 2, now()
+        )
+      `;
+    });
+    const before = await stateOf(walletId);
+    const { reconciliation, divergences, errors } = reconciliationWithSpies();
+
+    const report = await reconciliation.execute(walletId);
+
+    expect(report.consistent).toBe(false);
+    expect(report.difference.toJSON()).toEqual({ amount: '0.00', currency: 'BRL' });
+    expect(report.versionGaps).toEqual([]);
+    expect(report.walletVersion).toBe(1);
+    expect(report.lastEntryVersion).toBe(2);
+    expect(errors).toHaveLength(1);
+    expect(divergences.count).toBe(1);
+    expect(await stateOf(walletId)).toEqual(before);
+  });
+
   test('a missing opening is a difference, not a gap', async () => {
     const walletId = await walletWith('0.00');
     await bypassingTriggers((tx) => tx`update wallets set balance_amount = 20.00 where id = ${walletId}`);

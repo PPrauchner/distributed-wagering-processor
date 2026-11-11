@@ -55,6 +55,9 @@ export interface LedgerSnapshot {
   difference: string;
   checkedEntries: number;
   versionGaps: VersionGap[];
+  walletVersion: number;
+  /** The highest version among the entries; `null` when there is none. */
+  lastEntryVersion: number | null;
 }
 
 export interface WalletRepositories {

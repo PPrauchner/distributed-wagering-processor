@@ -37,6 +37,8 @@ export class MikroOrmWalletLedgerRepository implements WalletLedgerRepository {
       difference: row.difference,
       checkedEntries: row.checked_entries,
       versionGaps: row.version_gaps,
+      walletVersion: row.wallet_version,
+      lastEntryVersion: row.last_entry_version,
     };
   }
 }

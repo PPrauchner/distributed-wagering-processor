@@ -258,6 +258,8 @@ describe('POST /wallets/:walletId/reconciliation', () => {
       consistent: true,
       checkedEntries: entries,
       versionGaps: [],
+      walletVersion: Math.max(entries, 1),
+      lastEntryVersion: entries === 0 ? null : entries,
     });
   });
 

@@ -1,7 +1,7 @@
 /**
  * `Reconciliation`: compares a wallet's stored balance with the balance rebuilt
  * from its ledger, and looks for gaps in the entries' version sequence
- * (ADR 0003). Read only — no lock, nothing written, one snapshot. A divergence
+ * (ADR 0003), and for entries above the wallet version. Read only — no lock, nothing written, one snapshot. A divergence
  * is reported, logged and counted, never corrected.
  *
  * @packageDocumentation
@@ -18,11 +18,14 @@ export interface ReconciliationReport {
   calculatedBalance: Money;
   /** Stored minus calculated. */
   difference: Money;
-  /** Zero difference and no gap. */
+  /** Zero difference, no gap and no entry above the wallet version. */
   consistent: boolean;
   checkedEntries: number;
   /** Ranges of missing versions, in ascending order. */
   versionGaps: VersionGap[];
+  walletVersion: number;
+  /** The highest version among the entries; `null` when there is none. */
+  lastEntryVersion: number | null;
 }
 
 /** Injection token of the divergence counter: the metrics bind it. */
@@ -86,10 +89,16 @@ function toReport(snapshot: LedgerSnapshot): ReconciliationReport {
     storedBalance: signedMoney(snapshot.storedBalance, currency),
     calculatedBalance: signedMoney(snapshot.calculatedBalance, currency),
     difference,
-    consistent: difference.isZero() && snapshot.versionGaps.length === 0,
+    consistent: difference.isZero() && snapshot.versionGaps.length === 0 && !hasEntryAboveVersion(snapshot),
     checkedEntries: snapshot.checkedEntries,
     versionGaps: snapshot.versionGaps,
+    walletVersion: snapshot.walletVersion,
+    lastEntryVersion: snapshot.lastEntryVersion,
   };
+}
+
+function hasEntryAboveVersion(snapshot: LedgerSnapshot): boolean {
+  return snapshot.lastEntryVersion !== null && snapshot.lastEntryVersion > snapshot.walletVersion;
 }
 
 // A divergent ledger may sum below zero, which `Money.from` refuses on input.

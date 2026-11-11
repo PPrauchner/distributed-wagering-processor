@@ -2,11 +2,12 @@
  * The reconciliation query (ADR 0003): one read-only SQL statement — one
  * snapshot, no lock — that returns the wallet's stored balance, the signed sum
  * of its entries (credit +, debit −), their count and the gaps in the version
- * sequence. Sums run over the `numeric` columns in SQL; amounts leave as text.
+ * sequence, with the wallet version and the highest entry version. Sums run over the `numeric` columns in SQL; amounts leave as text.
  *
  * Versions 2 up to the wallet's current version must each have an entry;
  * version 1 only exists with an opening, so a missing opening shows up as a
- * difference, not as a gap. Also run by the integration tests' final invariant
+ * difference, not as a gap. An entry above the wallet version is no gap: the
+ * last entry version shows it. Also run by the integration tests' final invariant
  * check, which is why the placeholder syntax is a parameter.
  *
  * @packageDocumentation
@@ -21,6 +22,8 @@ export interface ReconciliationRow {
   difference: string;
   checked_entries: number;
   version_gaps: { from: number; to: number }[];
+  wallet_version: number;
+  last_entry_version: number | null;
 }
 
 /**
@@ -42,7 +45,8 @@ export function reconciliationQuery(walletIdPlaceholder: string): string {
         join wallet w on w.id = e.wallet_id
     ),
     totals as (
-      select coalesce(sum(signed_amount), 0)::numeric(19, 2) as calculated, count(*)::int as checked
+      select coalesce(sum(signed_amount), 0)::numeric(19, 2) as calculated, count(*)::int as checked,
+             max(wallet_version)::int as last_version
         from entries
     ),
     missing as (
@@ -65,7 +69,9 @@ export function reconciliationQuery(walletIdPlaceholder: string): string {
              (select json_agg(json_build_object('from', from_version, 'to', to_version) order by from_version)
                 from gaps),
              '[]'::json
-           ) as version_gaps
+           ) as version_gaps,
+           w.version::int as wallet_version,
+           t.last_version as last_entry_version
       from wallet w cross join totals t
   `;
 }
