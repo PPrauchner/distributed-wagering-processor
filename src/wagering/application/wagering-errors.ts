@@ -6,6 +6,7 @@
  *
  * @packageDocumentation
  */
+import { InboxRedeliveryError } from '../../messaging/application/inbox-repository.ts';
 
 /** The submission has no idempotency key, or an empty one. */
 export class MissingIdempotencyKeyError extends Error {
@@ -91,5 +92,22 @@ export class SubmissionWalletNotFoundError extends Error {
     readonly payloadHash?: string,
   ) {
     super(`wallet not found: ${walletId}`);
+  }
+}
+
+/**
+ * A redelivery the inbox refused, of a message whose submission was recorded
+ * `FAILED`: nothing was recorded this time, but the message still belongs in
+ * the DLQ, with the code it failed with — its send there may be what failed.
+ */
+export class FailedRedeliveryError extends InboxRedeliveryError {
+  override readonly name: string = 'FailedRedeliveryError';
+
+  constructor(
+    messageId: string,
+    readonly failureCode: string,
+    options?: ErrorOptions,
+  ) {
+    super(`messageId "${messageId}" was already recorded FAILED ${failureCode}`, options);
   }
 }

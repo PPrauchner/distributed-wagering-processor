@@ -23,6 +23,7 @@ import {
   ProcessWagerTransaction,
   type SubmitWagerTransactionCommand,
 } from '../../../src/wagering/application/process-wager-transaction.ts';
+import { FailedRedeliveryError } from '../../../src/wagering/application/wagering-errors.ts';
 import { SubmissionChannel } from '../../../src/wagering/domain/rejected-submission.ts';
 import { WagerTransactionStatus } from '../../../src/wagering/domain/wager-transaction.ts';
 import { expectLedgerConsistent } from '../ledger-invariant.ts';
@@ -129,6 +130,7 @@ describe('a submission received by the queue', () => {
     const redelivered = useCase.execute(command, SubmissionChannel.Queue, entry);
 
     await expect(redelivered).rejects.toBeInstanceOf(InboxRedeliveryError);
+    await expect(redelivered).rejects.not.toBeInstanceOf(FailedRedeliveryError);
     expect(await walletState(wallet.id)).toEqual(before);
   });
 
@@ -188,7 +190,9 @@ describe('a submission that ended FAILED', () => {
 
     expect(outcome.transaction.status).toBe(WagerTransactionStatus.Failed);
     expect(await inboxRow(entry.messageId)).toEqual({ payload_hash: entry.payloadHash, processed: true });
-    await expect(faulty.execute(command, SubmissionChannel.Queue, entry)).rejects.toBeInstanceOf(InboxRedeliveryError);
+    const redelivered = faulty.execute(command, SubmissionChannel.Queue, entry);
+    await expect(redelivered).rejects.toBeInstanceOf(FailedRedeliveryError);
+    await expect(redelivered).rejects.toMatchObject({ failureCode: outcome.transaction.failureCode });
   });
 
   test('recorded first by HTTP, the queue answers the FAILED replay and records its inbox row', async () => {

@@ -6,7 +6,8 @@
  * (`ARCHITECTURE.md` § Consumidor):
  *
  * - a transaction outcome — `PROCESSED`, `REJECTED`, `PENDING_REFERENCE` — or a
- *   redelivery the inbox already holds: `ack`, after the commit;
+ *   redelivery the inbox already holds: `ack`, after the commit — a redelivery
+ *   of a `FAILED` goes to the DLQ again first;
  * - a transient failure, or a wallet not there yet: no `ack`, the delivery
  *   comes back after `min(2^receiveCount s, ceiling)`; on the last receive, the
  *   use case gives up — `FAILED` `INFRA_RETRIES_EXHAUSTED` — or, for the
@@ -46,6 +47,7 @@ import type {
 import type { RecordRejectedSubmission } from '../application/record-rejected-submission.ts';
 import {
   ExternalIdConflictError,
+  FailedRedeliveryError,
   IdempotencyConflictError,
   InternalKindNotAllowedError,
   SubmissionWalletNotFoundError,
@@ -213,6 +215,12 @@ export class WagerTransactionConsumer implements OnApplicationBootstrap, BeforeA
 
   /** The use case refused the message without an outcome. */
   private async refused(message: ReceivedMessage, facts: MessageFacts, error: unknown): Promise<void> {
+    // Its first send to the DLQ may be what failed; the deduplication id absorbs a second one.
+    if (error instanceof FailedRedeliveryError) {
+      this.deps.metrics.inboxDuplicate();
+      await this.deadLetter(message, facts, error.failureCode);
+      return this.deps.queue.acknowledge(message);
+    }
     if (error instanceof InboxRedeliveryError) {
       this.deps.metrics.inboxDuplicate();
       this.deps.log.info('queue message already in the inbox, acknowledged with no effect');

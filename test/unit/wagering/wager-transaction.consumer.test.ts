@@ -26,6 +26,7 @@ import type {
 } from '../../../src/wagering/application/record-rejected-submission.ts';
 import {
   ExternalIdConflictError,
+  FailedRedeliveryError,
   IdempotencyConflictError,
   InternalKindNotAllowedError,
   SubmissionWalletNotFoundError,
@@ -253,6 +254,31 @@ describe('a permanent error', () => {
     expect(h.deadLetters.map((letter) => letter.failureCode)).toEqual([FailureCode.InfraInvariantViolation]);
     expect(h.acknowledged).toEqual(['receipt-1']);
     expect(h.rejected).toEqual([]);
+  });
+
+  test('a redelivery of a message recorded FAILED is sent to the DLQ again before the ack', async () => {
+    const h = harness({
+      execute: failWith(new FailedRedeliveryError(MESSAGE_ID, FailureCode.InfraInvariantViolation)),
+    });
+
+    await h.consumer.handle(messageOf(2));
+
+    expect(h.deadLetters).toMatchObject([
+      { failureCode: FailureCode.InfraInvariantViolation, groupId: WALLET_ID, deduplicationId: MESSAGE_ID },
+    ]);
+    expect(h.acknowledged).toEqual(['receipt-2']);
+    expect(h.rejected).toEqual([]);
+  });
+
+  test('a redelivery of a FAILED whose DLQ send fails again stays unacknowledged', async () => {
+    const h = harness({
+      execute: failWith(new FailedRedeliveryError(MESSAGE_ID, FailureCode.InfraInvariantViolation)),
+      dlqFails: true,
+    });
+
+    await h.consumer.handle(messageOf(2));
+
+    expect(h.acknowledged).toEqual([]);
   });
 
   test('a DLQ that fails leaves the message unacknowledged', async () => {

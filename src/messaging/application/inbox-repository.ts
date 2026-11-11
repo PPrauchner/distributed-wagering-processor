@@ -35,7 +35,7 @@ export interface InboxRepositories {
  * outcome committed. The unit of work rolled back; acknowledge it with no effect.
  */
 export class InboxRedeliveryError extends Error {
-  override readonly name = 'InboxRedeliveryError';
+  override readonly name: string = 'InboxRedeliveryError';
 }
 
 /**

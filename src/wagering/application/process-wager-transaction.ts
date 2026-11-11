@@ -55,6 +55,7 @@ import {
   DuplicateExternalIdError,
   DuplicateIdempotencyKeyError,
   ExternalIdConflictError,
+  FailedRedeliveryError,
   IdempotencyConflictError,
   InternalKindNotAllowedError,
   SubmissionWalletNotFoundError,
@@ -128,6 +129,9 @@ export class ProcessWagerTransaction {
    *   or the database is unavailable: nothing was recorded.
    * @throws {@link PermanentFailureError} If even the `FAILED` could not be
    *   recorded for a permanent reason.
+   * @throws {@link FailedRedeliveryError} If the inbox already holds the
+   *   message and its submission was recorded `FAILED`: nothing was recorded
+   *   this time; it still belongs in the DLQ.
    * @throws {@link InboxRedeliveryError} If the inbox already holds the
    *   message: nothing was recorded this time.
    * @throws {@link MessageIdConflictError} If the inbox holds its `messageId`
@@ -138,7 +142,7 @@ export class ProcessWagerTransaction {
     channel: SubmissionChannel,
     inbox?: InboxEntry,
   ): Promise<WagerTransactionOutcome> {
-    return this.observed(channel, () => this.redeliveryChecked(inbox, () => this.process(command, inbox)));
+    return this.observed(channel, () => this.redeliveryChecked(command, inbox, () => this.process(command, inbox)));
   }
 
   /**
@@ -153,7 +157,8 @@ export class ProcessWagerTransaction {
    * @throws Whatever {@link execute} throws validating the submission or
    *   settling a race on its key, and {@link TransientFailureError} if the
    *   database is still unavailable: nothing was recorded.
-   * @throws {@link InboxRedeliveryError} If the inbox already holds the message.
+   * @throws {@link InboxRedeliveryError} If the inbox already holds the message
+   *   — {@link FailedRedeliveryError} when it was recorded `FAILED`.
    * @throws {@link MessageIdConflictError} If it holds the `messageId` with
    *   another payload hash.
    */
@@ -161,14 +166,19 @@ export class ProcessWagerTransaction {
     return this.observed(SubmissionChannel.Queue, () => {
       const { props } = this.validated(command);
       this.log.enrich({ correlationId: props.correlationId, walletId: props.walletId, providerId: props.providerId });
-      return this.redeliveryChecked(inbox, () =>
+      return this.redeliveryChecked(command, inbox, () =>
         this.settled(props, () => this.recordFailure(props, FailureCode.InfraRetriesExhausted, inbox)),
       );
     });
   }
 
-  /** Tells a redelivery the inbox refused from a `messageId` reused with another payload. */
+  /**
+   * Tells a redelivery the inbox refused from a `messageId` reused with
+   * another payload, and a redelivery of a submission recorded `FAILED` — one
+   * the consumer still owes the DLQ — from the others.
+   */
   private async redeliveryChecked(
+    command: SubmitWagerTransactionCommand,
     received: InboxEntry | undefined,
     work: () => Promise<WagerTransactionOutcome>,
   ): Promise<WagerTransactionOutcome> {
@@ -176,9 +186,17 @@ export class ProcessWagerTransaction {
       return await work();
     } catch (error) {
       if (!received || !(error instanceof InboxRedeliveryError)) throw error;
-      const recorded = await this.unitOfWork.run(({ inbox }) => inbox.find(received.consumerName, received.messageId));
+      const { recorded, transaction } = await this.unitOfWork.run(async ({ inbox, transactions }) => ({
+        recorded: await inbox.find(received.consumerName, received.messageId),
+        transaction: await transactions.findByIdempotencyKey(command.providerId, command.idempotencyKey),
+      }));
       if (recorded && recorded.payloadHash !== received.payloadHash) {
         throw new MessageIdConflictError(received.messageId, received.payloadHash);
+      }
+      if (transaction?.status === WagerTransactionStatus.Failed) {
+        throw new FailedRedeliveryError(received.messageId, transaction.failureCode ?? FailureCode.InfraUnexpected, {
+          cause: error,
+        });
       }
       throw error;
     }
