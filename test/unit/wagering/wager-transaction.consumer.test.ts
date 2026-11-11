@@ -2,7 +2,8 @@
  * Unit tests for `WagerTransactionConsumer` on its failure path: what each
  * outcome or error of the use case does to the message — `ack`, a retry with
  * `min(2^receiveCount s, ceiling)` of visibility, `FAILED` + DLQ, or the DLQ
- * as a submission not admitted, with its `rejected_submissions` row — and the
+ * as a submission not admitted, with its `rejected_submissions` row — a
+ * transient failure out of receives included — and the
  * shutdown that drains the messages in progress. The queue, the DLQ and the
  * use cases are fakes; the end to end lives in the integration tests.
  *
@@ -70,14 +71,11 @@ interface Harness {
   rejected: RecordRejectedSubmissionCommand[];
   retries: string[];
   dlqCodes: string[];
-  /** How many times the use case was asked to give up. */
-  gaveUp: number;
 }
 
 function harness(
   options: {
     execute?: Answer;
-    giveUp?: Answer;
     dlqFails?: boolean;
     recordFails?: boolean;
     maxReceives?: number;
@@ -93,7 +91,6 @@ function harness(
     rejected: [] as RecordRejectedSubmissionCommand[],
     retries: [] as string[],
     dlqCodes: [] as string[],
-    gaveUp: 0,
   };
   const queue: InputQueue = {
     receive: options.receive ?? (async () => []),
@@ -108,10 +105,6 @@ function harness(
   };
   const processWagerTransaction = {
     execute: options.execute ?? (async () => outcome('PROCESSED')),
-    giveUp: async () => {
-      h.gaveUp++;
-      return (options.giveUp ?? (async () => outcome('FAILED', FailureCode.InfraRetriesExhausted)))();
-    },
   } as unknown as ProcessWagerTransaction;
   const recordRejectedSubmission = {
     execute: async (command: RecordRejectedSubmissionCommand) => {
@@ -200,12 +193,11 @@ describe('a transient failure', () => {
     expect(h.visibility).toEqual([['receipt-7', 60]]);
   });
 
-  test('on the last receive, it is given up on: FAILED INFRA_RETRIES_EXHAUSTED, sent to the DLQ, then acknowledged', async () => {
+  test('on the last receive, it ends with no outcome: the DLQ as INFRA_RETRIES_EXHAUSTED, a rejected row, then the ack', async () => {
     const h = harness({ execute: failWith(new TransientFailureError(FailureCode.TransientLockTimeout)) });
 
     await h.consumer.handle(messageOf(5));
 
-    expect(h.gaveUp).toBe(1);
     expect(h.deadLetters).toEqual([
       {
         body: envelope(),
@@ -216,31 +208,27 @@ describe('a transient failure', () => {
       },
     ]);
     expect(h.dlqCodes).toEqual([FailureCode.InfraRetriesExhausted]);
+    expect(h.rejected).toMatchObject([
+      { failureCode: FailureCode.InfraRetriesExhausted, channel: 'QUEUE', messageId: MESSAGE_ID },
+    ]);
+    expect(h.rejected[0]!.payloadHash).toMatch(/^[0-9a-f]{64}$/);
     expect(h.acknowledged).toEqual(['receipt-5']);
+  });
+
+  test('when the DLQ fails on the last receive, the message is left for the redrive: no rejected row, no ack', async () => {
+    const h = harness({ execute: failWith(new TransientFailureError(FailureCode.TransientUnavailable)), dlqFails: true });
+
+    await h.consumer.handle(messageOf(5));
+
     expect(h.rejected).toEqual([]);
+    expect(h.acknowledged).toEqual([]);
   });
 
-  test('giving up on a message the inbox already holds acknowledges it with no DLQ', async () => {
-    const h = harness({
-      execute: failWith(new TransientFailureError(FailureCode.TransientLockTimeout)),
-      giveUp: failWith(new InboxRedeliveryError('duplicate')),
-    });
+  test('when the rejected row cannot be recorded on the last receive, the message is left for the redrive', async () => {
+    const h = harness({ execute: failWith(new TransientFailureError(FailureCode.TransientUnavailable)), recordFails: true });
 
     await h.consumer.handle(messageOf(5));
 
-    expect(h.deadLetters).toEqual([]);
-    expect(h.acknowledged).toEqual(['receipt-5']);
-  });
-
-  test('when even giving up fails, the message is left for the redrive: no DLQ, no ack', async () => {
-    const h = harness({
-      execute: failWith(new TransientFailureError(FailureCode.TransientUnavailable)),
-      giveUp: failWith(new TransientFailureError(FailureCode.TransientUnavailable)),
-    });
-
-    await h.consumer.handle(messageOf(5));
-
-    expect(h.deadLetters).toEqual([]);
     expect(h.acknowledged).toEqual([]);
   });
 });
@@ -392,7 +380,6 @@ describe('a submission not admitted', () => {
 
     await h.consumer.handle(messageOf(5));
 
-    expect(h.gaveUp).toBe(0);
     expect(h.deadLetters.map((letter) => letter.failureCode)).toEqual([FailureCode.WalletNotFound]);
     expect(h.rejected).toMatchObject([{ failureCode: FailureCode.WalletNotFound }]);
     expect(h.acknowledged).toEqual(['receipt-5']);

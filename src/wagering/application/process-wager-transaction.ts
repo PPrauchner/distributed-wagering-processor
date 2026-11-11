@@ -15,8 +15,8 @@
  * records nothing and reaches the caller; a permanent one rolls the SQL
  * transaction back, and a second unit of work records the transaction as
  * `FAILED` — with its inbox row, when it came by the queue —, so the key keeps
- * answering the same outcome. A queue consumer that gives up on a transient
- * failure records `FAILED` `INFRA_RETRIES_EXHAUSTED` the same way.
+ * answering the same outcome. A transient failure never becomes `FAILED`: a
+ * queue consumer out of receives sends the message to the DLQ with no outcome.
  *
  * Every submission that ends in a transaction is counted and timed by channel
  * and kind, and logged with its ids, kind and status — never its money;
@@ -143,33 +143,6 @@ export class ProcessWagerTransaction {
     inbox?: InboxEntry,
   ): Promise<WagerTransactionOutcome> {
     return this.observed(channel, () => this.redeliveryChecked(command, inbox, () => this.process(command, inbox)));
-  }
-
-  /**
-   * Gives up on a queue submission whose transient failures outlasted its
-   * receives: records it `FAILED` `INFRA_RETRIES_EXHAUSTED`, with its inbox
-   * row, in a unit of work of its own — nothing observed, no ledger entry.
-   *
-   * @param command - The submission, as {@link execute} takes it.
-   * @param inbox - The queue message it came in.
-   * @returns The `FAILED` transaction or, when the key was recorded meanwhile,
-   *   the replay of that transaction.
-   * @throws Whatever {@link execute} throws validating the submission or
-   *   settling a race on its key, and {@link TransientFailureError} if the
-   *   database is still unavailable: nothing was recorded.
-   * @throws {@link InboxRedeliveryError} If the inbox already holds the message
-   *   — {@link FailedRedeliveryError} when it was recorded `FAILED`.
-   * @throws {@link MessageIdConflictError} If it holds the `messageId` with
-   *   another payload hash.
-   */
-  giveUp(command: SubmitWagerTransactionCommand, inbox: InboxEntry): Promise<WagerTransactionOutcome> {
-    return this.observed(SubmissionChannel.Queue, () => {
-      const { props } = this.validated(command);
-      this.log.enrich({ correlationId: props.correlationId, walletId: props.walletId, providerId: props.providerId });
-      return this.redeliveryChecked(command, inbox, () =>
-        this.settled(props, () => this.recordFailure(props, FailureCode.InfraRetriesExhausted, inbox)),
-      );
-    });
   }
 
   /**
