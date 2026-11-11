@@ -15,9 +15,12 @@
  *   id, in the SQL transaction of the outcome.
  *
  * A transient failure reschedules the item, with no limit of attempts — the
- * TTL already limits the wait; a permanent one records it `FAILED` in a second
- * unit of work, with an alert and no event. A worker that dies leaves its
- * items leased, and another takes them once the lease expires.
+ * TTL already limits the wait; a permanent one — or one the classifier left
+ * unclassified, recorded `INFRA_UNEXPECTED` — records it `FAILED` in a second
+ * unit of work, with an alert and no event. With no caller to tell, an error
+ * that still escapes an item is logged and left to its lease: the rest of the
+ * batch goes on. A worker that dies leaves its items leased, and another takes
+ * them once the lease expires.
  *
  * @packageDocumentation
  */
@@ -65,10 +68,19 @@ export class ResolvePendingReferences {
     for (const claim of claimed) {
       if (stopping()) break;
       await this.log.inContext({ transactionId: claim.transactionId, walletId: claim.walletId }, () =>
-        this.resolveOne(claim),
+        this.resolveIsolated(claim),
       );
     }
     return claimed.length;
+  }
+
+  /** Resolves the item; an error that escapes it is logged, never thrown into the batch. */
+  private async resolveIsolated(claim: PendingReferenceClaim): Promise<void> {
+    try {
+      await this.resolveOne(claim);
+    } catch (error) {
+      this.log.warn('pending reference left to its lease after an error', { error: errorName(error) });
+    }
   }
 
   private async resolveOne(claim: PendingReferenceClaim): Promise<void> {
@@ -84,7 +96,8 @@ export class ResolvePendingReferences {
         await this.recordFailure(claim, error);
         return;
       }
-      throw error;
+      // Unclassified — a bug or a domain error: retrying would fail the same way, forever.
+      await this.recordFailure(claim, new PermanentFailureError(FailureCode.InfraUnexpected, { cause: error }));
     }
   }
 
@@ -145,11 +158,21 @@ export class ResolvePendingReferences {
       pending.fail(error.failureCode);
       return pending;
     });
-    if (failed) this.log.warn('pending reference failed permanently', { failureCode: error.failureCode });
+    if (failed) {
+      this.log.warn('pending reference failed permanently', {
+        failureCode: error.failureCode,
+        error: errorName(error.cause ?? error),
+      });
+    }
   }
 
   private logSettled(transaction: WagerTransaction): void {
     const { kind, status, failureCode } = transaction;
     this.log.info('pending reference resolved', { kind, status, failureCode });
   }
+}
+
+/** The error's class name, for the log: never its message, which may carry values. */
+function errorName(error: unknown): string {
+  return error instanceof Error ? error.name : typeof error;
 }
