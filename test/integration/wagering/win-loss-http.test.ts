@@ -221,7 +221,7 @@ describe('a WIN citing the bet of its round', () => {
     expect(body).toMatchObject({ failureCode: 'REFERENCE_NOT_PROCESSED' });
   });
 
-  test('a reference not there yet: 202 PENDING_REFERENCE, nothing moved, no event; the replay is 202 too', async () => {
+  test('a reference not there yet: 202 PENDING_REFERENCE, nothing moved, only the pending event; the replay is 202 too', async () => {
     const wallet = await createWallet('100.00');
     const win = transactionOn(wallet, 'WIN', { referenceExternalTransactionId: Bun.randomUUIDv7() });
 
@@ -235,7 +235,7 @@ describe('a WIN citing the bet of its round', () => {
     expect(await row(first.body.transactionId)).toMatchObject({ status: 'PENDING_REFERENCE', balance_after: null });
     expect(await walletRow(wallet.id)).toEqual({ balance: '100.00', version: 1 });
     expect(await entriesOf(first.body.transactionId)).toEqual([]);
-    expect(await eventsOf(first.body.transactionId)).toEqual([]);
+    expect(await eventsOf(first.body.transactionId)).toEqual(['WagerTransactionPendingReference']);
   });
 
   test('a rejection replays with its message', async () => {
