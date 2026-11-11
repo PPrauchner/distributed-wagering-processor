@@ -24,6 +24,12 @@ export enum FaultPoint {
    * expires and another instance resends the same `eventId`.
    */
   CrashAfterSend = 'crash-after-send',
+  /**
+   * The worker of pending references, holding the wallet lock: the database
+   * answers `lock_not_available`, a real transient failure through the
+   * classifier, and the item is rescheduled.
+   */
+  TransientFailureInResolution = 'transient-failure-in-resolution',
 }
 
 /** The process "died" at a crash point: what came after it never ran. */
