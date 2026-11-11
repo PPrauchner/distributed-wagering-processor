@@ -316,3 +316,69 @@ describe('with more than one violation, the first in order wins', () => {
     expect(transaction.failureCode).toBe(code);
   });
 });
+
+/** A wallet holding `amount` BRL, as read back from the database at version 5. */
+const walletHolding = (amount: string): Wallet =>
+  Wallet.rehydrate({
+    id: WALLET_ID,
+    playerId: PLAYER_ID,
+    currency: 'BRL',
+    balance: Money.fromPersisted({ amount, currency: 'BRL' }),
+    version: 5,
+    createdAt: new Date('2026-11-01T10:00:00Z'),
+    updatedAt: new Date('2026-11-02T10:00:00Z'),
+    initialBalance: Money.zero('BRL'),
+  });
+
+describe('a crediting REFUND or ROLLBACK and the maximum balance', () => {
+  test.each([
+    ['a REFUND', refund],
+    ['a ROLLBACK', rollback],
+  ])('%s of a BET past the maximum: rejected BALANCE_LIMIT_EXCEEDED, the wallet untouched and observed', (_case, make) => {
+    const wallet = walletHolding('99999999999999980.00');
+    const transaction = make();
+
+    const entry = applyDependentTransaction(transaction, wallet, cited(referenceOf(WagerTransactionKind.Bet)), ids);
+
+    expect(entry).toBeUndefined();
+    expect(transaction.status).toBe(WagerTransactionStatus.Rejected);
+    expect(transaction.failureCode).toBe(FailureCode.BalanceLimitExceeded);
+    expect(transaction.balanceAfter?.toJSON().amount).toBe('99999999999999980.00');
+    expect(transaction.walletVersionObserved).toBe(5);
+    expect(wallet.version).toBe(5);
+  });
+
+  test('up to exactly the maximum: processed', () => {
+    const wallet = walletHolding('99999999999999979.99');
+    const transaction = refund();
+
+    applyDependentTransaction(transaction, wallet, cited(referenceOf(WagerTransactionKind.Bet)), ids);
+
+    expect(transaction.status).toBe(WagerTransactionStatus.Processed);
+    expect(wallet.balance.toJSON().amount).toBe('99999999999999999.99');
+  });
+
+  test.each<[string, CitedReference | undefined, FailureCode | undefined]>([
+    ['a missing reference waits', undefined, undefined],
+    ['already reversed beats the maximum', cited(referenceOf(WagerTransactionKind.Bet), true), FailureCode.ReferenceAlreadyReversed],
+    [
+      'amount beats the maximum',
+      cited(referenceOf(WagerTransactionKind.Bet, { money: brl('5.00') })),
+      FailureCode.ReferenceAmountMismatch,
+    ],
+  ])('the reference comes first: %s', (_case, reference, code) => {
+    const transaction = refund();
+
+    applyDependentTransaction(transaction, walletHolding('99999999999999990.00'), reference, ids);
+
+    expect(transaction.failureCode).toBe(code);
+  });
+
+  test('a debiting ROLLBACK of a WIN on a full wallet: processed', () => {
+    const transaction = rollback();
+
+    applyDependentTransaction(transaction, walletHolding('99999999999999999.99'), cited(referenceOf(WagerTransactionKind.Win)), ids);
+
+    expect(transaction.status).toBe(WagerTransactionStatus.Processed);
+  });
+});
