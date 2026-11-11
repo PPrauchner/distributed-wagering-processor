@@ -1,7 +1,7 @@
 /**
  * Concurrency scenarios 1 to 3 of §13, by real parallel HTTP requests to a
  * real app process: the same bet 50 times, the race of §8 for the balance of
- * one wallet, and distinct wallets processed in parallel with no global lock.
+ * one wallet — both bets made to wait on the wallet lock before it goes —, and distinct wallets processed in parallel with no global lock.
  * Every scenario ends checking the ledger invariant of every wallet it touched.
  *
  * @packageDocumentation
@@ -9,6 +9,7 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { killAllInstances, startInstance, type AppInstance } from './support/app-processes.ts';
 import { createScenarioQueues, deleteScenarioQueues } from './support/queues.ts';
+import { waitUntil } from './support/wait-until.ts';
 import {
   createWallet,
   expectWalletsConsistent,
@@ -61,7 +62,18 @@ describe('2. the race of §8: two bets of 80.00 at once on 100.00', () => {
     const wallet = await createWallet(app.url, '100.00');
     const bets = [1, 2].map(() => transactionOn(wallet, 'BET', { money: { amount: '80.00', currency: 'BRL' } }));
 
-    const answers = await Promise.all(bets.map((bet) => submitUntilTerminal(app.url, bet)));
+    // Both bets meet the wallet locked by another session, so they overlap for sure;
+    // the lock goes only once both wait on it, well within the 2 s lock_timeout.
+    let release!: () => void;
+    const lock = await holdWalletLock(wallet.id, new Promise((resolve) => (release = resolve)));
+    const submitted = Promise.all(bets.map((bet) => submitUntilTerminal(app.url, bet)));
+    await waitUntil(
+      async () => ((await sessionsWaitingOnWalletLock()) >= 2 ? true : undefined),
+      1_500,
+      'both bets waiting on the wallet lock',
+    ).finally(release);
+    await lock.released;
+    const answers = await submitted;
 
     expect(answers.map((answer) => answer.body.status).sort()).toEqual(['PROCESSED', 'REJECTED']);
     expect(answers.find((answer) => answer.body.status === 'REJECTED')!.body.failureCode).toBe('INSUFFICIENT_FUNDS');
@@ -123,6 +135,16 @@ async function submitOnce(baseUrl: string, data: JsonObject): Promise<{ status: 
     body: JSON.stringify(data),
   });
   return { status: response.status, body: (await response.json()) as JsonObject };
+}
+
+/** @returns How many sessions of the test database wait on the use case's wallet lock right now. */
+async function sessionsWaitingOnWalletLock(): Promise<number> {
+  const [row] = await sql`
+    select count(*)::int as n from pg_stat_activity
+     where datname = current_database() and wait_event_type = 'Lock'
+       and query ~* 'from "wallets".*for update'
+  `;
+  return row.n;
 }
 
 /**
