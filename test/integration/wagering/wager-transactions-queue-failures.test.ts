@@ -7,7 +7,8 @@
  * permanent error ends `FAILED` in the DLQ, and its redelivery has no effect;
  * submissions not admitted go to the DLQ with their `failureCode` and a
  * `rejected_submissions` row — a `BET` sent before its wallet exists only once
- * its receives run out —; a real process given `SIGTERM` with messages in
+ * its receives run out —; a batch keeps the order of its FIFO groups, a retry
+ * included; a real process given `SIGTERM` with messages in
  * progress loses and duplicates none. Every input queue has a DLQ of its own,
  * with the redrive of the Compose (`maxReceiveCount` 6), and a random suffix;
  * the backoff ceiling is 1 s, so five receives take seconds. Waits by
@@ -193,7 +194,7 @@ function betData(wallet: TestWallet, amount = '25.00', overrides: JsonObject = {
 async function send(
   queueUrl: string,
   data: JsonObject,
-  options: { messageId?: string; body?: string } = {},
+  options: { messageId?: string; body?: string; groupId?: string } = {},
 ): Promise<string> {
   const messageId = options.messageId ?? Bun.randomUUIDv7();
   await sqs.send(
@@ -202,7 +203,7 @@ async function send(
       MessageBody:
         options.body ??
         JSON.stringify({ messageId, type: 'WagerTransactionRequested', occurredAt: new Date().toISOString(), data }),
-      MessageGroupId: typeof data.walletId === 'string' ? data.walletId : Bun.randomUUIDv7(),
+      MessageGroupId: options.groupId ?? (typeof data.walletId === 'string' ? data.walletId : Bun.randomUUIDv7()),
       MessageDeduplicationId: Bun.randomUUIDv7(),
     }),
   );
@@ -314,13 +315,14 @@ async function walletState(walletId: string): Promise<{ balance_amount: string; 
   return row;
 }
 
-async function counter(name: string, failureCode: string): Promise<number> {
-  const text = await (await fetch(`${baseUrl}/metrics`)).text();
+async function counter(name: string, failureCode: string, url = baseUrl): Promise<number> {
+  const text = await (await fetch(`${url}/metrics`)).text();
   const line = text.split('\n').find((row) => row.startsWith(`${name}{failure_code="${failureCode}"} `));
   return line === undefined ? 0 : Number(line.split(' ')[1]);
 }
 
-const retries = (failureCode: string) => counter('wager_transactions_consumer_retries_total', failureCode);
+const retries = (failureCode: string, url?: string) =>
+  counter('wager_transactions_consumer_retries_total', failureCode, url);
 const deadLettered = (failureCode: string) => counter('wager_transactions_dlq_messages_total', failureCode);
 
 /**
@@ -548,6 +550,78 @@ describe('a submission not admitted', () => {
       expect(await rejectedRows(messageId)).toEqual([{ failure_code: failureCode, channel: 'QUEUE' }]);
     }
     expect(await walletState(wallet.id)).toEqual({ balance_amount: '75.00', version: 2 });
+  }, 60_000);
+});
+
+async function eventTypesOf(transactionId: string): Promise<string[]> {
+  const rows = await sql`select event_type from outbox_messages where payload->>'causationId' = ${transactionId}`;
+  return rows.map((row: { event_type: string }) => row.event_type);
+}
+
+/**
+ * Starts a consumer on a queue the messages are already in, so its first
+ * receive brings them in one batch; HTTP on a port of its own, for its metrics.
+ */
+async function consumerOn(queues: QueuePair): Promise<string> {
+  const instance = await startApp(instanceConfig(queues));
+  await instance.listen(0, '127.0.0.1');
+  return instance.getUrl();
+}
+
+describe('the order of a FIFO group within a batch', () => {
+  test('a BET and its ROLLBACK in the same batch and group: the ROLLBACK is PROCESSED at once, never PENDING_REFERENCE', async () => {
+    const queues = await createQueuePair();
+    const wallet = await createWallet('100.00');
+    const bet = betData(wallet);
+    const rollback = betData(wallet, '25.00', {
+      kind: 'ROLLBACK',
+      referenceExternalTransactionId: bet.externalTransactionId,
+    });
+    await send(queues.url, bet);
+    await send(queues.url, rollback);
+
+    await consumerOn(queues);
+    const settled = await oneTransactionOf(rollback);
+    await waitUntil(() => drained(queues.url));
+
+    expect(settled.status).toBe('PROCESSED');
+    expect(await eventTypesOf(settled.id)).not.toContain('WagerTransactionPendingReference');
+    expect(await transactionsOf(bet)).toMatchObject([{ status: 'PROCESSED' }]);
+    expect(await walletState(wallet.id)).toEqual({ balance_amount: '100.00', version: 3 });
+    await expectLedgerConsistent(sql, [wallet.id]);
+  }, 60_000);
+
+  test('the first of the group goes to a retry: the next one of the group is not processed before it', async () => {
+    const queues = await createQueuePair();
+    const wallet = await createWallet('100.00');
+    // The next one is of another, unlocked wallet, in the same group: only the
+    // group's order can hold it back while the first one waits for the lock.
+    const other = await createWallet('100.00');
+    const first = betData(wallet, '80.00');
+    const next = betData(other, '30.00');
+    let release!: () => void;
+    const lock = await holdWalletLock(wallet.id, new Promise((resolve) => (release = resolve)));
+    await send(queues.url, first);
+    await send(queues.url, next, { groupId: wallet.id });
+
+    const url = await consumerOn(queues);
+    await waitUntil(async () => ((await retries('TRANSIENT_LOCK_TIMEOUT', url)) > 0 ? true : undefined));
+    expect(await transactionsOf(next)).toEqual([]);
+    release();
+    await lock.released;
+
+    await oneTransactionOf(next);
+    await waitUntil(() => drained(queues.url));
+    expect(await transactionsOf(first)).toMatchObject([{ status: 'PROCESSED' }]);
+    expect(await transactionsOf(next)).toMatchObject([{ status: 'PROCESSED' }]);
+    const [order] = await sql`
+      select (select created_at from wager_transactions where external_transaction_id = ${first.externalTransactionId as string})
+           < (select created_at from wager_transactions where external_transaction_id = ${next.externalTransactionId as string}) as in_order
+    `;
+    expect(order.in_order).toBe(true);
+    expect(await walletState(wallet.id)).toEqual({ balance_amount: '20.00', version: 2 });
+    expect(await walletState(other.id)).toEqual({ balance_amount: '70.00', version: 2 });
+    await expectLedgerConsistent(sql, [wallet.id, other.id]);
   }, 60_000);
 });
 

@@ -1,7 +1,7 @@
 /**
  * `InputQueue` over SQS: `ReceiveMessage` with long polling, batch size and
  * visibility timeout fixed by the configuration, with each message's
- * `ApproximateReceiveCount`; `DeleteMessage` as the `ack` and
+ * `ApproximateReceiveCount` and `MessageGroupId`; `DeleteMessage` as the `ack` and
  * `ChangeMessageVisibility` to hand a delivery back. The queue URL is resolved
  * by name on first use and kept once found.
  *
@@ -43,7 +43,7 @@ export class SqsInputQueue implements InputQueue {
           MaxNumberOfMessages: this.options.batchSize,
           VisibilityTimeout: this.options.visibilityTimeoutSeconds,
           MessageAttributeNames: ['All'],
-          MessageSystemAttributeNames: ['ApproximateReceiveCount'],
+          MessageSystemAttributeNames: ['ApproximateReceiveCount', 'MessageGroupId'],
         }),
         { abortSignal: signal },
       ));
@@ -59,7 +59,10 @@ export class SqsInputQueue implements InputQueue {
         ),
       );
       const receiveCount = Number(message.Attributes?.ApproximateReceiveCount ?? 1);
-      return [{ body: message.Body, attributes, deliveryId: message.MessageId, receipt: message.ReceiptHandle, receiveCount }];
+      const groupId = message.Attributes?.MessageGroupId;
+      return [
+        { body: message.Body, attributes, deliveryId: message.MessageId, receipt: message.ReceiptHandle, receiveCount, groupId },
+      ];
     });
   }
 

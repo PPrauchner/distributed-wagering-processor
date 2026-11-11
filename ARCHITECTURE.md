@@ -504,9 +504,25 @@ a falha transitória nunca vira `FAILED`, nem esgotada.
 
 ### Consumidor
 
-- Long polling de 20 s, lotes de até 10 mensagens processadas em paralelo,
-  visibilidade de 30 s. O agrupamento FIFO por carteira é otimização; a correção
-  vem do lock.
+- Long polling de 20 s, lotes de até 10 mensagens, visibilidade de 30 s. O lote é
+  particionado pelo `MessageGroupId` **recebido** (atributo de sistema pedido no
+  `ReceiveMessage`), nunca pelo `walletId` do corpo: dentro do grupo, as mensagens
+  rodam uma por vez, na ordem de entrega; grupos distintos rodam em paralelo;
+  mensagem sem grupo roda sozinha. Assim, um `ROLLBACK` que chega no mesmo lote
+  da sua `BET` encontra a referência e não cai em `PENDING_REFERENCE`. A correção
+  do saldo continua vindo do lock; o grupo garante a ordem.
+- **Mensagem do grupo sem `ack`** (retry transitório, carteira ainda inexistente,
+  ou erro inesperado que a deixa pendente): as seguintes do mesmo grupo no lote
+  não são iniciadas e voltam à fila junto com ela — com o mesmo atraso do retry,
+  ou, quando ela fica como está, com a visibilidade do lote. Não com visibilidade
+  0: o LocalStack 4.14 libera o grupo assim que qualquer mensagem dele fica
+  visível, mesmo com uma anterior ainda em voo, e a seguinte passaria à frente.
+  No SQS real, que segura o grupo enquanto a primeira está em voo, o efeito é o
+  mesmo.
+- **Contrato do produtor da fila de entrada:** `MessageGroupId` = `walletId` (a
+  unidade de concorrência do §8) e `MessageDeduplicationId` = `messageId` do
+  envelope. É o grupo que ordena as transações de uma carteira; outro
+  agrupamento perde essa ordem, sem afetar o saldo.
 - **Inbox:** `consumerName` = `wager-transactions-consumer`; `messageId` do
   envelope (não o `MessageId` do SQS); `payloadHash` pela mesma função do hash do
   payload, sobre `data`. Gravado na transação SQL de todo desfecho. Mesmo
@@ -564,7 +580,7 @@ a falha transitória nunca vira `FAILED`, nem esgotada.
   interrompe o long polling (`AbortSignal`) e os workers param de reivindicar;
   o consumidor espera as mensagens em andamento por até 20 s
   (`stop_grace_period` de 30 s no Compose) e devolve com visibilidade 0 as que
-  chegaram já no desligamento, sem iniciá-las; depois o Nest fecha HTTP e pool.
+  chegaram já no desligamento, ou que esperavam a vez no seu grupo, sem iniciá-las; depois o Nest fecha HTTP e pool.
   Se o prazo estourar, a transação SQL é atômica e a redelivery é segura; leases
   expiram. Um long polling interrompido depois de o SQS responder deixa suas
   mensagens invisíveis até a visibilidade expirar.
@@ -843,5 +859,14 @@ uma porta de identidade do provedor. O ponto de extensão no código:
   porta da faixa `APP_PORTS`, e quem chama só `:3000` fala com uma réplica. A fila
   de entrada e a outbox são divididas entre as três; o balanceador fica como
   evolução.
+- As mensagens que voltam à fila atrás de uma do mesmo grupo sem `ack` contam
+  como recebimento sem terem falhado: numa carteira disputada, podem chegar ao
+  limite de tentativas e ir à DLQ sem desfecho (`INFRA_RETRIES_EXHAUSTED`), de onde
+  são reprocessáveis.
+- No desligamento, as mensagens que esperavam a vez no seu grupo voltam com
+  visibilidade 0 enquanto a anterior ainda termina. No LocalStack 4.14, que libera
+  o grupo assim que uma mensagem dele fica visível, outra instância pode recebê-las
+  antes, e a ordem do grupo se inverte. No SQS real, o grupo fica bloqueado
+  enquanto a anterior está em voo.
 - A auditoria das submissões não admitidas é de melhor esforço: com o banco fora do
   ar, a resposta sai igual e a linha se perde (o erro é logado).

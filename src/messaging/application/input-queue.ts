@@ -22,6 +22,11 @@ export interface ReceivedMessage {
   receipt: string;
   /** How many times the message was received, this delivery included: 1 on the first. */
   receiveCount: number;
+  /**
+   * The FIFO group the broker delivered it in — its `MessageGroupId` —, if
+   * any: the broker keeps the order within a group, and so must the consumer.
+   */
+  groupId?: string;
 }
 
 export interface InputQueue {
