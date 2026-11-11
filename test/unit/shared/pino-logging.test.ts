@@ -41,6 +41,19 @@ describe('pino logging', () => {
     ]);
   });
 
+  test('a context opened by the log itself carries the queue message id', async () => {
+    const { lines, log } = capture();
+
+    await log.inContext({ messageId: 'msg-1' }, async () => {
+      log.enrich({ transactionId: 'tx-1' });
+      log.info('settled');
+    });
+    log.info('outside');
+
+    expect(lines[0]).toEqual(expect.objectContaining({ messageId: 'msg-1', transactionId: 'tx-1' }));
+    expect(lines[1]).not.toHaveProperty('messageId');
+  });
+
   test('concurrent contexts do not share fields', async () => {
     const { lines, store, log } = capture();
 

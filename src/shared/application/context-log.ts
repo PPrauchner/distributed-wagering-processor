@@ -24,6 +24,15 @@ export interface LogContextFields {
 export type LogDetails = Record<string, string | number | boolean | undefined>;
 
 export interface ContextLog {
+  /**
+   * Opens a context of its own for a unit of work outside HTTP — a queue
+   * message —, closed when `work` settles.
+   *
+   * @param fields - The context's first fields.
+   * @param work - Runs inside the new context.
+   * @returns What `work` returns.
+   */
+  inContext<T>(fields: LogContextFields, work: () => Promise<T>): Promise<T>;
   /** Adds fields to the current context: every later line in it carries them. */
   enrich(fields: LogContextFields): void;
   info(message: string, details?: LogDetails): void;

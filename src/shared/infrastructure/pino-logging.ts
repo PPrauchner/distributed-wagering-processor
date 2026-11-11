@@ -122,6 +122,10 @@ export class PinoContextLog implements ContextLog {
     private readonly context: LogContextStore,
   ) {}
 
+  inContext<T>(fields: LogContextFields, work: () => Promise<T>): Promise<T> {
+    return this.context.run(fields, work);
+  }
+
   enrich(fields: LogContextFields): void {
     this.context.enrich(fields);
   }
