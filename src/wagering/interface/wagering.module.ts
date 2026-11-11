@@ -1,6 +1,6 @@
 /**
- * Nest module of wagering: its controller, its queue consumer and use case,
- * wired to the unit of work, the input queue, the metrics and the log by token
+ * Nest module of wagering: its controller, its queue consumer, the worker of
+ * pending references and their use cases, wired to the unit of work, the input queue, the metrics and the log by token
  * so the use case stays free of NestJS.
  *
  * @packageDocumentation
@@ -22,6 +22,7 @@ import { ResolvePendingReferences } from '../application/resolve-pending-referen
 import type { RejectedSubmissionRepositories } from '../application/rejected-submission-repository.ts';
 import type { WageringRepositories } from '../application/wager-transaction-repository.ts';
 import { WAGERING_METRICS, type WageringMetrics } from '../application/wagering-metrics.ts';
+import { PendingReferencesWorker } from './pending-references.worker.ts';
 import { RejectedSubmissionAudit } from './rejected-submission.audit.ts';
 import { WagerTransactionConsumer } from './wager-transaction.consumer.ts';
 import { WagerTransactionController } from './wager-transaction.controller.ts';
@@ -29,7 +30,8 @@ import { WagerTransactionController } from './wager-transaction.controller.ts';
 @Module({})
 export class WageringModule {
   /**
-   * @param config - Whether this instance consumes the input queue, and the
+   * @param config - Whether this instance consumes the input queue, how a
+   *   pending reference waits and whether this instance resolves them, and the
    *   fault points enabled (none outside the tests).
    * @returns The module, exporting the audit of refused submissions.
    */
@@ -66,6 +68,15 @@ export class WageringModule {
               { leaseMs: config.pendingReferences.leaseMs, referenceWait },
               log,
             ),
+        },
+        {
+          provide: PendingReferencesWorker,
+          inject: [ResolvePendingReferences],
+          useFactory: (resolvePendingReferences: ResolvePendingReferences) =>
+            new PendingReferencesWorker(resolvePendingReferences, {
+              enabled: config.pendingReferences.enabled,
+              pollIntervalMs: config.pendingReferences.pollIntervalMs,
+            }),
         },
         {
           provide: WagerTransactionConsumer,

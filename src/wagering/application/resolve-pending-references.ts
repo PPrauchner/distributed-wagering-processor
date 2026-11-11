@@ -54,13 +54,16 @@ export class ResolvePendingReferences {
   /**
    * One cycle: claim a batch, then resolve each claimed item in turn.
    *
+   * @param stopping - Asked before each item: once it says so, the items not
+   *   started are left leased, and claimed again when the lease expires.
    * @returns How many items were claimed; 0 when none was due.
    */
-  async resolveDue(): Promise<number> {
+  async resolveDue(stopping: () => boolean = () => false): Promise<number> {
     const claimed = await this.unitOfWork.run(({ transactions }) =>
       transactions.claimDuePendingReferences(PENDING_REFERENCES_BATCH_SIZE, this.options.leaseMs),
     );
     for (const claim of claimed) {
+      if (stopping()) break;
       await this.log.inContext({ transactionId: claim.transactionId, walletId: claim.walletId }, () =>
         this.resolveOne(claim),
       );
