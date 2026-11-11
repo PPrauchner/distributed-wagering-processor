@@ -136,7 +136,7 @@ Worker morto: o lease expira e outra instância assume. Ver
 | Tabela | Garantias |
 |---|---|
 | `wallets` | `CHECK (balance_amount >= 0)`, `CHECK (version >= 1)`, `CHECK (currency = balance_currency)`; `UNIQUE (player_id, currency)`; `UNIQUE (id, currency)` (alvo da FK de moeda); `UNIQUE (creation_idempotency_key)` (anulável) e `CHECK` de chave e hash da criação ambos nulos ou ambos preenchidos; `initial_balance` |
-| `wager_transactions` | `UNIQUE (provider_id, idempotency_key)`; `UNIQUE (provider_id, external_transaction_id)`; FK `wallet_id NOT NULL`; FK `reference_transaction_id` na própria tabela; índice único parcial da reversão; `CHECK`s de coerência (`REFUND`/`ROLLBACK` ⇒ referência externa preenchida, `BET`/`LOSS`/`OPENING` ⇒ nula, `WIN` livre; `PENDING_REFERENCE` só para `REFUND`, `ROLLBACK` e `WIN`; `PROCESSED` ⇔ `processed_at`; `REJECTED`/`FAILED` ⇔ `failure_code`; `PROCESSED`/`REJECTED` ⇔ `balance_after` e `wallet_version_observed` preenchidos; `status <> 'PENDING'`); `amount > 0`, exceto `LOSS` (`>= 0`); `correlation_id NOT NULL`; índice parcial `WHERE status = 'PENDING_REFERENCE'` |
+| `wager_transactions` | `UNIQUE (provider_id, idempotency_key)`; `UNIQUE (provider_id, external_transaction_id)`; FK `wallet_id NOT NULL`; FK `reference_transaction_id` na própria tabela; índice único parcial da reversão; `CHECK`s de coerência (`REFUND`/`ROLLBACK` ⇒ referência externa preenchida, `BET`/`LOSS`/`OPENING` ⇒ nula, `WIN` livre; `PENDING_REFERENCE` só para `REFUND`, `ROLLBACK` e `WIN`; `PROCESSED` ⇔ `processed_at`; `REJECTED`/`FAILED` ⇔ `failure_code`; `failure_message` só com `failure_code`; `PROCESSED`/`REJECTED` ⇔ `balance_after` e `wallet_version_observed` preenchidos; `status <> 'PENDING'`); `amount > 0`, exceto `LOSS` (`>= 0`); `correlation_id NOT NULL`; índice parcial `WHERE status = 'PENDING_REFERENCE'` |
 | `wallet_ledger_entries` | `UNIQUE (transaction_id, wallet_id)`; `UNIQUE (wallet_id, wallet_version)`; FK composta e `CHECK` de moeda; `amount > 0`; `CHECK` da aritmética (`balance_after = balance_before ± amount` pela `direction`, saldos `>= 0`) |
 | `inbox_messages` | PK `(consumer_name, message_id)` |
 | `outbox_messages` | `wallet_id NOT NULL` (o `MessageGroupId`); índice parcial `WHERE published_at IS NULL` em `next_attempt_at`; `CHECK (attempts >= 0)`; sem FK |
@@ -364,7 +364,9 @@ mesma chave.
 | falha transitória (lock, deadlock, banco ou SQS fora) | 503 + `Retry-After` |
 
 Desfechos de transação respondem com o resultado da transação (`transactionId`,
-`status`, `failureCode`, saldo, `idempotentReplay`); erros sem transação respondem
+`status`, `failureCode`, saldo, `idempotentReplay` e, quando o código sozinho não
+basta, `message` — o campo divergente do `REFERENCE_MISMATCH`, gravado em
+`wager_transactions.failure_message` para o replay devolvê-lo igual); erros sem transação respondem
 `{ failureCode, message }` — o 409 `WALLET_ALREADY_EXISTS` acrescenta o `walletId`.
 O `GET` de transação devolve o mesmo corpo do desfecho, mais os campos de
 identidade, sem `idempotentReplay`. O 503 leva `Retry-After: 1` (segundos,
