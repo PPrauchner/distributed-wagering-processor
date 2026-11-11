@@ -22,11 +22,18 @@ seguro (§5.7). O spike do ADR 0001 provou o mecanismo: duas apostas de 80.00 so
   sem espera, mas tira a aritmética do `Money` e do domínio, e o lançamento ainda
   precisaria do saldo anterior, devolvido por `RETURNING` — a regra financeira
   passaria a morar no SQL.
+- **`SELECT … FOR NO KEY UPDATE`** — o lock que o próprio PostgreSQL toma num
+  `UPDATE` que não muda chave; não conflita com o `FOR KEY SHARE` que a checagem de
+  FK toma na carteira ao inserir uma linha que a referencia, e assim eliminaria por
+  construção o deadlock descrito na emenda sobre o `FAILED`. Descartado: o MikroORM
+  não tem `LockMode` para ele (exigiria SQL cru justo no ponto em que o ORM foi
+  escolhido pelo `LockMode` explícito, §4), e a regra de ordem abaixo resolve o
+  mesmo caso sem exceção.
 
 ## Consequences
 
-- **Tempo máximo de espera:** cada unidade de trabalho faz
-  `SET LOCAL lock_timeout = '2s'`. Estourar é **erro transitório**: na fila, a
+- **Tempo máximo de espera:** a transação SQL que trava a carteira faz
+  `SET LOCAL lock_timeout = '2s'` antes do lock. Estourar é **erro transitório**: na fila, a
   mensagem volta com backoff; no HTTP, a resposta é 503 com `Retry-After`. Cada
   estouro conta como conflito de lock na métrica do §12. Sem o limite, uma carteira
   travada pendura conexões até esgotar o pool. O conversor de erros do MikroORM
@@ -71,3 +78,18 @@ do publicador não tocam carteira nenhuma, e as transações que tocam a carteir
 só inserem na outbox, sem travar linhas que o publicador segure. O worker de
 referências pendentes segue como descrito acima: ele move saldo e começa pela
 carteira.
+
+## Emenda — inserir uma linha que referencia a carteira também é tocá-la
+
+A gravação de `FAILED` (segunda unidade de trabalho, depois do rollback de um erro
+permanente) não move saldo e por isso não travava a carteira. Mas inserir a
+transação de aposta dispara a checagem da FK `wallet_id`, que toma `FOR KEY SHARE`
+na linha da carteira — e esse lock conflita com o `FOR UPDATE`. Com duas
+submissões da mesma chave, uma gravando `FAILED` (segura a entrada do índice da
+chave, espera a carteira) e outra no caminho normal (segura a carteira, espera a
+entrada do índice), o resultado era um deadlock (`40P01`). Sem efeito duplicado —
+o `40P01` é transitório —, mas contrário à regra de ordem.
+
+Correção: **"tocar uma carteira" inclui inserir uma linha com FK para ela.** A
+gravação de `FAILED` começa pelo lock da carteira, como qualquer outra unidade de
+trabalho que a toca. A regra de ordem volta a valer sem exceção.
