@@ -17,8 +17,12 @@
  *
  * Every send to the DLQ comes before the `ack`: if either fails, the message
  * stays, and its redelivery is settled again — by the inbox, when an outcome
- * was recorded. On shutdown it stops receiving and waits for the batch in
- * flight.
+ * was recorded.
+ *
+ * On shutdown it cuts the long poll short, hands back at once — visibility 0
+ * — whatever arrives unstarted, and waits for the messages in progress up to
+ * the drain timeout; past it, the SQL transaction's atomicity and the inbox
+ * make the redelivery safe.
  *
  * @packageDocumentation
  */
@@ -111,6 +115,7 @@ export class WagerTransactionConsumer implements OnApplicationBootstrap, BeforeA
   private readonly logger = new Logger('WagerTransactionConsumer');
   private running = false;
   private loop: Promise<void> | undefined;
+  private readonly stopping = new AbortController();
 
   constructor(
     private readonly deps: WagerTransactionConsumerDependencies,
@@ -126,7 +131,15 @@ export class WagerTransactionConsumer implements OnApplicationBootstrap, BeforeA
   // Before the shutdown hooks, where the ORM and the SQS client close.
   async beforeApplicationShutdown(): Promise<void> {
     this.running = false;
-    await this.loop;
+    this.stopping.abort();
+    if (!this.loop) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const drained = await Promise.race([
+      this.loop.then(() => true),
+      new Promise<false>((resolve) => (timer = setTimeout(() => resolve(false), this.options.drainTimeoutMs))),
+    ]);
+    clearTimeout(timer);
+    if (!drained) this.logger.warn(`messages still in progress after ${this.options.drainTimeoutMs} ms; shutting down`);
   }
 
   /**
@@ -263,13 +276,27 @@ export class WagerTransactionConsumer implements OnApplicationBootstrap, BeforeA
     while (this.running) {
       let messages: ReceivedMessage[];
       try {
-        messages = await this.deps.queue.receive();
+        messages = await this.deps.queue.receive(this.stopping.signal);
       } catch (error) {
         this.logger.warn(`receive from the input queue failed: ${reasonOf(error)}`);
         await Bun.sleep(RECEIVE_RETRY_MS);
         continue;
       }
+      // Received while shutting down: none started, all handed back for another instance.
+      if (!this.running) {
+        await Promise.all(messages.map((message) => this.handBack(message)));
+        return;
+      }
       await Promise.all(messages.map((message) => this.handle(message)));
+    }
+  }
+
+  /** Makes the message visible again at once; if that fails, its visibility expires on its own. */
+  private async handBack(message: ReceivedMessage): Promise<void> {
+    try {
+      await this.deps.queue.changeVisibility(message, 0);
+    } catch (error) {
+      this.logger.warn(`queue message not handed back: ${reasonOf(error)}`);
     }
   }
 }
