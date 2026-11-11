@@ -334,6 +334,34 @@ describe('a submission not admitted', () => {
   });
 
   test.each([
+    ['too long', 'm'.repeat(129)],
+    ['not ASCII', 'mensagem-ção'],
+    ['with a space', 'message 1'],
+  ])('a messageId %s for SQS is deduplicated in the DLQ by the body', async (_case, messageId) => {
+    const body = JSON.stringify({ messageId, data: { ...DATA, money: 25 } });
+    const h = harness();
+
+    await h.consumer.handle(messageOf(1, body));
+
+    expect(h.deadLetters).toHaveLength(1);
+    expect(h.deadLetters[0]!.deduplicationId).toMatch(/^[0-9a-f]{64}$/);
+    expect(h.acknowledged).toEqual(['receipt-1']);
+  });
+
+  test.each([
+    ['too long', 'w'.repeat(129)],
+    ['not ASCII', 'carteira-ção'],
+    ['with a space', 'wallet 1'],
+  ])('a walletId %s for SQS goes to the unroutable DLQ group', async (_case, walletId) => {
+    const h = harness();
+
+    await h.consumer.handle(messageOf(1, envelope({ ...DATA, walletId, money: 25 })));
+
+    expect(h.deadLetters.map((letter) => letter.groupId)).toEqual(['unroutable']);
+    expect(h.acknowledged).toEqual(['receipt-1']);
+  });
+
+  test.each([
     [new IdempotencyConflictError('provider-a', 'key', 'h'.repeat(64)), FailureCode.IdempotencyConflict],
     [new ExternalIdConflictError('provider-a', 'external-1', 'h'.repeat(64)), FailureCode.ExternalIdConflict],
     [new InternalKindNotAllowedError('OPENING', 'h'.repeat(64)), FailureCode.InternalKindNotAllowed],

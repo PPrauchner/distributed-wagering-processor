@@ -66,6 +66,9 @@ const RECEIVE_RETRY_MS = 1000;
 /** The DLQ group of a message that names no wallet. */
 const UNROUTABLE_GROUP = 'unroutable';
 
+/** What SQS takes as a group or deduplication id: 1 to 128 ASCII letters, digits and punctuation. */
+const SQS_ID = /^[!-~]{1,128}$/;
+
 export interface WagerTransactionConsumerDependencies {
   queue: InputQueue;
   deadLetters: DeadLetterQueue;
@@ -273,8 +276,8 @@ export class WagerTransactionConsumer implements OnApplicationBootstrap, BeforeA
       body: message.body,
       attributes: message.attributes,
       failureCode,
-      groupId: facts.walletId ?? UNROUTABLE_GROUP,
-      deduplicationId: facts.messageId ?? createHash('sha256').update(message.body).digest('hex'),
+      groupId: sqsIdOrUndefined(facts.walletId) ?? UNROUTABLE_GROUP,
+      deduplicationId: sqsIdOrUndefined(facts.messageId) ?? createHash('sha256').update(message.body).digest('hex'),
     });
     this.deps.metrics.deadLettered(failureCode);
     this.deps.log.warn('queue message sent to the DLQ', { failureCode });
@@ -341,6 +344,11 @@ function factsOf(message: ReceivedMessage): MessageFacts {
     externalTransactionId: text(data.externalTransactionId),
     idempotencyKey: text(data.idempotencyKey),
   };
+}
+
+/** The value, if SQS takes it as a group or deduplication id: one from an untrusted body may not be. */
+function sqsIdOrUndefined(value: string | undefined): string | undefined {
+  return value !== undefined && SQS_ID.test(value) ? value : undefined;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
