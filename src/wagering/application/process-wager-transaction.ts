@@ -24,7 +24,12 @@
  *
  * @packageDocumentation
  */
-import type { InboxEntry, InboxRepositories } from '../../messaging/application/inbox-repository.ts';
+import {
+  InboxRedeliveryError,
+  MessageIdConflictError,
+  type InboxEntry,
+  type InboxRepositories,
+} from '../../messaging/application/inbox-repository.ts';
 import { InboxMessage } from '../../messaging/domain/inbox-message.ts';
 import type { OutboxRepositories } from '../../messaging/application/outbox-repository.ts';
 import type { ContextLog } from '../../shared/application/context-log.ts';
@@ -125,13 +130,15 @@ export class ProcessWagerTransaction {
    *   recorded for a permanent reason.
    * @throws {@link InboxRedeliveryError} If the inbox already holds the
    *   message: nothing was recorded this time.
+   * @throws {@link MessageIdConflictError} If the inbox holds its `messageId`
+   *   with another payload hash: nothing was recorded.
    */
   execute(
     command: SubmitWagerTransactionCommand,
     channel: SubmissionChannel,
     inbox?: InboxEntry,
   ): Promise<WagerTransactionOutcome> {
-    return this.observed(channel, () => this.process(command, inbox));
+    return this.observed(channel, () => this.redeliveryChecked(inbox, () => this.process(command, inbox)));
   }
 
   /**
@@ -147,13 +154,34 @@ export class ProcessWagerTransaction {
    *   settling a race on its key, and {@link TransientFailureError} if the
    *   database is still unavailable: nothing was recorded.
    * @throws {@link InboxRedeliveryError} If the inbox already holds the message.
+   * @throws {@link MessageIdConflictError} If it holds the `messageId` with
+   *   another payload hash.
    */
   giveUp(command: SubmitWagerTransactionCommand, inbox: InboxEntry): Promise<WagerTransactionOutcome> {
     return this.observed(SubmissionChannel.Queue, () => {
       const { props } = this.validated(command);
       this.log.enrich({ correlationId: props.correlationId, walletId: props.walletId, providerId: props.providerId });
-      return this.settled(props, () => this.recordFailure(props, FailureCode.InfraRetriesExhausted, inbox));
+      return this.redeliveryChecked(inbox, () =>
+        this.settled(props, () => this.recordFailure(props, FailureCode.InfraRetriesExhausted, inbox)),
+      );
     });
+  }
+
+  /** Tells a redelivery the inbox refused from a `messageId` reused with another payload. */
+  private async redeliveryChecked(
+    received: InboxEntry | undefined,
+    work: () => Promise<WagerTransactionOutcome>,
+  ): Promise<WagerTransactionOutcome> {
+    try {
+      return await work();
+    } catch (error) {
+      if (!received || !(error instanceof InboxRedeliveryError)) throw error;
+      const recorded = await this.unitOfWork.run(({ inbox }) => inbox.find(received.consumerName, received.messageId));
+      if (recorded && recorded.payloadHash !== received.payloadHash) {
+        throw new MessageIdConflictError(received.messageId, received.payloadHash);
+      }
+      throw error;
+    }
   }
 
   /** Logs, counts and times the submission once it ended in a transaction. */
