@@ -376,7 +376,7 @@ async function findEarlier(
   if (earlier.idempotencyKey !== submitted.idempotencyKey) {
     throw new ExternalIdConflictError(submitted.providerId, submitted.externalTransactionId, submitted.payloadHash);
   }
-  if (earlier.payloadHash !== submitted.payloadHash) {
+  if (!earlier.matchesPayload(submitted.payloadHash)) {
     throw new IdempotencyConflictError(submitted.providerId, submitted.idempotencyKey, submitted.payloadHash);
   }
   return { transaction: earlier, idempotentReplay: true };
