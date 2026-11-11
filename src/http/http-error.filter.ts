@@ -19,6 +19,7 @@ import { PermanentFailureError, TransientFailureError } from '../shared/applicat
 import { FailureCode } from '../shared/domain/failure-code.ts';
 import { CurrencyMismatchError, InvalidMoneyError } from '../shared/domain/money.ts';
 import { InvalidPayloadError } from '../shared/interface/invalid-payload.error.ts';
+import { WagerTransactionNotFoundError } from '../wagering/application/get-wager-transaction.ts';
 import {
   ExternalIdConflictError,
   IdempotencyConflictError,
@@ -145,7 +146,9 @@ export class HttpErrorFilter implements ExceptionFilter {
         body: { failureCode: 'WALLET_ALREADY_EXISTS', message: error.message, walletId: error.walletId },
       };
     }
-    if (error instanceof WalletNotFoundError) return notFound(error.message);
+    if (error instanceof WalletNotFoundError || error instanceof WagerTransactionNotFoundError) {
+      return notFound(error.message);
+    }
     if (error instanceof HttpException) {
       // Framework errors: malformed JSON (400), unknown routes (404), and any
       // other client error (e.g. 413 body too large) keeps its own 4xx status.
