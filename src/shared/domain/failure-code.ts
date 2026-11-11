@@ -19,6 +19,7 @@ export enum FailureCode {
   ReferenceMismatch = 'REFERENCE_MISMATCH',
   ReferenceAmountMismatch = 'REFERENCE_AMOUNT_MISMATCH',
   ReferenceAlreadyReversed = 'REFERENCE_ALREADY_REVERSED',
+  BalanceLimitExceeded = 'BALANCE_LIMIT_EXCEEDED',
   // Refused submissions: no transaction is created.
   InvalidPayload = 'INVALID_PAYLOAD',
   MissingIdempotencyKey = 'MISSING_IDEMPOTENCY_KEY',

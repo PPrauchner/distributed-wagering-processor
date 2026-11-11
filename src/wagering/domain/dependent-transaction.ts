@@ -4,7 +4,7 @@
  * inverse of a processed bet, win or refund. Either undoes its reference once,
  * by any kind, and only for its whole amount (`ARCHITECTURE.md` § Reembolso e
  * reversão). The checks run in the documented order — wallet, reference,
- * amount, already undone, funds — and the first violation decides
+ * amount, already undone, funds or maximum balance — and the first violation decides
  * (`ARCHITECTURE.md` § Ordem das validações, step 8).
  *
  * @packageDocumentation
@@ -109,5 +109,6 @@ function rejectionOf(
   if (!transaction.money.equals(resolved.money)) return FailureCode.ReferenceAmountMismatch;
   if (alreadyReversed) return FailureCode.ReferenceAlreadyReversed;
   if (debits && !wallet.canDebit(transaction.money)) return FailureCode.ReversalInsufficientFunds;
+  if (!debits && !wallet.canCredit(transaction.money)) return FailureCode.BalanceLimitExceeded;
   return undefined;
 }
