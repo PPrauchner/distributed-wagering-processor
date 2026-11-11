@@ -25,7 +25,10 @@ export interface ReconciliationReport {
   versionGaps: VersionGap[];
 }
 
-/** Counts divergences; the observability slice exposes it as a metric. */
+/** Injection token of the divergence counter: the metrics bind it. */
+export const RECONCILIATION_DIVERGENCE_COUNTER = Symbol('ReconciliationDivergenceCounter');
+
+/** Counts divergences; exposed as the `reconciliation_divergences_total` metric. */
 export interface ReconciliationDivergenceCounter {
   increment(): void;
 }
@@ -35,7 +38,7 @@ export interface ReconciliationLog {
   error(message: string): void;
 }
 
-/** Default counter: keeps the count in the process until a metric is wired. */
+/** A counter kept in the process, for the tests that run the use case alone. */
 export class InMemoryReconciliationDivergenceCounter implements ReconciliationDivergenceCounter {
   private divergences = 0;
 

@@ -21,6 +21,8 @@
     "@nestjs/common": "^12.4.2",
     "@nestjs/core": "^12.4.2",
     "@nestjs/platform-express": "^12.4.2",
+    "pino": "^9",
+    "prom-client": "^15",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.2"
   },

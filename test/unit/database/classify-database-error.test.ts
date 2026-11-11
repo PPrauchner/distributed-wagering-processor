@@ -21,9 +21,9 @@ function pgError(code: string, constraint?: string): Error {
 
 describe('classifyDatabaseError', () => {
   test.each<[string, Error, DatabaseErrorClass]>([
-    ['lock_timeout (55P03)', pgError('55P03'), { category: 'transient', failureCode: FailureCode.TransientLockTimeout }],
-    ['deadlock (40P01)', pgError('40P01'), { category: 'transient', failureCode: FailureCode.TransientLockTimeout }],
-    ['serialization (40001)', pgError('40001'), { category: 'transient', failureCode: FailureCode.TransientLockTimeout }],
+    ['lock_timeout (55P03)', pgError('55P03'), { category: 'transient', failureCode: FailureCode.TransientLockTimeout, lockConflict: 'lock_timeout' }],
+    ['deadlock (40P01)', pgError('40P01'), { category: 'transient', failureCode: FailureCode.TransientLockTimeout, lockConflict: 'deadlock' }],
+    ['serialization (40001)', pgError('40001'), { category: 'transient', failureCode: FailureCode.TransientLockTimeout, lockConflict: 'serialization_failure' }],
     ['connection refused', pgError('ECONNREFUSED'), { category: 'transient', failureCode: FailureCode.TransientUnavailable }],
     ['connection reset', pgError('ECONNRESET'), { category: 'transient', failureCode: FailureCode.TransientUnavailable }],
     ['connection failure (08006)', pgError('08006'), { category: 'transient', failureCode: FailureCode.TransientUnavailable }],

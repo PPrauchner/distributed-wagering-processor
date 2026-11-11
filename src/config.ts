@@ -21,6 +21,8 @@ export interface SqsConfig {
   region: string;
   accessKeyId: string;
   secretAccessKey: string;
+  /** The input queue of the submissions; the readiness check looks it up. */
+  wagerTransactionsQueue: string;
   /** Where the integration events go; the tests use queues with a random suffix. */
   wageringEventsQueue: string;
 }
@@ -72,6 +74,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
       region: env.AWS_REGION ?? 'us-east-1',
       accessKeyId: env.AWS_ACCESS_KEY_ID ?? 'test',
       secretAccessKey: env.AWS_SECRET_ACCESS_KEY ?? 'test',
+      wagerTransactionsQueue: env.WAGER_TRANSACTIONS_QUEUE ?? 'wager-transactions.fifo',
       wageringEventsQueue: env.WAGERING_EVENTS_QUEUE ?? 'wagering-events.fifo',
     },
     outboxPublisher: {

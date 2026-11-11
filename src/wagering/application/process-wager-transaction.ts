@@ -14,12 +14,21 @@
  * transaction back, and a second unit of work records the transaction as
  * `FAILED`, so the key keeps answering the same outcome.
  *
+ * Every submission that ends in a transaction is counted and timed by channel
+ * and kind, and logged with its ids, kind and status — never its money;
+ * idempotency and lock conflicts are counted on their way out.
+ *
  * @packageDocumentation
  */
 import type { OutboxRepositories, OutboxRepository } from '../../messaging/application/outbox-repository.ts';
 import { OutboxMessage } from '../../messaging/domain/outbox-message.ts';
+import type { ContextLog } from '../../shared/application/context-log.ts';
 import { FaultPoint, type FaultInjection } from '../../shared/application/fault-injector.ts';
-import { PermanentFailureError, type PermanentFailureCode } from '../../shared/application/infrastructure-failures.ts';
+import {
+  PermanentFailureError,
+  TransientFailureError,
+  type PermanentFailureCode,
+} from '../../shared/application/infrastructure-failures.ts';
 import type { UnitOfWork } from '../../shared/application/unit-of-work.ts';
 import { Money, type MoneyProps } from '../../shared/domain/money.ts';
 import type { WalletRepositories } from '../../wallet/application/wallet-repository.ts';
@@ -28,6 +37,7 @@ import { WalletBalanceChanged } from '../../wallet/domain/wallet-balance-changed
 import type { WalletLedgerEntry } from '../../wallet/domain/wallet-ledger-entry.ts';
 import { applyBet } from '../domain/bet.ts';
 import { applyLoss } from '../domain/loss.ts';
+import type { SubmissionChannel } from '../domain/rejected-submission.ts';
 import { applyWin } from '../domain/win.ts';
 import { WagerTransactionProcessed, WagerTransactionRejected } from '../domain/wager-transaction-events.ts';
 import {
@@ -39,6 +49,7 @@ import {
 } from '../domain/wager-transaction.ts';
 import { hashWagerPayload, type WagerPayload } from './wager-payload.ts';
 import type { WagerTransactionRepository, WageringRepositories } from './wager-transaction-repository.ts';
+import type { WageringMetrics } from './wagering-metrics.ts';
 import {
   DuplicateExternalIdError,
   DuplicateIdempotencyKeyError,
@@ -82,10 +93,13 @@ export class ProcessWagerTransaction {
       WalletRepositories & WageringRepositories & OutboxRepositories & FaultInjection
     >,
     private readonly generateId: () => string,
+    private readonly metrics: WageringMetrics,
+    private readonly log: ContextLog,
   ) {}
 
   /**
    * @param command - The submission, with its idempotency key already present.
+   * @param channel - Where it came from, for the metrics.
    * @returns The transaction it ended in — `PROCESSED`, `REJECTED`,
    *   `PENDING_REFERENCE` or, after a permanent error, `FAILED` — new or replayed;
    *   a replay of a pending one answers its current status.
@@ -104,8 +118,30 @@ export class ProcessWagerTransaction {
    * @throws {@link PermanentFailureError} If even the `FAILED` could not be
    *   recorded for a permanent reason.
    */
-  async execute(command: SubmitWagerTransactionCommand): Promise<WagerTransactionOutcome> {
+  async execute(command: SubmitWagerTransactionCommand, channel: SubmissionChannel): Promise<WagerTransactionOutcome> {
+    const started = performance.now();
+    try {
+      const outcome = await this.process(command);
+      const { id, kind, status, failureCode } = outcome.transaction;
+      const { idempotentReplay } = outcome;
+      // A replay answers the transaction recorded first, not the one this submission would have created.
+      this.log.enrich({ transactionId: id });
+      this.log.info('wager transaction settled', { kind, status, failureCode, idempotentReplay });
+      const durationSeconds = (performance.now() - started) / 1000;
+      this.metrics.transactionSettled({ channel, kind, status, idempotentReplay, durationSeconds });
+      return outcome;
+    } catch (error) {
+      if (error instanceof IdempotencyConflictError) this.metrics.idempotencyConflict(channel);
+      if (error instanceof TransientFailureError && error.lockConflict) this.metrics.lockConflict(error.lockConflict);
+      throw error;
+    }
+  }
+
+  private async process(command: SubmitWagerTransactionCommand): Promise<WagerTransactionOutcome> {
     const { props, submitted } = this.validated(command);
+    // The correlation id generated here, when the channel had none, is the one recorded.
+    const { correlationId, id: transactionId, walletId, providerId } = props;
+    this.log.enrich({ correlationId, transactionId, walletId, providerId });
 
     try {
       return await this.settled(props, () => this.record(submitted));
