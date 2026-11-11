@@ -14,6 +14,7 @@ import type { AppConfig } from '../../config.ts';
 import type { OutboxBacklogRepositories } from '../../messaging/application/outbox-backlog.ts';
 import { UNIT_OF_WORK, type UnitOfWork } from '../../shared/application/unit-of-work.ts';
 import { WAGERING_METRICS } from '../../wagering/application/wagering-metrics.ts';
+import { RECONCILIATION_DIVERGENCE_COUNTER } from '../../wallet/application/reconciliation.ts';
 import { CheckReadiness } from '../application/check-readiness.ts';
 import { DatabaseReadiness } from '../infrastructure/database-readiness.ts';
 import { PrometheusMetrics } from '../infrastructure/prometheus-metrics.ts';
@@ -47,6 +48,7 @@ export class HealthModule implements OnApplicationShutdown {
             new PrometheusMetrics(() => unitOfWork.run(({ outboxBacklog }) => outboxBacklog.read())),
         },
         { provide: WAGERING_METRICS, useExisting: PrometheusMetrics },
+        { provide: RECONCILIATION_DIVERGENCE_COUNTER, useExisting: PrometheusMetrics },
         {
           provide: PROBE_SQS_CLIENT,
           useFactory: () =>
@@ -71,7 +73,7 @@ export class HealthModule implements OnApplicationShutdown {
             ),
         },
       ],
-      exports: [WAGERING_METRICS],
+      exports: [WAGERING_METRICS, RECONCILIATION_DIVERGENCE_COUNTER],
     };
   }
 

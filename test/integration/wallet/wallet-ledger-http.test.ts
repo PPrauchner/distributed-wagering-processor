@@ -11,16 +11,20 @@ import type { INestApplication } from '@nestjs/common';
 import { SQL } from 'bun';
 import { createApp } from '../../../src/app.ts';
 import { loadConfig } from '../../../src/config.ts';
-import {
-  RECONCILIATION_DIVERGENCE_COUNTER,
-  type InMemoryReconciliationDivergenceCounter,
-} from '../../../src/wallet/application/reconciliation.ts';
 import { expectLedgerConsistent } from '../ledger-invariant.ts';
 
 let app: INestApplication;
 let baseUrl: string;
 let sql: SQL;
 const touchedWallets: string[] = [];
+
+/** `reconciliation_divergences_total`, as `GET /metrics` exposes it. */
+async function divergenceCount(): Promise<number> {
+  const text = await (await fetch(`${baseUrl}/metrics`)).text();
+  const match = /^reconciliation_divergences_total (\d+)$/m.exec(text);
+  if (!match) throw new Error('reconciliation_divergences_total not exposed');
+  return Number(match[1]);
+}
 
 beforeAll(async () => {
   const config = loadConfig();
@@ -264,8 +268,7 @@ describe('POST /wallets/:walletId/reconciliation', () => {
       await tx`set local session_replication_role = replica`;
       await tx`update wallets set balance_amount = 99.99 where id = ${wallet.id}`;
     });
-    const divergences = app.get<InMemoryReconciliationDivergenceCounter>(RECONCILIATION_DIVERGENCE_COUNTER);
-    const countBefore = divergences.count;
+    const countBefore = await divergenceCount();
 
     const response = await reconcile(wallet.id);
 
@@ -277,7 +280,7 @@ describe('POST /wallets/:walletId/reconciliation', () => {
       consistent: false,
       versionGaps: [],
     });
-    expect(divergences.count).toBe(countBefore + 1);
+    expect(await divergenceCount()).toBe(countBefore + 1);
     const [row] = await sql`select balance_amount::text as balance from wallets where id = ${wallet.id}`;
     expect(row.balance).toBe('99.99');
     // Divergent on purpose: out of the final invariant check.
