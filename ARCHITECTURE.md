@@ -481,7 +481,20 @@ falhar, a redelivery é reconhecida pelo inbox).
   `messageId` com hash diferente → DLQ, `MESSAGE_ID_CONFLICT`. Submissões não
   admitidas não gravam inbox: terminam na DLQ, com linha em `rejected_submissions`
   (ver [Submissões não admitidas](#submissões-não-admitidas)).
-- `ack` (`DeleteMessage`) só depois do commit.
+- `ack` (`DeleteMessage`) só depois do commit. A mensagem que vem pela fila passa
+  pelo mesmo use case da API, que grava o inbox na unidade de trabalho do
+  desfecho — também num replay, quando a mesma transação já veio por HTTP. A
+  redelivery é recusada pela PK do inbox no commit (`InboxRedeliveryError`):
+  `ack` sem efeito e `inbox_duplicates_total` incrementada. Desfecho `PROCESSED`,
+  `REJECTED` ou `PENDING_REFERENCE` → `ack`; payload inválido, falha transitória,
+  erro permanente e `FAILED` ficam sem `ack` e voltam quando a visibilidade
+  expira, até a fatia de retry e DLQ.
+- O contexto de log de cada mensagem abre com o `messageId` do envelope e o
+  `correlationId` (atributo da mensagem, ou o `messageId`).
+- **Configuração por ambiente:** `WAGER_TRANSACTIONS_CONSUMER_ENABLED` (padrão
+  `true`), `WAGER_TRANSACTIONS_WAIT_SECONDS` (20, de 0 a 20),
+  `WAGER_TRANSACTIONS_BATCH_SIZE` (10, de 1 a 10),
+  `WAGER_TRANSACTIONS_VISIBILITY_SECONDS` (30) e `WAGER_TRANSACTIONS_QUEUE`.
 - **`SIGTERM`:** para o polling e as reivindicações dos workers; espera as
   mensagens em andamento por até 20 s (`stop_grace_period` de 30 s no Compose);
   devolve as não iniciadas com visibilidade 0; fecha HTTP e pool. Se o prazo
@@ -632,11 +645,14 @@ Keycloak.
   commit, altera a transação de aposta terminal recém-gravada, que o trigger
   recusa, para o erro verdadeiro passar pelo classificador —; `crash-after-send` —
   o publicador "morre" entre o envio e o `published_at`: lança
-  `SimulatedCrashError` antes de gravar, e a transação SQL da gravação desfaz —; e,
-  reservado para o consumidor, `crash-after-commit` (depois do commit, antes do
-  `ack`).
+  `SimulatedCrashError` antes de gravar, e a transação SQL da gravação desfaz —; e
+  `crash-after-commit` — o consumidor "morre" depois do commit do desfecho e antes
+  do `ack`: a mensagem volta quando a visibilidade expira e o inbox a reconhece.
+  Os pontos de queda fora de uma unidade de trabalho vêm do `CrashFaultInjector`.
 - Os apps dos testes sobem sem publicador da outbox (`OUTBOX_PUBLISHER_ENABLED=false`
-  no preload); os testes do publicador ligam o seu, com fila própria. Como o banco
+  no preload) e sem consumidor da fila de entrada
+  (`WAGER_TRANSACTIONS_CONSUMER_ENABLED=false`); os testes do publicador e do
+  consumidor ligam o seu, com filas próprias. Como o banco
   de teste é compartilhado entre os arquivos, um publicador de teste pode entregar
   eventos de outros arquivos: as verificações olham os eventos do próprio teste, e
   "desconhecido" quer dizer fora da outbox.
