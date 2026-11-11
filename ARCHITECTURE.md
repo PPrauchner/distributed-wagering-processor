@@ -434,7 +434,7 @@ legítimo; se o lock a serializa, o domínio teria visto antes, e é bug.
 | `wallets (creation_idempotency_key)` — `wallets_creation_idempotency_key_unique` | relê e compara o hash → replay ou conflito |
 | `(provider_id, idempotency_key)` — `wager_transactions_provider_idempotency_key_unique` | relê e compara o hash → replay ou conflito |
 | `(provider_id, external_transaction_id)` — `wager_transactions_provider_external_id_unique` | conflito → `EXTERNAL_ID_CONFLICT` |
-| `inbox (consumer_name, message_id)` — `inbox_messages_pkey` | redelivery → `ack` sem efeito |
+| `inbox (consumer_name, message_id)` — `inbox_messages_pkey` | redelivery → `ack` sem efeito (de um `FAILED`: DLQ de novo, depois `ack`) |
 | reversão única por referência — `wager_transactions_single_reversal_unique` | bug → permanente (`FAILED`, alerta) |
 | lançamento `(transaction_id, wallet_id)` — `wallet_ledger_entries_transaction_wallet_unique` | bug → permanente (`FAILED`, alerta) |
 | lançamento `(wallet_id, wallet_version)` — `wallet_ledger_entries_wallet_version_unique` | bug → permanente (`FAILED`, alerta) |
@@ -485,7 +485,10 @@ falhar, a redelivery é reconhecida pelo inbox).
   pelo mesmo use case da API, que grava o inbox na unidade de trabalho do
   desfecho — também num replay, quando a mesma transação já veio por HTTP. A
   redelivery é recusada pela PK do inbox no commit (`InboxRedeliveryError`):
-  `ack` sem efeito e `inbox_duplicates_total` incrementada. O mesmo `messageId`
+  `ack` sem efeito e `inbox_duplicates_total` incrementada — salvo quando a
+  transação da chave está `FAILED` (`FailedRedeliveryError`, com o código): o
+  envio à DLQ pode ter sido o que falhou, então a mensagem vai à DLQ de novo
+  antes do `ack`. O mesmo `messageId`
   com hash diferente também esbarra na PK: o use case relê a linha do inbox,
   compara o hash e responde `MessageIdConflictError`.
 - **Desfecho de cada mensagem:** `PROCESSED`, `REJECTED` ou `PENDING_REFERENCE` →
@@ -502,7 +505,10 @@ falhar, a redelivery é reconhecida pelo inbox).
   `wager-transactions-dlq.fifo`, porta `DeadLetterQueue`), com o corpo e os
   atributos originais mais o atributo `failureCode`; `MessageGroupId` = `walletId`
   (ou `unroutable`), `MessageDeduplicationId` = `messageId` do envelope (ou o
-  SHA-256 do corpo, quando nem ele se extrai). Ordem: DLQ, linha em
+  SHA-256 do corpo, quando nem ele se extrai). Valor extraído que o SQS não aceita
+  como id (mais de 128 caracteres, ou fora de ASCII alfanumérico e pontuação) conta
+  como ausente. Dos atributos originais vão até 9, `correlationId` primeiro: o SQS
+  aceita 10 por mensagem, contando o `failureCode`. Ordem: DLQ, linha em
   `rejected_submissions` (só nas não admitidas, com canal fila, `message_id` e
   `correlation_id`), `ack`. Se qualquer passo falha, a mensagem fica e é
   decidida de novo na reentrega — pelo inbox, quando já há desfecho; o
