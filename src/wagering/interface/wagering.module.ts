@@ -1,11 +1,12 @@
 /**
  * Nest module of wagering: its controller and use case, wired to the unit of
- * work and the metrics by token so the use case stays free of NestJS.
+ * work, the metrics and the log by token so the use case stays free of NestJS.
  *
  * @packageDocumentation
  */
 import { Module } from '@nestjs/common';
 import type { OutboxRepositories } from '../../messaging/application/outbox-repository.ts';
+import { CONTEXT_LOG, type ContextLog } from '../../shared/application/context-log.ts';
 import type { FaultInjection } from '../../shared/application/fault-injector.ts';
 import { UNIT_OF_WORK, type UnitOfWork } from '../../shared/application/unit-of-work.ts';
 import type { WalletRepositories } from '../../wallet/application/wallet-repository.ts';
@@ -22,11 +23,12 @@ import { WagerTransactionController } from './wager-transaction.controller.ts';
   providers: [
     {
       provide: ProcessWagerTransaction,
-      inject: [UNIT_OF_WORK, WAGERING_METRICS],
+      inject: [UNIT_OF_WORK, WAGERING_METRICS, CONTEXT_LOG],
       useFactory: (
         unitOfWork: UnitOfWork<WalletRepositories & WageringRepositories & OutboxRepositories & FaultInjection>,
         metrics: WageringMetrics,
-      ) => new ProcessWagerTransaction(unitOfWork, () => Bun.randomUUIDv7(), metrics),
+        log: ContextLog,
+      ) => new ProcessWagerTransaction(unitOfWork, () => Bun.randomUUIDv7(), metrics, log),
     },
     {
       provide: RecordRejectedSubmission,

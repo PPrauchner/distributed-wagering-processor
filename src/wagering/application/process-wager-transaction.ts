@@ -15,12 +15,14 @@
  * `FAILED`, so the key keeps answering the same outcome.
  *
  * Every submission that ends in a transaction is counted and timed by channel
- * and kind; idempotency and lock conflicts are counted on their way out.
+ * and kind, and logged with its ids, kind and status — never its money;
+ * idempotency and lock conflicts are counted on their way out.
  *
  * @packageDocumentation
  */
 import type { OutboxRepositories, OutboxRepository } from '../../messaging/application/outbox-repository.ts';
 import { OutboxMessage } from '../../messaging/domain/outbox-message.ts';
+import type { ContextLog } from '../../shared/application/context-log.ts';
 import { FaultPoint, type FaultInjection } from '../../shared/application/fault-injector.ts';
 import {
   PermanentFailureError,
@@ -92,6 +94,7 @@ export class ProcessWagerTransaction {
     >,
     private readonly generateId: () => string,
     private readonly metrics: WageringMetrics,
+    private readonly log: ContextLog,
   ) {}
 
   /**
@@ -119,8 +122,11 @@ export class ProcessWagerTransaction {
     const started = performance.now();
     try {
       const outcome = await this.process(command);
-      const { kind, status } = outcome.transaction;
+      const { id, kind, status, failureCode } = outcome.transaction;
       const { idempotentReplay } = outcome;
+      // A replay answers the transaction recorded first, not the one this submission would have created.
+      this.log.enrich({ transactionId: id });
+      this.log.info('wager transaction settled', { kind, status, failureCode, idempotentReplay });
       const durationSeconds = (performance.now() - started) / 1000;
       this.metrics.transactionSettled({ channel, kind, status, idempotentReplay, durationSeconds });
       return outcome;
@@ -133,6 +139,9 @@ export class ProcessWagerTransaction {
 
   private async process(command: SubmitWagerTransactionCommand): Promise<WagerTransactionOutcome> {
     const { props, submitted } = this.validated(command);
+    // The correlation id generated here, when the channel had none, is the one recorded.
+    const { correlationId, id: transactionId, walletId, providerId } = props;
+    this.log.enrich({ correlationId, transactionId, walletId, providerId });
 
     try {
       return await this.settled(props, () => this.record(submitted));
