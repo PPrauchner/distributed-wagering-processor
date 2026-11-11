@@ -17,7 +17,7 @@ import {
   type ReceivedEvent,
   type ScenarioQueues,
 } from './support/queues.ts';
-import { waitUntil } from './support/wait-until.ts';
+import { waitUntil } from '../support/wait-until.ts';
 import {
   createWallet,
   expectWalletsConsistent,

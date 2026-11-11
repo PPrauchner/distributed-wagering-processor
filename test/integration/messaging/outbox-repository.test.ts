@@ -17,6 +17,7 @@ import { loadConfig } from '../../../src/config.ts';
 import { MikroOrmUnitOfWork } from '../../../src/database/mikro-orm-unit-of-work.ts';
 import { createOrmConfig } from '../../../src/database/orm.config.ts';
 import { OutboxMessage } from '../../../src/messaging/domain/outbox-message.ts';
+import { waitUntil } from '../../support/wait-until.ts';
 
 let orm: MikroORM;
 let sql: SQL;
@@ -140,9 +141,13 @@ describe('claiming by lease', () => {
     const due = message();
     await enqueue(due);
     await claimUntil([due.id], 1);
-    await Bun.sleep(5);
 
-    expect((await claimUntil([due.id])).map((each) => each.id)).toContain(due.id);
+    // Claimed again once the 1 ms lease ran out — waited for, not slept.
+    const again = await waitUntil(async () => {
+      const ids = (await claimUntil([due.id])).map((each) => each.id);
+      return ids.includes(due.id) ? ids : undefined;
+    }, 5_000);
+    expect(again).toContain(due.id);
   });
 
   test('concurrent claims skip each other’s locked rows: no message is claimed twice', async () => {

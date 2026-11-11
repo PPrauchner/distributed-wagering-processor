@@ -9,7 +9,7 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { killAllInstances, startInstance, type AppInstance } from './support/app-processes.ts';
 import { createScenarioQueues, deleteScenarioQueues } from './support/queues.ts';
-import { waitUntil } from './support/wait-until.ts';
+import { waitUntil } from '../support/wait-until.ts';
 import {
   createWallet,
   expectWalletsConsistent,

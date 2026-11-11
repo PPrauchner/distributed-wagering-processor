@@ -29,6 +29,7 @@ import { loadConfig, type AppConfig } from '../../../src/config.ts';
 import { PublishOutbox } from '../../../src/messaging/application/publish-outbox.ts';
 import { FaultPoint, SimulatedCrashError } from '../../../src/shared/application/fault-injector.ts';
 import { expectLedgerConsistent } from '../ledger-invariant.ts';
+import { waitUntil } from '../../support/wait-until.ts';
 
 type JsonObject = Record<string, unknown>;
 
@@ -117,20 +118,11 @@ async function createQueue(name: string): Promise<string> {
   return QueueUrl!;
 }
 
-async function waitFor<T>(probe: () => Promise<T | undefined>, timeoutMs = 15_000): Promise<T> {
-  const deadline = Date.now() + timeoutMs;
-  for (;;) {
-    const value = await probe();
-    if (value !== undefined) return value;
-    if (Date.now() > deadline) throw new Error('condition not met in time');
-    await Bun.sleep(25);
-  }
-}
 
 /** Receives — and deletes — from the queue until every wanted event id arrived. */
 async function receiveUntil(queueUrl: string, wanted: readonly string[]): Promise<Map<string, ReceivedEvent>> {
   const received = new Map<string, ReceivedEvent>();
-  await waitFor(async () => {
+  await waitUntil(async () => {
     const { Messages = [] } = await sqs.send(
       new ReceiveMessageCommand({
         QueueUrl: queueUrl,
@@ -229,7 +221,7 @@ describe('delivery after the commit', () => {
     await startPublisher(withPublisher(config, { enabled: true, queue: queueName }));
 
     const received = await receiveUntil(queueUrl, pending.map((row) => row.id));
-    await waitFor(() => allPublished(wallet.id));
+    await waitUntil(() => allPublished(wallet.id));
     for (const row of pending) {
       const event = received.get(row.id)!;
       expect(event.groupId).toBe(wallet.id);
@@ -257,7 +249,7 @@ describe('a publisher that dies between the send and published_at', () => {
 
     // It sends, then "dies" before recording the publication.
     const sent = new Map<string, ReceivedEvent>();
-    await waitFor(async () => {
+    await waitUntil(async () => {
       await dying.publishDue().catch((error: unknown) => {
         if (!(error instanceof SimulatedCrashError)) throw error;
       });
@@ -268,7 +260,7 @@ describe('a publisher that dies between the send and published_at', () => {
     for (const id of ids) expect(sent.get(id)!.deduplicationId).toBe(id);
 
     const survivor = await startPublisher(withPublisher(config, { enabled: false, queue: queueName, leaseMs }));
-    await waitFor(async () => {
+    await waitUntil(async () => {
       await survivor.publishDue();
       return allPublished(wallet.id);
     });
@@ -326,7 +318,7 @@ describe('two concurrent publishers over the same outbox', () => {
       startPublisher(withPublisher(config, { enabled: true, queue: queueName })),
     ]);
     const received = await receiveUntil(queueUrl, ids);
-    for (const wallet of wallets) await waitFor(() => allPublished(wallet.id));
+    for (const wallet of wallets) await waitUntil(() => allPublished(wallet.id));
 
     const receivedIds = [...received.keys()];
     const known: { id: string }[] = await sql`select id from outbox_messages where id in ${sql(receivedIds)}`;
@@ -343,7 +335,7 @@ describe('a failed send', () => {
       withPublisher(config, { enabled: false, queue: queueName, retryBaseMs: 5000 }),
     );
 
-    const rescheduled = await waitFor(async () => {
+    const rescheduled = await waitUntil(async () => {
       await publisher.publishDue();
       const rows = await outboxOf(wallet.id);
       return rows.every((row) => row.attempts === 1) ? rows : undefined;
@@ -351,7 +343,7 @@ describe('a failed send', () => {
     expect(rescheduled.every((row) => !row.published && row.next_attempt_in_future)).toBe(true);
 
     const queueUrl = await createQueue(queueName);
-    await waitFor(async () => {
+    await waitUntil(async () => {
       await publisher.publishDue();
       return allPublished(wallet.id);
     });
