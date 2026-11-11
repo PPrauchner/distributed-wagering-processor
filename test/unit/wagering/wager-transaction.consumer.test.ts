@@ -36,6 +36,7 @@ import { WagerTransactionConsumer } from '../../../src/wagering/interface/wager-
 
 const WALLET_ID = '01890a5d-ac96-774b-bcce-b302099a8057';
 const MESSAGE_ID = 'message-1';
+const DELIVERY_ID = 'delivery-1';
 
 const DATA = {
   providerId: 'provider-a',
@@ -49,8 +50,15 @@ const DATA = {
   money: { amount: '25.00', currency: 'BRL' },
 };
 
-function messageOf(receiveCount = 1, body: string = envelope()): ReceivedMessage {
-  return { body, attributes: { correlationId: 'correlation-1' }, receipt: `receipt-${receiveCount}`, receiveCount };
+/** A delivery of one queue message: its redeliveries keep the `deliveryId`, a message sent again gets another. */
+function messageOf(receiveCount = 1, body: string = envelope(), deliveryId = DELIVERY_ID): ReceivedMessage {
+  return {
+    body,
+    attributes: { correlationId: 'correlation-1' },
+    deliveryId,
+    receipt: `receipt-${receiveCount}`,
+    receiveCount,
+  };
 }
 
 function envelope(data: object = DATA): string {
@@ -204,7 +212,7 @@ describe('a transient failure', () => {
         attributes: { correlationId: 'correlation-1' },
         failureCode: FailureCode.InfraRetriesExhausted,
         groupId: WALLET_ID,
-        deduplicationId: MESSAGE_ID,
+        deduplicationId: DELIVERY_ID,
       },
     ]);
     expect(h.dlqCodes).toEqual([FailureCode.InfraRetriesExhausted]);
@@ -213,6 +221,15 @@ describe('a transient failure', () => {
     ]);
     expect(h.rejected[0]!.payloadHash).toMatch(/^[0-9a-f]{64}$/);
     expect(h.acknowledged).toEqual(['receipt-5']);
+  });
+
+  test('the same envelope sent again from the DLQ and out of receives again reaches the DLQ under another deduplication id', async () => {
+    const h = harness({ execute: failWith(new TransientFailureError(FailureCode.TransientLockTimeout)) });
+
+    await h.consumer.handle(messageOf(5));
+    await h.consumer.handle(messageOf(5, envelope(), 'delivery-2'));
+
+    expect(h.deadLetters.map((letter) => letter.deduplicationId)).toEqual([DELIVERY_ID, 'delivery-2']);
   });
 
   test('when the DLQ fails on the last receive, the message is left for the redrive: no rejected row, no ack', async () => {
@@ -252,7 +269,7 @@ describe('a permanent error', () => {
     await h.consumer.handle(messageOf(2));
 
     expect(h.deadLetters).toMatchObject([
-      { failureCode: FailureCode.InfraInvariantViolation, groupId: WALLET_ID, deduplicationId: MESSAGE_ID },
+      { failureCode: FailureCode.InfraInvariantViolation, groupId: WALLET_ID, deduplicationId: DELIVERY_ID },
     ]);
     expect(h.acknowledged).toEqual(['receipt-2']);
     expect(h.rejected).toEqual([]);
@@ -291,7 +308,7 @@ describe('a submission not admitted', () => {
         attributes: { correlationId: 'correlation-1' },
         failureCode: FailureCode.InvalidPayload,
         groupId: WALLET_ID,
-        deduplicationId: MESSAGE_ID,
+        deduplicationId: DELIVERY_ID,
       },
     ]);
     expect(h.rejected).toEqual([
@@ -309,14 +326,14 @@ describe('a submission not admitted', () => {
     expect(h.acknowledged).toEqual(['receipt-1']);
   });
 
-  test('a body that is not even JSON still reaches the DLQ, deduplicated by its content', async () => {
+  test('a body that is not even JSON still reaches the DLQ, deduplicated by its delivery', async () => {
     const h = harness();
 
     await h.consumer.handle(messageOf(1, 'not json'));
 
     expect(h.deadLetters).toHaveLength(1);
     expect(h.deadLetters[0]!.failureCode).toBe(FailureCode.InvalidPayload);
-    expect(h.deadLetters[0]!.deduplicationId).toMatch(/^[0-9a-f]{64}$/);
+    expect(h.deadLetters[0]!.deduplicationId).toBe(DELIVERY_ID);
     expect(h.rejected).toHaveLength(1);
     expect(h.acknowledged).toEqual(['receipt-1']);
   });
@@ -325,14 +342,14 @@ describe('a submission not admitted', () => {
     ['too long', 'm'.repeat(129)],
     ['not ASCII', 'mensagem-ção'],
     ['with a space', 'message 1'],
-  ])('a messageId %s for SQS is deduplicated in the DLQ by the body', async (_case, messageId) => {
+  ])('a messageId %s for SQS still reaches the DLQ, deduplicated by its delivery', async (_case, messageId) => {
     const body = JSON.stringify({ messageId, data: { ...DATA, money: 25 } });
     const h = harness();
 
     await h.consumer.handle(messageOf(1, body));
 
     expect(h.deadLetters).toHaveLength(1);
-    expect(h.deadLetters[0]!.deduplicationId).toMatch(/^[0-9a-f]{64}$/);
+    expect(h.deadLetters[0]!.deduplicationId).toBe(DELIVERY_ID);
     expect(h.acknowledged).toEqual(['receipt-1']);
   });
 

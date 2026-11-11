@@ -27,7 +27,6 @@
  *
  * @packageDocumentation
  */
-import { createHash } from 'node:crypto';
 import { Logger, type BeforeApplicationShutdown, type OnApplicationBootstrap } from '@nestjs/common';
 import type { ConsumerMetrics } from '../../messaging/application/consumer-metrics.ts';
 import type { DeadLetterQueue } from '../../messaging/application/dead-letter-queue.ts';
@@ -62,7 +61,7 @@ const RECEIVE_RETRY_MS = 1000;
 /** The DLQ group of a message that names no wallet. */
 const UNROUTABLE_GROUP = 'unroutable';
 
-/** What SQS takes as a group or deduplication id: 1 to 128 ASCII letters, digits and punctuation. */
+/** What SQS takes as a group id: 1 to 128 ASCII letters, digits and punctuation. */
 const SQS_ID = /^[!-~]{1,128}$/;
 
 export interface WagerTransactionConsumerDependencies {
@@ -200,7 +199,7 @@ export class WagerTransactionConsumer implements OnApplicationBootstrap, BeforeA
 
   /** The use case refused the message without an outcome. */
   private async refused(message: ReceivedMessage, facts: MessageFacts, error: unknown): Promise<void> {
-    // Its first send to the DLQ may be what failed; the deduplication id absorbs a second one.
+    // Its first send to the DLQ may be what failed; the deduplication id absorbs a second one of the same delivery.
     if (error instanceof FailedRedeliveryError) {
       this.deps.metrics.inboxDuplicate();
       await this.deadLetter(message, facts, error.failureCode);
@@ -259,7 +258,8 @@ export class WagerTransactionConsumer implements OnApplicationBootstrap, BeforeA
       attributes: message.attributes,
       failureCode,
       groupId: sqsIdOrUndefined(facts.walletId) ?? UNROUTABLE_GROUP,
-      deduplicationId: sqsIdOrUndefined(facts.messageId) ?? createHash('sha256').update(message.body).digest('hex'),
+      // The delivery, not the envelope: a message out of receives again after a redrive must reach the DLQ again.
+      deduplicationId: message.deliveryId,
     });
     this.deps.metrics.deadLettered(failureCode);
     this.deps.log.warn('queue message sent to the DLQ', { failureCode });
@@ -328,7 +328,7 @@ function factsOf(message: ReceivedMessage): MessageFacts {
   };
 }
 
-/** The value, if SQS takes it as a group or deduplication id: one from an untrusted body may not be. */
+/** The value, if SQS takes it as a group id: one from an untrusted body may not be. */
 function sqsIdOrUndefined(value: string | undefined): string | undefined {
   return value !== undefined && SQS_ID.test(value) ? value : undefined;
 }
