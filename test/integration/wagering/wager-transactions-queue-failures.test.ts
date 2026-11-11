@@ -194,7 +194,7 @@ function betData(wallet: TestWallet, amount = '25.00', overrides: JsonObject = {
 async function send(
   queueUrl: string,
   data: JsonObject,
-  options: { messageId?: string; body?: string } = {},
+  options: { messageId?: string; body?: string; groupId?: string } = {},
 ): Promise<string> {
   const messageId = options.messageId ?? Bun.randomUUIDv7();
   await sqs.send(
@@ -203,7 +203,7 @@ async function send(
       MessageBody:
         options.body ??
         JSON.stringify({ messageId, type: 'WagerTransactionRequested', occurredAt: new Date().toISOString(), data }),
-      MessageGroupId: typeof data.walletId === 'string' ? data.walletId : Bun.randomUUIDv7(),
+      MessageGroupId: options.groupId ?? (typeof data.walletId === 'string' ? data.walletId : Bun.randomUUIDv7()),
       MessageDeduplicationId: Bun.randomUUIDv7(),
     }),
   );
@@ -594,13 +594,15 @@ describe('the order of a FIFO group within a batch', () => {
   test('the first of the group goes to a retry: the next one of the group is not processed before it', async () => {
     const queues = await createQueuePair();
     const wallet = await createWallet('100.00');
-    // Only one of the two fits the balance: the one processed first.
+    // The next one is of another, unlocked wallet, in the same group: only the
+    // group's order can hold it back while the first one waits for the lock.
+    const other = await createWallet('100.00');
     const first = betData(wallet, '80.00');
-    const next = betData(wallet, '30.00');
+    const next = betData(other, '30.00');
     let release!: () => void;
     const lock = await holdWalletLock(wallet.id, new Promise((resolve) => (release = resolve)));
     await send(queues.url, first);
-    await send(queues.url, next);
+    await send(queues.url, next, { groupId: wallet.id });
 
     const url = await consumerOn(queues);
     await waitUntil(async () => ((await retries('TRANSIENT_LOCK_TIMEOUT', url)) > 0 ? true : undefined));
@@ -611,9 +613,15 @@ describe('the order of a FIFO group within a batch', () => {
     await oneTransactionOf(next);
     await waitUntil(() => drained(queues.url));
     expect(await transactionsOf(first)).toMatchObject([{ status: 'PROCESSED' }]);
-    expect(await transactionsOf(next)).toMatchObject([{ status: 'REJECTED', failure_code: 'INSUFFICIENT_FUNDS' }]);
+    expect(await transactionsOf(next)).toMatchObject([{ status: 'PROCESSED' }]);
+    const [order] = await sql`
+      select (select created_at from wager_transactions where external_transaction_id = ${first.externalTransactionId as string})
+           < (select created_at from wager_transactions where external_transaction_id = ${next.externalTransactionId as string}) as in_order
+    `;
+    expect(order.in_order).toBe(true);
     expect(await walletState(wallet.id)).toEqual({ balance_amount: '20.00', version: 2 });
-    await expectLedgerConsistent(sql, [wallet.id]);
+    expect(await walletState(other.id)).toEqual({ balance_amount: '70.00', version: 2 });
+    await expectLedgerConsistent(sql, [wallet.id, other.id]);
   }, 60_000);
 });
 
