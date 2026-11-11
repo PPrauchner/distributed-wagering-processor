@@ -863,5 +863,10 @@ uma porta de identidade do provedor. O ponto de extensão no código:
   como recebimento sem terem falhado: numa carteira disputada, podem chegar ao
   limite de tentativas e ir à DLQ sem desfecho (`INFRA_RETRIES_EXHAUSTED`), de onde
   são reprocessáveis.
+- No desligamento, as mensagens que esperavam a vez no seu grupo voltam com
+  visibilidade 0 enquanto a anterior ainda termina. No LocalStack 4.14, que libera
+  o grupo assim que uma mensagem dele fica visível, outra instância pode recebê-las
+  antes, e a ordem do grupo se inverte. No SQS real, o grupo fica bloqueado
+  enquanto a anterior está em voo.
 - A auditoria das submissões não admitidas é de melhor esforço: com o banco fora do
   ar, a resposta sai igual e a linha se perde (o erro é logado).
