@@ -17,6 +17,7 @@ import type { FaultInjection } from '../../shared/application/fault-injector.ts'
 import { UNIT_OF_WORK, type UnitOfWork } from '../../shared/application/unit-of-work.ts';
 import { CrashFaultInjector } from '../../shared/infrastructure/crash-fault-injector.ts';
 import type { WalletRepositories } from '../../wallet/application/wallet-repository.ts';
+import { GetWagerTransaction } from '../application/get-wager-transaction.ts';
 import { ProcessWagerTransaction } from '../application/process-wager-transaction.ts';
 import { RecordRejectedSubmission } from '../application/record-rejected-submission.ts';
 import { ResolvePendingReferences } from '../application/resolve-pending-references.ts';
@@ -26,7 +27,7 @@ import { WAGERING_METRICS, type WageringMetrics } from '../application/wagering-
 import { PendingReferencesWorker } from './pending-references.worker.ts';
 import { RejectedSubmissionAudit } from './rejected-submission.audit.ts';
 import { WagerTransactionConsumer } from './wager-transaction.consumer.ts';
-import { WagerTransactionController } from './wager-transaction.controller.ts';
+import { ProviderWagerTransactionController, WagerTransactionController } from './wager-transaction.controller.ts';
 
 @Module({})
 export class WageringModule {
@@ -43,7 +44,7 @@ export class WageringModule {
     const referenceWait = { ttlMs, backoff: { baseMs: retryBaseMs, maxMs: retryMaxMs } };
     return {
       module: WageringModule,
-      controllers: [WagerTransactionController],
+      controllers: [WagerTransactionController, ProviderWagerTransactionController],
       providers: [
         {
           provide: ProcessWagerTransaction,
@@ -55,6 +56,11 @@ export class WageringModule {
             metrics: WageringMetrics,
             log: ContextLog,
           ) => new ProcessWagerTransaction(unitOfWork, () => Bun.randomUUIDv7(), metrics, log, referenceWait),
+        },
+        {
+          provide: GetWagerTransaction,
+          inject: [UNIT_OF_WORK],
+          useFactory: (unitOfWork: UnitOfWork<WageringRepositories>) => new GetWagerTransaction(unitOfWork),
         },
         {
           provide: ResolvePendingReferences,

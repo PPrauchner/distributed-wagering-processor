@@ -36,6 +36,7 @@ import type { ContextLog } from '../../shared/application/context-log.ts';
 import { FaultPoint, type FaultInjection } from '../../shared/application/fault-injector.ts';
 import { PermanentFailureError, TransientFailureError } from '../../shared/application/infrastructure-failures.ts';
 import type { UnitOfWork } from '../../shared/application/unit-of-work.ts';
+import { isUuid } from '../../shared/application/uuid.ts';
 import { FailureCode } from '../../shared/domain/failure-code.ts';
 import { Money, type MoneyProps } from '../../shared/domain/money.ts';
 import type { WalletRepositories } from '../../wallet/application/wallet-repository.ts';
@@ -85,7 +86,6 @@ export interface WagerTransactionOutcome {
 }
 
 const MAX_IDENTIFIER_LENGTH = 255;
-const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const KINDS = new Set<string>(Object.values(WagerTransactionKind));
 const SUPPORTED_KINDS = new Set([
   WagerTransactionKind.Bet,
@@ -420,7 +420,7 @@ function assertIdentifiers(command: SubmitWagerTransactionCommand): void {
       throw new InvalidWagerTransactionError(`${name} must have between 1 and ${MAX_IDENTIFIER_LENGTH} characters`);
     }
   }
-  if (!UUID_PATTERN.test(command.walletId)) {
+  if (!isUuid(command.walletId)) {
     throw new InvalidWagerTransactionError(`walletId must be a UUID, got "${command.walletId}"`);
   }
 }
