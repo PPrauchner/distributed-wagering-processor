@@ -29,10 +29,11 @@ export enum FailureCode {
   WalletAlreadyExists = 'WALLET_ALREADY_EXISTS',
   WalletNotFound = 'WALLET_NOT_FOUND',
   MessageIdConflict = 'MESSAGE_ID_CONFLICT',
+  // Queue only, no outcome: transient failures out of receives; the key stays free.
+  InfraRetriesExhausted = 'INFRA_RETRIES_EXHAUSTED',
   // Queries.
   NotFound = 'NOT_FOUND',
   // Failures (500).
-  InfraRetriesExhausted = 'INFRA_RETRIES_EXHAUSTED',
   InfraInvariantViolation = 'INFRA_INVARIANT_VIOLATION',
   InfraUnexpected = 'INFRA_UNEXPECTED',
   // Transient (503): resend with the same key.

@@ -52,7 +52,7 @@ export interface WagerTransactionsConsumerConfig {
   batchSize: number;
   /** How long a received message stays invisible to the other consumers. */
   visibilityTimeoutSeconds: number;
-  /** The receive at which a transient failure is given up on: `FAILED` or the DLQ. */
+  /** The receive at which a transient failure is given up on: the DLQ, with no outcome. */
   maxReceives: number;
   /** The ceiling of the retry backoff, `min(2^receiveCount s, retryMaxSeconds)`. */
   retryMaxSeconds: number;
