@@ -171,6 +171,37 @@ describe('coherence CHECKs', () => {
   });
 });
 
+describe('the reference', () => {
+  test('reference_transaction_id must point at an existing transaction', async () => {
+    await expect(
+      insert({ kind: 'WIN', reference_external_transaction_id: 'bet-1', reference_transaction_id: Bun.randomUUIDv7() }),
+    ).rejects.toThrow(/wager_transactions_reference_fk/);
+  });
+
+  test('accepts a WIN pointing at an existing BET', async () => {
+    const betId = await insert();
+
+    await insert({ kind: 'WIN', reference_external_transaction_id: 'bet-1', reference_transaction_id: betId });
+  });
+
+  test('accepts a PENDING_REFERENCE WIN with nothing observed', async () => {
+    await insert({ ...pendingRefund, kind: 'WIN' });
+  });
+});
+
+describe('the failure message', () => {
+  test('only goes with a failure code', async () => {
+    await expect(insert({ failure_message: 'x' })).rejects.toThrow(/wager_transactions_failure_message/);
+  });
+
+  test('is kept on a rejection', async () => {
+    const id = await insert({ ...rejected, failure_code: 'REFERENCE_MISMATCH', failure_message: 'another roundId' });
+
+    const [row] = await sql`select failure_message from wager_transactions where id = ${id}`;
+    expect(row.failure_message).toBe('another roundId');
+  });
+});
+
 describe('a terminal transaction never changes', () => {
   test.each<[string, Row]>([
     ['PROCESSED', {}],
