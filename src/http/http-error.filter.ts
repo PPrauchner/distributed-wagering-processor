@@ -31,8 +31,10 @@ import {
 import { InvalidWagerTransactionError } from '../wagering/domain/wager-transaction.ts';
 import { InvalidWalletError } from '../wallet/domain/wallet.ts';
 import {
+  EmptyCreationKeyError,
   InvalidCursorError,
   WalletAlreadyExistsError,
+  WalletCreationConflictError,
   WalletNotFoundError,
 } from '../wallet/application/wallet-errors.ts';
 
@@ -79,8 +81,10 @@ const INVALID_PAYLOAD_ERRORS = [
 // Refused requests: a fixed status and failure code, and the error's message.
 const REFUSED_SUBMISSIONS: [new (...args: never[]) => Error, number, FailureCode][] = [
   [MissingIdempotencyKeyError, HttpStatus.BAD_REQUEST, FailureCode.MissingIdempotencyKey],
+  [EmptyCreationKeyError, HttpStatus.BAD_REQUEST, FailureCode.MissingIdempotencyKey],
   [InternalKindNotAllowedError, HttpStatus.BAD_REQUEST, FailureCode.InternalKindNotAllowed],
   [IdempotencyConflictError, HttpStatus.CONFLICT, FailureCode.IdempotencyConflict],
+  [WalletCreationConflictError, HttpStatus.CONFLICT, FailureCode.IdempotencyConflict],
   [ExternalIdConflictError, HttpStatus.CONFLICT, FailureCode.ExternalIdConflict],
   [SubmissionWalletNotFoundError, HttpStatus.UNPROCESSABLE_ENTITY, FailureCode.WalletNotFound],
   [InvalidCursorError, HttpStatus.BAD_REQUEST, FailureCode.InvalidCursor],
