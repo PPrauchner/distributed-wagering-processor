@@ -34,8 +34,17 @@ services:
       DATABASE_URL: postgresql://wagering:wagering@postgres:5432/wagering
       PORT: "3000"
       SQS_ENDPOINT: http://localstack:4566
+    # Uma instância em :3000 por padrão; com `--scale app=N`, APP_PORTS dá uma faixa
+    # (ex.: 3000-3002) e cada réplica fica numa porta dela (ver README).
     ports:
-      - "3000:3000"
+      - "${APP_PORTS:-3000}:3000"
+    # `--wait` espera a prontidão de fato (banco e filas), não só o processo.
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:3000/health/ready"]
+      interval: 3s
+      timeout: 5s
+      retries: 20
+      start_period: 5s
     depends_on:
       postgres:
         condition: service_healthy

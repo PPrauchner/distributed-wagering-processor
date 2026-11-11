@@ -750,8 +750,10 @@ uma porta de identidade do provedor. O ponto de extensão no código:
   integration.
 - Isolamento sem limpeza: banco de teste recriado por execução, ids próprios por
   teste, filas com sufixo aleatório.
-- ≥ 3 instâncias são processos reais (`Bun.spawn`); no Compose, `--scale app=3`,
-  documentado no `README.md`. Falhas no ponto exato vêm da porta `FaultInjector`
+- ≥ 3 instâncias são processos reais (`Bun.spawn`); no Compose,
+  `APP_PORTS=3000-3002 docker compose up -d --wait --scale app=3` (uma porta do
+  host por réplica; sem `APP_PORTS`, uma instância em `:3000`), documentado no
+  `README.md`. Falhas no ponto exato vêm da porta `FaultInjector`
   (`shared/application`), oferecida pela unidade de trabalho: no-op por padrão,
   ativada só por `FAULT_INJECTION` (nomes de pontos separados por vírgula; nome
   desconhecido e `NODE_ENV=production` são recusados na partida). Pontos:
@@ -804,6 +806,8 @@ uma porta de identidade do provedor. O ponto de extensão no código:
   dos spans; pede coletor e visualizador no Compose.
 - **Resolver a pendente na chegada da referência**, reconciliação agendada e
   expurgo das linhas publicadas da outbox.
+- **Balanceador HTTP** (nginx) na frente das réplicas do Compose, com uma porta só
+  — ver [Limitações conhecidas](#limitações-conhecidas).
 
 ## Limitações conhecidas
 
@@ -835,5 +839,9 @@ uma porta de identidade do provedor. O ponto de extensão no código:
   créditos no teto de entrada — é rejeitado com `BALANCE_LIMIT_EXCEEDED`, e a
   carteira cheia só volta a receber crédito depois de um débito. Alargá-lo exige
   alargar a coluna.
+- No Compose, o HTTP não é balanceado: com `--scale app=3`, cada réplica fica numa
+  porta da faixa `APP_PORTS`, e quem chama só `:3000` fala com uma réplica. A fila
+  de entrada e a outbox são divididas entre as três; o balanceador fica como
+  evolução.
 - A auditoria das submissões não admitidas é de melhor esforço: com o banco fora do
   ar, a resposta sai igual e a linha se perde (o erro é logado).
