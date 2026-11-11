@@ -88,6 +88,7 @@ function instanceConfig(options: {
     sqs: { ...config.sqs, wagerTransactionsQueue: options.inputQueue, wageringEventsQueue: options.eventsQueue },
     outboxPublisher: { ...config.outboxPublisher, enabled: options.publisher, pollIntervalMs: 50 },
     wagerTransactionsConsumer: {
+      ...config.wagerTransactionsConsumer,
       enabled: true,
       waitTimeSeconds: 1,
       batchSize: 10,

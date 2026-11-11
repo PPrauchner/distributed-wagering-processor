@@ -9,7 +9,7 @@
  * @packageDocumentation
  */
 import { Counter, Gauge, Histogram, Registry } from 'prom-client';
-import type { InboxMetrics } from '../../messaging/application/inbox-metrics.ts';
+import type { ConsumerMetrics } from '../../messaging/application/consumer-metrics.ts';
 import type { OutboxBacklog } from '../../messaging/application/outbox-backlog.ts';
 import type { LockConflictReason } from '../../shared/application/infrastructure-failures.ts';
 import type { SubmissionChannel } from '../../wagering/domain/rejected-submission.ts';
@@ -30,13 +30,15 @@ export interface BacklogReadOptions {
   log: MetricsLog;
 }
 
-export class PrometheusMetrics implements WageringMetrics, InboxMetrics, ReconciliationDivergenceCounter {
+export class PrometheusMetrics implements WageringMetrics, ConsumerMetrics, ReconciliationDivergenceCounter {
   readonly registry = new Registry();
   private readonly transactions: Counter<'kind' | 'status' | 'channel'>;
   private readonly replays: Counter<'channel'>;
   private readonly idempotencyConflicts: Counter<'channel'>;
   private readonly notAdmitted: Counter<'failure_code' | 'channel'>;
   private readonly inboxDuplicates: Counter;
+  private readonly consumerRetries: Counter<'failure_code'>;
+  private readonly deadLetters: Counter<'failure_code'>;
   private readonly lockConflicts: Counter<'reason'>;
   private readonly latency: Histogram<'channel' | 'kind'>;
   private readonly divergences: Counter;
@@ -80,6 +82,18 @@ export class PrometheusMetrics implements WageringMetrics, InboxMetrics, Reconci
     this.inboxDuplicates = new Counter({
       name: 'inbox_duplicates_total',
       help: 'Queue messages the inbox already held, acknowledged without processing.',
+      registers,
+    });
+    this.consumerRetries = new Counter({
+      name: 'wager_transactions_consumer_retries_total',
+      help: 'Deliveries of the input queue left for a later one, by the failure code that stopped them.',
+      labelNames: ['failure_code'],
+      registers,
+    });
+    this.deadLetters = new Counter({
+      name: 'wager_transactions_dlq_messages_total',
+      help: 'Messages the consumer sent to the DLQ, by failureCode.',
+      labelNames: ['failure_code'],
       registers,
     });
     this.lockConflicts = new Counter({
@@ -169,6 +183,14 @@ export class PrometheusMetrics implements WageringMetrics, InboxMetrics, Reconci
 
   inboxDuplicate(): void {
     this.inboxDuplicates.inc();
+  }
+
+  consumerRetry(failureCode: string): void {
+    this.consumerRetries.inc({ failure_code: failureCode });
+  }
+
+  deadLettered(failureCode: string): void {
+    this.deadLetters.inc({ failure_code: failureCode });
   }
 
   increment(): void {

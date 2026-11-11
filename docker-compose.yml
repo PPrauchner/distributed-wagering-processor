@@ -28,6 +28,8 @@ services:
   app:
     build: .
     image: distributed-wagering-processor:local
+    # SIGTERM drena as mensagens em andamento por até 20 s; 30 s antes do SIGKILL.
+    stop_grace_period: 30s
     environment:
       DATABASE_URL: postgresql://wagering:wagering@postgres:5432/wagering
       PORT: "3000"

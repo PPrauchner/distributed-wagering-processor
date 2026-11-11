@@ -25,6 +25,8 @@ export interface SqsConfig {
   secretAccessKey: string;
   /** The input queue of the submissions; the readiness check looks it up. */
   wagerTransactionsQueue: string;
+  /** Where the consumer sends the messages it gives up on, with their `failureCode`. */
+  wagerTransactionsDlq: string;
   /** Where the integration events go; the tests use queues with a random suffix. */
   wageringEventsQueue: string;
 }
@@ -50,6 +52,12 @@ export interface WagerTransactionsConsumerConfig {
   batchSize: number;
   /** How long a received message stays invisible to the other consumers. */
   visibilityTimeoutSeconds: number;
+  /** The receive at which a transient failure is given up on: `FAILED` or the DLQ. */
+  maxReceives: number;
+  /** The ceiling of the retry backoff, `min(2^receiveCount s, retryMaxSeconds)`. */
+  retryMaxSeconds: number;
+  /** How long a shutdown waits for the messages in progress. */
+  drainTimeoutMs: number;
 }
 
 /**
@@ -107,6 +115,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
       accessKeyId: env.AWS_ACCESS_KEY_ID ?? 'test',
       secretAccessKey: env.AWS_SECRET_ACCESS_KEY ?? 'test',
       wagerTransactionsQueue: env.WAGER_TRANSACTIONS_QUEUE ?? 'wager-transactions.fifo',
+      wagerTransactionsDlq: env.WAGER_TRANSACTIONS_DLQ ?? 'wager-transactions-dlq.fifo',
       wageringEventsQueue: env.WAGERING_EVENTS_QUEUE ?? 'wagering-events.fifo',
     },
     outboxPublisher: {
@@ -122,6 +131,10 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
       waitTimeSeconds: integerInRangeOf(env, 'WAGER_TRANSACTIONS_WAIT_SECONDS', 20, [0, 20]),
       batchSize: integerInRangeOf(env, 'WAGER_TRANSACTIONS_BATCH_SIZE', 10, [1, 10]),
       visibilityTimeoutSeconds: positiveIntegerOf(env, 'WAGER_TRANSACTIONS_VISIBILITY_SECONDS', 30),
+      // Below the redrive's maxReceiveCount of 6, the safety net when even giving up fails.
+      maxReceives: positiveIntegerOf(env, 'WAGER_TRANSACTIONS_MAX_RECEIVES', 5),
+      retryMaxSeconds: positiveIntegerOf(env, 'WAGER_TRANSACTIONS_RETRY_MAX_SECONDS', 60),
+      drainTimeoutMs: positiveIntegerOf(env, 'WAGER_TRANSACTIONS_DRAIN_TIMEOUT_MS', 20_000),
     },
     pendingReferences: {
       enabled: booleanOf(env, 'PENDING_REFERENCES_WORKER_ENABLED', true),

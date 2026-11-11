@@ -1,11 +1,19 @@
 /**
  * `InputQueue` over SQS: `ReceiveMessage` with long polling, batch size and
- * visibility timeout fixed by the configuration, and `DeleteMessage` as the
- * `ack`. The queue URL is resolved by name on first use and kept once found.
+ * visibility timeout fixed by the configuration, with each message's
+ * `ApproximateReceiveCount`; `DeleteMessage` as the `ack` and
+ * `ChangeMessageVisibility` to hand a delivery back. The queue URL is resolved
+ * by name on first use and kept once found.
  *
  * @packageDocumentation
  */
-import { DeleteMessageCommand, GetQueueUrlCommand, ReceiveMessageCommand, type SQSClient } from '@aws-sdk/client-sqs';
+import {
+  ChangeMessageVisibilityCommand,
+  DeleteMessageCommand,
+  GetQueueUrlCommand,
+  ReceiveMessageCommand,
+  type SQSClient,
+} from '@aws-sdk/client-sqs';
 import type { InputQueue, ReceivedMessage } from '../application/input-queue.ts';
 
 export interface SqsInputQueueOptions {
@@ -23,16 +31,26 @@ export class SqsInputQueue implements InputQueue {
     private readonly options: SqsInputQueueOptions,
   ) {}
 
-  async receive(): Promise<ReceivedMessage[]> {
-    const { Messages = [] } = await this.sqs.send(
-      new ReceiveMessageCommand({
-        QueueUrl: await this.resolveQueueUrl(),
-        WaitTimeSeconds: this.options.waitTimeSeconds,
-        MaxNumberOfMessages: this.options.batchSize,
-        VisibilityTimeout: this.options.visibilityTimeoutSeconds,
-        MessageAttributeNames: ['All'],
-      }),
-    );
+  async receive(signal?: AbortSignal): Promise<ReceivedMessage[]> {
+    const queueUrl = await this.resolveQueueUrl();
+    if (signal?.aborted) return [];
+    let Messages;
+    try {
+      ({ Messages = [] } = await this.sqs.send(
+        new ReceiveMessageCommand({
+          QueueUrl: queueUrl,
+          WaitTimeSeconds: this.options.waitTimeSeconds,
+          MaxNumberOfMessages: this.options.batchSize,
+          VisibilityTimeout: this.options.visibilityTimeoutSeconds,
+          MessageAttributeNames: ['All'],
+          MessageSystemAttributeNames: ['ApproximateReceiveCount'],
+        }),
+        { abortSignal: signal },
+      ));
+    } catch (error) {
+      if (signal?.aborted) return [];
+      throw error;
+    }
     return Messages.flatMap((message) => {
       if (message.Body === undefined || message.ReceiptHandle === undefined) return [];
       const attributes = Object.fromEntries(
@@ -40,13 +58,24 @@ export class SqsInputQueue implements InputQueue {
           value.StringValue === undefined ? [] : [[name, value.StringValue] as const],
         ),
       );
-      return [{ body: message.Body, attributes, receipt: message.ReceiptHandle }];
+      const receiveCount = Number(message.Attributes?.ApproximateReceiveCount ?? 1);
+      return [{ body: message.Body, attributes, receipt: message.ReceiptHandle, receiveCount }];
     });
   }
 
   async acknowledge(message: ReceivedMessage): Promise<void> {
     await this.sqs.send(
       new DeleteMessageCommand({ QueueUrl: await this.resolveQueueUrl(), ReceiptHandle: message.receipt }),
+    );
+  }
+
+  async changeVisibility(message: ReceivedMessage, seconds: number): Promise<void> {
+    await this.sqs.send(
+      new ChangeMessageVisibilityCommand({
+        QueueUrl: await this.resolveQueueUrl(),
+        ReceiptHandle: message.receipt,
+        VisibilityTimeout: seconds,
+      }),
     );
   }
 

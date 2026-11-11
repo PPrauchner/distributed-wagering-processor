@@ -1,13 +1,14 @@
 /**
  * Nest module of wagering: its controller, its queue consumer, the worker of
- * pending references and their use cases, wired to the unit of work, the input queue, the metrics and the log by token
+ * pending references and their use cases, wired to the unit of work, the input queue and its DLQ, the metrics and the log by token
  * so the use case stays free of NestJS.
  *
  * @packageDocumentation
  */
 import { Module, type DynamicModule } from '@nestjs/common';
 import type { AppConfig } from '../../config.ts';
-import { INBOX_METRICS, type InboxMetrics } from '../../messaging/application/inbox-metrics.ts';
+import { CONSUMER_METRICS, type ConsumerMetrics } from '../../messaging/application/consumer-metrics.ts';
+import { WAGER_TRANSACTIONS_DLQ, type DeadLetterQueue } from '../../messaging/application/dead-letter-queue.ts';
 import type { InboxRepositories } from '../../messaging/application/inbox-repository.ts';
 import { WAGER_TRANSACTIONS_QUEUE, type InputQueue } from '../../messaging/application/input-queue.ts';
 import type { OutboxRepositories } from '../../messaging/application/outbox-repository.ts';
@@ -80,21 +81,36 @@ export class WageringModule {
         },
         {
           provide: WagerTransactionConsumer,
-          inject: [WAGER_TRANSACTIONS_QUEUE, ProcessWagerTransaction, INBOX_METRICS, CONTEXT_LOG],
+          inject: [
+            WAGER_TRANSACTIONS_QUEUE,
+            WAGER_TRANSACTIONS_DLQ,
+            ProcessWagerTransaction,
+            RecordRejectedSubmission,
+            CONSUMER_METRICS,
+            CONTEXT_LOG,
+          ],
           useFactory: (
             queue: InputQueue,
+            deadLetters: DeadLetterQueue,
             processWagerTransaction: ProcessWagerTransaction,
-            metrics: InboxMetrics,
+            recordRejectedSubmission: RecordRejectedSubmission,
+            metrics: ConsumerMetrics,
             log: ContextLog,
-          ) =>
-            new WagerTransactionConsumer(
-              queue,
-              processWagerTransaction,
-              metrics,
-              log,
-              new CrashFaultInjector(config.faultPoints),
-              { enabled: config.wagerTransactionsConsumer.enabled },
-            ),
+          ) => {
+            const { enabled, maxReceives, retryMaxSeconds, drainTimeoutMs } = config.wagerTransactionsConsumer;
+            return new WagerTransactionConsumer(
+              {
+                queue,
+                deadLetters,
+                processWagerTransaction,
+                recordRejectedSubmission,
+                metrics,
+                log,
+                faults: new CrashFaultInjector(config.faultPoints),
+              },
+              { enabled, maxReceives, retryMaxSeconds, drainTimeoutMs },
+            );
+          },
         },
         {
           provide: RecordRejectedSubmission,

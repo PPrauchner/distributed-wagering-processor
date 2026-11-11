@@ -14,7 +14,9 @@
  * Error path (`ARCHITECTURE.md` § Classificação de falhas): a transient failure
  * records nothing and reaches the caller; a permanent one rolls the SQL
  * transaction back, and a second unit of work records the transaction as
- * `FAILED`, so the key keeps answering the same outcome.
+ * `FAILED` — with its inbox row, when it came by the queue —, so the key keeps
+ * answering the same outcome. A queue consumer that gives up on a transient
+ * failure records `FAILED` `INFRA_RETRIES_EXHAUSTED` the same way.
  *
  * Every submission that ends in a transaction is counted and timed by channel
  * and kind, and logged with its ids, kind and status — never its money;
@@ -22,20 +24,22 @@
  *
  * @packageDocumentation
  */
-import type { InboxEntry, InboxRepositories } from '../../messaging/application/inbox-repository.ts';
+import {
+  InboxRedeliveryError,
+  MessageIdConflictError,
+  type InboxEntry,
+  type InboxRepositories,
+} from '../../messaging/application/inbox-repository.ts';
 import { InboxMessage } from '../../messaging/domain/inbox-message.ts';
 import type { OutboxRepositories } from '../../messaging/application/outbox-repository.ts';
 import type { ContextLog } from '../../shared/application/context-log.ts';
 import { FaultPoint, type FaultInjection } from '../../shared/application/fault-injector.ts';
-import {
-  PermanentFailureError,
-  TransientFailureError,
-  type PermanentFailureCode,
-} from '../../shared/application/infrastructure-failures.ts';
+import { PermanentFailureError, TransientFailureError } from '../../shared/application/infrastructure-failures.ts';
 import type { UnitOfWork } from '../../shared/application/unit-of-work.ts';
+import { FailureCode } from '../../shared/domain/failure-code.ts';
 import { Money, type MoneyProps } from '../../shared/domain/money.ts';
 import type { WalletRepositories } from '../../wallet/application/wallet-repository.ts';
-import type { SubmissionChannel } from '../domain/rejected-submission.ts';
+import { SubmissionChannel } from '../domain/rejected-submission.ts';
 import {
   InvalidWagerTransactionError,
   WagerTransaction,
@@ -51,6 +55,7 @@ import {
   DuplicateExternalIdError,
   DuplicateIdempotencyKeyError,
   ExternalIdConflictError,
+  FailedRedeliveryError,
   IdempotencyConflictError,
   InternalKindNotAllowedError,
   SubmissionWalletNotFoundError,
@@ -105,8 +110,8 @@ export class ProcessWagerTransaction {
    * @param command - The submission, with its idempotency key already present.
    * @param channel - Where it came from, for the metrics.
    * @param inbox - The queue message it came in, when it came by the queue:
-   *   recorded in the inbox, in the SQL transaction of the outcome — a replay's
-   *   too, unless the outcome is `FAILED`.
+   *   recorded in the inbox, in the SQL transaction of the outcome — a
+   *   replay's and a `FAILED`'s too.
    * @returns The transaction it ended in — `PROCESSED`, `REJECTED`,
    *   `PENDING_REFERENCE` or, after a permanent error, `FAILED` — new or replayed;
    *   a replay of a pending one answers its current status.
@@ -124,17 +129,87 @@ export class ProcessWagerTransaction {
    *   or the database is unavailable: nothing was recorded.
    * @throws {@link PermanentFailureError} If even the `FAILED` could not be
    *   recorded for a permanent reason.
+   * @throws {@link FailedRedeliveryError} If the inbox already holds the
+   *   message and its submission was recorded `FAILED`: nothing was recorded
+   *   this time; it still belongs in the DLQ.
    * @throws {@link InboxRedeliveryError} If the inbox already holds the
    *   message: nothing was recorded this time.
+   * @throws {@link MessageIdConflictError} If the inbox holds its `messageId`
+   *   with another payload hash: nothing was recorded.
    */
-  async execute(
+  execute(
     command: SubmitWagerTransactionCommand,
     channel: SubmissionChannel,
     inbox?: InboxEntry,
   ): Promise<WagerTransactionOutcome> {
+    return this.observed(channel, () => this.redeliveryChecked(command, inbox, () => this.process(command, inbox)));
+  }
+
+  /**
+   * Gives up on a queue submission whose transient failures outlasted its
+   * receives: records it `FAILED` `INFRA_RETRIES_EXHAUSTED`, with its inbox
+   * row, in a unit of work of its own — nothing observed, no ledger entry.
+   *
+   * @param command - The submission, as {@link execute} takes it.
+   * @param inbox - The queue message it came in.
+   * @returns The `FAILED` transaction or, when the key was recorded meanwhile,
+   *   the replay of that transaction.
+   * @throws Whatever {@link execute} throws validating the submission or
+   *   settling a race on its key, and {@link TransientFailureError} if the
+   *   database is still unavailable: nothing was recorded.
+   * @throws {@link InboxRedeliveryError} If the inbox already holds the message
+   *   — {@link FailedRedeliveryError} when it was recorded `FAILED`.
+   * @throws {@link MessageIdConflictError} If it holds the `messageId` with
+   *   another payload hash.
+   */
+  giveUp(command: SubmitWagerTransactionCommand, inbox: InboxEntry): Promise<WagerTransactionOutcome> {
+    return this.observed(SubmissionChannel.Queue, () => {
+      const { props } = this.validated(command);
+      this.log.enrich({ correlationId: props.correlationId, walletId: props.walletId, providerId: props.providerId });
+      return this.redeliveryChecked(command, inbox, () =>
+        this.settled(props, () => this.recordFailure(props, FailureCode.InfraRetriesExhausted, inbox)),
+      );
+    });
+  }
+
+  /**
+   * Tells a redelivery the inbox refused from a `messageId` reused with
+   * another payload, and a redelivery of a submission recorded `FAILED` — one
+   * the consumer still owes the DLQ — from the others.
+   */
+  private async redeliveryChecked(
+    command: SubmitWagerTransactionCommand,
+    received: InboxEntry | undefined,
+    work: () => Promise<WagerTransactionOutcome>,
+  ): Promise<WagerTransactionOutcome> {
+    try {
+      return await work();
+    } catch (error) {
+      if (!received || !(error instanceof InboxRedeliveryError)) throw error;
+      const { recorded, transaction } = await this.unitOfWork.run(async ({ inbox, transactions }) => ({
+        recorded: await inbox.find(received.consumerName, received.messageId),
+        transaction: await transactions.findByIdempotencyKey(command.providerId, command.idempotencyKey),
+      }));
+      if (recorded && recorded.payloadHash !== received.payloadHash) {
+        throw new MessageIdConflictError(received.messageId, received.payloadHash);
+      }
+      if (transaction?.status === WagerTransactionStatus.Failed) {
+        throw new FailedRedeliveryError(received.messageId, transaction.failureCode ?? FailureCode.InfraUnexpected, {
+          cause: error,
+        });
+      }
+      throw error;
+    }
+  }
+
+  /** Logs, counts and times the submission once it ended in a transaction. */
+  private async observed(
+    channel: SubmissionChannel,
+    work: () => Promise<WagerTransactionOutcome>,
+  ): Promise<WagerTransactionOutcome> {
     const started = performance.now();
     try {
-      const outcome = await this.process(command, inbox);
+      const outcome = await work();
       const { id, kind, status, failureCode } = outcome.transaction;
       const { idempotentReplay } = outcome;
       // A replay answers the transaction recorded first, not the one this submission would have created.
@@ -161,7 +236,7 @@ export class ProcessWagerTransaction {
     } catch (error) {
       if (!(error instanceof PermanentFailureError)) throw error;
       // The SQL transaction rolled back: record the failure in a unit of work of its own.
-      return this.settled(props, () => this.recordFailure(props, error.failureCode));
+      return this.settled(props, () => this.recordFailure(props, error.failureCode, inbox));
     }
   }
 
@@ -186,15 +261,12 @@ export class ProcessWagerTransaction {
    * Steps 4 to 8 of the order, in one unit of work. The inbox row, when the
    * submission came by the queue, is written with whatever the unit of work
    * commits — a new outcome or nothing but the row, on a replay —, so a
-   * redelivery fails the commit on the inbox's primary key. A `FAILED` replay
-   * records no row: its message stays a retry, never a redelivery.
+   * redelivery fails the commit on the inbox's primary key.
    */
   private record(submitted: WagerTransaction, received?: InboxEntry): Promise<WagerTransactionOutcome> {
     return this.unitOfWork.run(async ({ wallets, ledger, transactions, outbox, inbox, faults }) => {
       const recorded = (outcome: WagerTransactionOutcome): WagerTransactionOutcome => {
-        if (received && outcome.transaction.status !== WagerTransactionStatus.Failed) {
-          inbox.add(processedInboxMessage(received));
-        }
+        if (received) inbox.add(processedInboxMessage(received));
         return outcome;
       };
       const earlier = await findEarlier(transactions, submitted);
@@ -224,12 +296,17 @@ export class ProcessWagerTransaction {
     });
   }
 
-  /** The second unit of work: `FAILED`, with nothing observed and no ledger entry. */
+  /**
+   * The second unit of work: `FAILED`, with nothing observed and no ledger
+   * entry, and the inbox row when it came by the queue — a replay's too.
+   */
   private recordFailure(
     props: CreateWagerTransactionProps,
-    code: PermanentFailureCode,
+    code: FailureCode,
+    received?: InboxEntry,
   ): Promise<WagerTransactionOutcome> {
-    return this.unitOfWork.run(async ({ transactions }) => {
+    return this.unitOfWork.run(async ({ transactions, inbox }) => {
+      if (received) inbox.add(processedInboxMessage(received));
       const failed = WagerTransaction.create(props);
       const earlier = await findEarlier(transactions, failed);
       if (earlier) return earlier;
