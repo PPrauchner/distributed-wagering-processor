@@ -6,9 +6,17 @@
  * @packageDocumentation
  */
 import type { MoneyProps } from '../../shared/domain/money.ts';
-import { expectExactObject, expectString } from '../../shared/interface/invalid-payload.error.ts';
+import {
+  expectExactObject,
+  expectString,
+  InvalidPayloadError,
+} from '../../shared/interface/invalid-payload.error.ts';
 import type { CreateWalletCommand } from '../application/create-wallet.ts';
+import type { GetLedgerPageQuery, LedgerPage } from '../application/get-ledger-page.ts';
+import type { ReconciliationReport } from '../application/reconciliation.ts';
+import type { VersionGap } from '../application/wallet-repository.ts';
 import type { Wallet } from '../domain/wallet.ts';
+import type { LedgerDirection, WalletLedgerEntry } from '../domain/wallet-ledger-entry.ts';
 
 export interface WalletResponse {
   id: string;
@@ -16,6 +24,38 @@ export interface WalletResponse {
   balance: MoneyProps;
   version: number;
 }
+
+export interface LedgerEntryResponse {
+  id: string;
+  transactionId: string;
+  direction: LedgerDirection;
+  money: MoneyProps;
+  balanceBefore: MoneyProps;
+  balanceAfter: MoneyProps;
+  walletVersion: number;
+  createdAt: string;
+}
+
+export interface LedgerPageResponse {
+  items: LedgerEntryResponse[];
+  nextCursor: string | null;
+}
+
+export interface ReconciliationResponse {
+  walletId: string;
+  storedBalance: MoneyProps;
+  calculatedBalance: MoneyProps;
+  difference: MoneyProps;
+  consistent: boolean;
+  checkedEntries: number;
+  versionGaps: VersionGap[];
+  walletVersion: number;
+  lastEntryVersion: number | null;
+}
+
+const DEFAULT_LEDGER_LIMIT = 50;
+const MAX_LEDGER_LIMIT = 200;
+const LIMIT_PATTERN = /^[1-9]\d{0,2}$/;
 
 /**
  * @param body - The untrusted request body.
@@ -48,5 +88,58 @@ export function toWalletResponse(wallet: Wallet): WalletResponse {
     playerId: wallet.playerId,
     balance: wallet.balance.toJSON(),
     version: wallet.version,
+  };
+}
+
+/**
+ * @param walletId - The `:walletId` route parameter.
+ * @param query - The untrusted query string: `cursor` and `limit`, both optional.
+ * @returns The ledger page query; `limit` defaults to 50.
+ * @throws {@link InvalidPayloadError} If `limit` is not an integer from 1 to 200,
+ *   or a parameter is repeated.
+ */
+export function parseLedgerPageRequest(walletId: string, query: Record<string, unknown>): GetLedgerPageQuery {
+  const { cursor, limit } = query;
+  if (cursor !== undefined && typeof cursor !== 'string') throw new InvalidPayloadError('query.cursor must be a string');
+  return { walletId, cursor, limit: parseLimit(limit) };
+}
+
+function parseLimit(limit: unknown): number {
+  if (limit === undefined) return DEFAULT_LEDGER_LIMIT;
+  const parsed = typeof limit === 'string' && LIMIT_PATTERN.test(limit) ? Number(limit) : NaN;
+  if (!(parsed <= MAX_LEDGER_LIMIT)) {
+    throw new InvalidPayloadError(`query.limit must be an integer from 1 to ${MAX_LEDGER_LIMIT}`);
+  }
+  return parsed;
+}
+
+export function toLedgerPageResponse(page: LedgerPage): LedgerPageResponse {
+  return { items: page.items.map(toLedgerEntryResponse), nextCursor: page.nextCursor };
+}
+
+function toLedgerEntryResponse(entry: WalletLedgerEntry): LedgerEntryResponse {
+  return {
+    id: entry.id,
+    transactionId: entry.transactionId,
+    direction: entry.direction,
+    money: entry.money.toJSON(),
+    balanceBefore: entry.balanceBefore.toJSON(),
+    balanceAfter: entry.balanceAfter.toJSON(),
+    walletVersion: entry.walletVersion,
+    createdAt: entry.createdAt.toISOString(),
+  };
+}
+
+export function toReconciliationResponse(report: ReconciliationReport): ReconciliationResponse {
+  return {
+    walletId: report.walletId,
+    storedBalance: report.storedBalance.toJSON(),
+    calculatedBalance: report.calculatedBalance.toJSON(),
+    difference: report.difference.toJSON(),
+    consistent: report.consistent,
+    checkedEntries: report.checkedEntries,
+    versionGaps: report.versionGaps,
+    walletVersion: report.walletVersion,
+    lastEntryVersion: report.lastEntryVersion,
   };
 }

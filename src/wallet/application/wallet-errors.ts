@@ -29,3 +29,8 @@ export class WalletNotFoundError extends Error {
 export class DuplicateWalletError extends Error {
   override readonly name = 'DuplicateWalletError';
 }
+
+/** A ledger cursor that the API did not hand out for this wallet. */
+export class InvalidCursorError extends Error {
+  override readonly name = 'InvalidCursorError';
+}

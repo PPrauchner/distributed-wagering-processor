@@ -60,6 +60,7 @@ describe('the outbox publisher', () => {
       region: 'us-east-1',
       accessKeyId: 'test',
       secretAccessKey: 'test',
+      wagerTransactionsQueue: 'wager-transactions.fifo',
       wageringEventsQueue: 'wagering-events.fifo',
     });
   });
@@ -73,6 +74,7 @@ describe('the outbox publisher', () => {
       OUTBOX_RETRY_MAX_MS: '100',
       SQS_ENDPOINT: 'http://localstack:4566',
       AWS_REGION: 'sa-east-1',
+      WAGER_TRANSACTIONS_QUEUE: 'wager-transactions-abc.fifo',
       WAGERING_EVENTS_QUEUE: 'wagering-events-abc.fifo',
     });
 
@@ -86,6 +88,7 @@ describe('the outbox publisher', () => {
     expect(config.sqs).toMatchObject({
       endpoint: 'http://localstack:4566',
       region: 'sa-east-1',
+      wagerTransactionsQueue: 'wager-transactions-abc.fifo',
       wageringEventsQueue: 'wagering-events-abc.fifo',
     });
   });

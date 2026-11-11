@@ -60,6 +60,13 @@ describe('WagerTransaction.create', () => {
     ['an OPENING with a reference', opening({ referenceExternalTransactionId: 'bet-1' })],
     ['a REFUND without a reference', opening({ kind: WagerTransactionKind.Refund })],
     ['a ROLLBACK without a reference', opening({ kind: WagerTransactionKind.Rollback })],
+    ...[WagerTransactionKind.Win, WagerTransactionKind.Refund, WagerTransactionKind.Rollback].map(
+      (kind) =>
+        [
+          `a ${kind} citing itself`,
+          opening({ kind, externalTransactionId: 'tx-1', referenceExternalTransactionId: 'tx-1' }),
+        ] as const,
+    ),
   ])('refuses %s', (_case, props) => {
     expect(() => WagerTransaction.create(props)).toThrow(InvalidWagerTransactionError);
   });

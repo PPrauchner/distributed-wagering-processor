@@ -29,7 +29,11 @@ import {
 } from '../wagering/application/wagering-errors.ts';
 import { InvalidWagerTransactionError } from '../wagering/domain/wager-transaction.ts';
 import { InvalidWalletError } from '../wallet/domain/wallet.ts';
-import { WalletAlreadyExistsError, WalletNotFoundError } from '../wallet/application/wallet-errors.ts';
+import {
+  InvalidCursorError,
+  WalletAlreadyExistsError,
+  WalletNotFoundError,
+} from '../wallet/application/wallet-errors.ts';
 
 // The slice of the platform response this filter uses; keeps it off Express types.
 interface HttpResponse {
@@ -71,13 +75,14 @@ const INVALID_PAYLOAD_ERRORS = [
   UnsupportedKindError,
 ];
 
-// Refused submissions: a fixed status and failure code, and the error's message.
+// Refused requests: a fixed status and failure code, and the error's message.
 const REFUSED_SUBMISSIONS: [new (...args: never[]) => Error, number, FailureCode][] = [
   [MissingIdempotencyKeyError, HttpStatus.BAD_REQUEST, FailureCode.MissingIdempotencyKey],
   [InternalKindNotAllowedError, HttpStatus.BAD_REQUEST, FailureCode.InternalKindNotAllowed],
   [IdempotencyConflictError, HttpStatus.CONFLICT, FailureCode.IdempotencyConflict],
   [ExternalIdConflictError, HttpStatus.CONFLICT, FailureCode.ExternalIdConflict],
   [SubmissionWalletNotFoundError, HttpStatus.UNPROCESSABLE_ENTITY, FailureCode.WalletNotFound],
+  [InvalidCursorError, HttpStatus.BAD_REQUEST, FailureCode.InvalidCursor],
 ];
 
 @Catch()

@@ -56,6 +56,8 @@ export interface ProcessedOutcome {
 /** What a rejection leaves on a transaction. */
 export interface RejectedOutcome {
   code: FailureCode;
+  /** What the code alone does not say — the divergent field of a `REFERENCE_MISMATCH`. */
+  message?: string;
   /** The wallet balance, untouched, read under lock — in the wallet's currency. */
   balanceAfter: Money;
   walletVersionObserved: number;
@@ -107,6 +109,7 @@ export class WagerTransaction {
     private _processedAt?: Date,
     private _balanceAfter?: Money,
     private _walletVersionObserved?: number,
+    private _failureMessage?: string,
   ) {}
 
   /**
@@ -116,7 +119,8 @@ export class WagerTransaction {
    * @returns The new transaction.
    * @throws {@link InvalidWagerTransactionError} If the amount is not positive
    *   (zero is allowed only for `LOSS`), or the reference is missing on a
-   *   `REFUND`/`ROLLBACK` or present on an `OPENING`/`BET`/`LOSS`.
+   *   `REFUND`/`ROLLBACK`, present on an `OPENING`/`BET`/`LOSS`, or equal to
+   *   the transaction's own external id.
    */
   static create(props: CreateWagerTransactionProps): WagerTransaction {
     const hasReference = props.referenceExternalTransactionId !== undefined;
@@ -125,6 +129,9 @@ export class WagerTransaction {
     }
     if (KINDS_WITHOUT_REFERENCE.has(props.kind) && hasReference) {
       throw new InvalidWagerTransactionError(`${props.kind} does not take a reference`);
+    }
+    if (props.referenceExternalTransactionId === props.externalTransactionId) {
+      throw new InvalidWagerTransactionError(`${props.kind} cannot reference itself`);
     }
     const amountFloorOk =
       props.kind === WagerTransactionKind.Loss ? !props.money.isNegative() : props.money.isPositive();
@@ -160,6 +167,10 @@ export class WagerTransaction {
 
   get failureCode(): FailureCode | undefined {
     return this._failureCode;
+  }
+
+  get failureMessage(): string | undefined {
+    return this._failureMessage;
   }
 
   get processedAt(): Date | undefined {
@@ -199,6 +210,7 @@ export class WagerTransaction {
     this.assertNotTerminal();
     this._status = WagerTransactionStatus.Rejected;
     this._failureCode = outcome.code;
+    this._failureMessage = outcome.message;
     this._balanceAfter = outcome.balanceAfter;
     this._walletVersionObserved = outcome.walletVersionObserved;
   }

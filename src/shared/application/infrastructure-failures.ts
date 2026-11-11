@@ -11,13 +11,18 @@ import { FailureCode } from '../domain/failure-code.ts';
 export type TransientFailureCode = FailureCode.TransientLockTimeout | FailureCode.TransientUnavailable;
 export type PermanentFailureCode = FailureCode.InfraInvariantViolation | FailureCode.InfraUnexpected;
 
+/** Why the database refused the lock: its own timeout, a deadlock or a serialization failure. */
+export type LockConflictReason = 'lock_timeout' | 'deadlock' | 'serialization_failure';
+
 /** Lock conflict or database unavailable: resend with the same key. */
 export class TransientFailureError extends Error {
   override readonly name = 'TransientFailureError';
+  /** Set on a lock conflict, for the metrics. */
+  readonly lockConflict: LockConflictReason | undefined;
 
   constructor(
     readonly failureCode: TransientFailureCode,
-    options?: ErrorOptions,
+    options?: ErrorOptions & { lockConflict?: LockConflictReason },
   ) {
     super(
       failureCode === FailureCode.TransientLockTimeout
@@ -25,6 +30,7 @@ export class TransientFailureError extends Error {
         : 'the service is temporarily unavailable; resend with the same key',
       options,
     );
+    this.lockConflict = options?.lockConflict;
   }
 }
 

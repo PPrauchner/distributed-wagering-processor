@@ -4,19 +4,21 @@
  * unique violation, by constraint name — to a closed category and its failure
  * code. `REJECTED` never comes from here: it comes only from the domain.
  *
- * Some constraints of the table do not exist yet (inbox, single reversal,
- * wallet creation key); they are mapped already so the classifier stays the
+ * Some constraints of the table do not exist yet (inbox, wallet creation
+ * key); they are mapped already so the classifier stays the
  * only place that knows the names, and the slices that create them add their
  * integration tests.
  *
  * @packageDocumentation
  */
+import type { LockConflictReason } from '../shared/application/infrastructure-failures.ts';
 import { FailureCode } from '../shared/domain/failure-code.ts';
 
 /** What a database error means to the caller. */
 export type DatabaseErrorClass =
-  /** Nothing was recorded; resend with the same key. */
-  | { category: 'transient'; failureCode: FailureCode.TransientLockTimeout | FailureCode.TransientUnavailable }
+  /** Nothing was recorded; resend with the same key. A lock conflict says which one. */
+  | { category: 'transient'; failureCode: FailureCode.TransientLockTimeout; lockConflict: LockConflictReason }
+  | { category: 'transient'; failureCode: FailureCode.TransientUnavailable }
   /** A bug or an unknown error: the transaction is recorded as `FAILED`. */
   | { category: 'permanent'; failureCode: FailureCode.InfraInvariantViolation | FailureCode.InfraUnexpected }
   /** A concurrent submission recorded the key: read it back and compare the hash. */
@@ -28,10 +30,10 @@ export type DatabaseErrorClass =
 
 const UNIQUE_VIOLATION = '23505';
 
-const LOCK_CONFLICTS = new Set([
-  '55P03', // lock_not_available: lock_timeout expired (MikroORM does not map it)
-  '40P01', // deadlock_detected
-  '40001', // serialization_failure
+const LOCK_CONFLICTS = new Map<string, LockConflictReason>([
+  ['55P03', 'lock_timeout'], // lock_not_available: lock_timeout expired (MikroORM does not map it)
+  ['40P01', 'deadlock'], // deadlock_detected
+  ['40001', 'serialization_failure'],
 ]);
 
 // Node's network errors, raised before PostgreSQL answers anything.
@@ -87,7 +89,8 @@ const UNIQUE_CONSTRAINTS: Record<string, DatabaseErrorClass> = {
 export function classifyDatabaseError(error: unknown): DatabaseErrorClass {
   const code = errorCode(error);
   if (code === undefined) return unexpected();
-  if (LOCK_CONFLICTS.has(code)) return { category: 'transient', failureCode: FailureCode.TransientLockTimeout };
+  const lockConflict = LOCK_CONFLICTS.get(code);
+  if (lockConflict) return { category: 'transient', failureCode: FailureCode.TransientLockTimeout, lockConflict };
   if (isConnectionFailure(code)) return { category: 'transient', failureCode: FailureCode.TransientUnavailable };
   if (code === UNIQUE_VIOLATION) return UNIQUE_CONSTRAINTS[violatedConstraint(error) ?? ''] ?? unexpected();
   if (INVARIANT_VIOLATIONS.has(code)) return invariantViolation();

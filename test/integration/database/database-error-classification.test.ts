@@ -2,8 +2,8 @@
  * The single database error classifier against the real PostgreSQL: each row
  * whose constraint already exists is provoked through MikroORM's flush — the
  * same path a unit of work takes — and the error that comes out is classified.
- * The rows of constraints still to come (inbox, single reversal, wallet
- * creation key) are covered by the unit tests of the mapping.
+ * The rows of constraints still to come (inbox, wallet creation key) are
+ * covered by the unit tests of the mapping.
  *
  * @packageDocumentation
  */
@@ -131,6 +131,27 @@ function creditEntry(props: {
   });
 }
 
+/** A `PROCESSED` refund undoing the referenced transaction — moving nothing here, only the row. */
+function processedRefund(wallet: Wallet, referenceTransactionId: string): WagerTransaction {
+  const refund = WagerTransaction.create({
+    id: Bun.randomUUIDv7(),
+    providerId: 'provider-a',
+    externalTransactionId: Bun.randomUUIDv7(),
+    idempotencyKey: Bun.randomUUIDv7(),
+    payloadHash: 'c'.repeat(64),
+    walletId: wallet.id,
+    playerId: wallet.playerId,
+    roundId: 'round',
+    gameId: 'game',
+    kind: WagerTransactionKind.Refund,
+    money: brl('10.00'),
+    referenceExternalTransactionId: 'bet-1',
+    correlationId: 'corr',
+  });
+  refund.markProcessed({ at: new Date(), balanceAfter: wallet.balance, walletVersionObserved: 1, referenceTransactionId });
+  return refund;
+}
+
 const invariantViolation: DatabaseErrorClass = {
   category: 'permanent',
   failureCode: FailureCode.InfraInvariantViolation,
@@ -195,6 +216,24 @@ describe('23505, by constraint', () => {
     });
 
     expect(result).toEqual(invariantViolation);
+  });
+
+  test('a second processed reversal of the same reference → INFRA_INVARIANT_VIOLATION', async () => {
+    const { wallet, openingId } = await openedWallet();
+    await commit((em) => em.persist(processedRefund(wallet, openingId)));
+
+    let thrown: unknown;
+    try {
+      await orm.em.fork().transactional(async (em) => {
+        em.persist(processedRefund(wallet, openingId));
+      });
+    } catch (error) {
+      thrown = error;
+    }
+
+    // The constraint, so the row is reached by the reversal index and not by another.
+    expect(Reflect.get(thrown as object, 'constraint')).toBe('wager_transactions_single_reversal_unique');
+    expect(classifyDatabaseError(thrown)).toEqual(invariantViolation);
   });
 
   test('any other unique constraint: a duplicate primary key → INFRA_UNEXPECTED', async () => {
@@ -285,7 +324,11 @@ describe('transient', () => {
         Reflect.set(loaded, '_updatedAt', new Date());
       });
 
-      expect(result).toEqual({ category: 'transient', failureCode: FailureCode.TransientLockTimeout });
+      expect(result).toEqual({
+        category: 'transient',
+        failureCode: FailureCode.TransientLockTimeout,
+        lockConflict: 'lock_timeout',
+      });
     } finally {
       await holder`rollback`;
       holder.release();

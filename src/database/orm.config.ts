@@ -19,6 +19,8 @@ import { Migration0004WalletIdentity } from '../wallet/infrastructure/migrations
 import { Migration0005WagerTransactionInvariants } from '../wagering/infrastructure/migrations/0005-wager-transaction-invariants.ts';
 import { Migration0006RejectedSubmissions } from '../wagering/infrastructure/migrations/0006-rejected-submissions.ts';
 import { Migration0007OutboxMessages } from '../messaging/infrastructure/migrations/0007-outbox-messages.ts';
+import { Migration0008WagerTransactionReference } from '../wagering/infrastructure/migrations/0008-wager-transaction-reference.ts';
+import { Migration0009WagerTransactionSingleReversal } from '../wagering/infrastructure/migrations/0009-wager-transaction-single-reversal.ts';
 
 /**
  * @param databaseUrl - PostgreSQL connection URL.
@@ -45,6 +47,8 @@ export function createOrmConfig(databaseUrl: string): Options {
         { name: 'Migration0005WagerTransactionInvariants', class: Migration0005WagerTransactionInvariants },
         { name: 'Migration0006RejectedSubmissions', class: Migration0006RejectedSubmissions },
         { name: 'Migration0007OutboxMessages', class: Migration0007OutboxMessages },
+        { name: 'Migration0008WagerTransactionReference', class: Migration0008WagerTransactionReference },
+        { name: 'Migration0009WagerTransactionSingleReversal', class: Migration0009WagerTransactionSingleReversal },
       ],
       // Hand-written migrations; the snapshot only serves automatic diffs.
       snapshot: false,

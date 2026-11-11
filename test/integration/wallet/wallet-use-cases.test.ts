@@ -188,6 +188,8 @@ describe('CreateWallet', () => {
             ...repositories,
             ledger: {
               add: (entry) => repositories.ledger.add(WalletLedgerEntry.rehydrate({ ...entry, id: takenEntryId })),
+              findPage: (...args) => repositories.ledger.findPage(...args),
+              reconcile: (walletId) => repositories.ledger.reconcile(walletId),
             },
           }),
         ),
