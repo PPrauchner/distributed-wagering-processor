@@ -1,8 +1,9 @@
 /**
- * `GET /wagering/transactions/:transactionId` end to end: the app runs in
- * process against the real PostgreSQL. A query answers 200 with the outcome of
- * the transaction — the balance it observed, not the wallet's current one — and
- * its identity, whatever its status; an unknown id answers 404 `NOT_FOUND`.
+ * The wager transaction queries end to end, by internal id and by the
+ * provider's external id: the app runs in process against the real PostgreSQL.
+ * A query answers 200 with the outcome of the transaction — the balance it
+ * observed, not the wallet's current one — and its identity, whatever its
+ * status; an unknown id answers 404 `NOT_FOUND`.
  *
  * @packageDocumentation
  */
@@ -126,6 +127,31 @@ describe('GET /wagering/transactions/:transactionId', () => {
 
   test('an id that is not a UUID: 404 NOT_FOUND', async () => {
     const { status, body } = await get('/wagering/transactions/not-a-uuid');
+
+    expect(status).toBe(404);
+    expect(body).toEqual({ failureCode: 'NOT_FOUND', message: expect.any(String) });
+  });
+});
+
+describe('GET /providers/:providerId/wagering/transactions/:externalTransactionId', () => {
+  test('answers the same body as the query by internal id', async () => {
+    const wallet = await createWallet('100.00');
+    const bet = betOn(wallet, '30.00');
+    const submitted = await submit(bet);
+
+    const byExternalId = await get(`/providers/provider-a/wagering/transactions/${bet.externalTransactionId}`);
+    const byInternalId = await get(`/wagering/transactions/${submitted.transactionId}`);
+
+    expect(byExternalId.status).toBe(200);
+    expect(byExternalId.body).toEqual(byInternalId.body);
+  });
+
+  test("another provider's external id: 404 NOT_FOUND", async () => {
+    const wallet = await createWallet('100.00');
+    const bet = betOn(wallet, '30.00');
+    await submit(bet);
+
+    const { status, body } = await get(`/providers/provider-b/wagering/transactions/${bet.externalTransactionId}`);
 
     expect(status).toBe(404);
     expect(body).toEqual({ failureCode: 'NOT_FOUND', message: expect.any(String) });
