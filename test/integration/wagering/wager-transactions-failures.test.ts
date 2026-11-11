@@ -185,4 +185,77 @@ describe('a permanent error: FAILED, recorded by a second unit of work', () => {
     expect(await conflict.json()).toMatchObject({ failureCode: 'IDEMPOTENCY_CONFLICT' });
     expect(await transactionCount(wallet.id)).toBe(1);
   });
+
+  describe('the FAILED write starts with the wallet lock (ADR 0002)', () => {
+    /** Polls until a backend matching `condition` waits on a lock. */
+    async function waitForLockWait(condition: (row: { pid: number; query: string }) => boolean): Promise<void> {
+      const deadline = Date.now() + 5_000;
+      while (Date.now() < deadline) {
+        const rows = (await sql`
+          select pid, query from pg_stat_activity where wait_event_type = 'Lock'
+        `) as { pid: number; query: string }[];
+        if (rows.some(condition)) return;
+        await Bun.sleep(10);
+      }
+      throw new Error('no backend waited on the expected lock');
+    }
+
+    /**
+     * Submits with the permanent fault and makes an outside session take the
+     * wallet lock right after the first unit of work rolls back, so the FAILED
+     * write meets a held wallet. The first unit of work is held, wallet locked,
+     * on its insert by a table lock; the outside session queues on the wallet;
+     * then the table lock goes.
+     */
+    async function failedWriteMeetingHeldWallet(wallet: TestWallet, holdMs: number): Promise<Response | undefined> {
+      const tableHolder = await sql.reserve();
+      const walletHolder = await sql.reserve();
+      try {
+        await tableHolder`begin`;
+        await tableHolder`lock table wager_transactions in share mode`;
+        const pending = submit(faultyUrl, betOn(wallet));
+        await waitForLockWait(({ query }) => /insert into "wager_transactions"/i.test(query));
+
+        await walletHolder`begin`;
+        const [{ pid }] = (await walletHolder`select pg_backend_pid() as pid`) as [{ pid: number }];
+        const walletLocked = (async () => walletHolder`select id from wallets where id = ${wallet.id} for update`)();
+        await waitForLockWait((row) => row.pid === pid);
+        await tableHolder`rollback`;
+        await walletLocked;
+
+        const response = await Promise.race([pending, Bun.sleep(holdMs).then(() => undefined)]);
+        await walletHolder`rollback`;
+        return response ?? (await pending);
+      } finally {
+        await tableHolder`rollback`.catch(() => undefined);
+        await walletHolder`rollback`.catch(() => undefined);
+        tableHolder.release();
+        walletHolder.release();
+      }
+    }
+
+    test('the wallet held beyond 2 s → 503 TRANSIENT_LOCK_TIMEOUT, nothing recorded', async () => {
+      const wallet = await createWallet('100.00');
+
+      const response = await failedWriteMeetingHeldWallet(wallet, 4_000);
+
+      expect(response?.status).toBe(503);
+      expect(await response?.json()).toEqual({ failureCode: 'TRANSIENT_LOCK_TIMEOUT', message: expect.any(String) });
+      expect(await transactionCount(wallet.id)).toBe(0);
+    }, 15_000);
+
+    test('the wallet released before 2 s → a single FAILED for the key, no ledger entry', async () => {
+      const wallet = await createWallet('100.00');
+
+      const response = await failedWriteMeetingHeldWallet(wallet, 500);
+
+      expect(response?.status).toBe(500);
+      expect(await response?.json()).toMatchObject({ status: 'FAILED', failureCode: 'INFRA_INVARIANT_VIOLATION' });
+      expect(await transactionCount(wallet.id)).toBe(1);
+      const [{ entries }] = await sql`
+        select count(*)::int as entries from wallet_ledger_entries where wallet_id = ${wallet.id}
+      `;
+      expect(entries).toBe(1);
+    }, 15_000);
+  });
 });

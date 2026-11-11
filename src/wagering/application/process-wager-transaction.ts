@@ -271,14 +271,18 @@ export class ProcessWagerTransaction {
 
   /**
    * The second unit of work: `FAILED`, with nothing observed and no ledger
-   * entry, and the inbox row when it came by the queue — a replay's too.
+   * entry, and the inbox row when it came by the queue — a replay's too. It
+   * starts with the wallet lock, like every unit of work that touches the
+   * wallet: inserting a row with a foreign key to it touches it (ADR 0002).
    */
   private recordFailure(
     props: CreateWagerTransactionProps,
     code: FailureCode,
     received?: InboxEntry,
   ): Promise<WagerTransactionOutcome> {
-    return this.unitOfWork.run(async ({ transactions, inbox }) => {
+    return this.unitOfWork.run(async ({ wallets, transactions, inbox }) => {
+      const wallet = await wallets.findByIdForUpdate(props.walletId);
+      if (!wallet) throw new SubmissionWalletNotFoundError(props.walletId, props.payloadHash);
       if (received) inbox.add(processedInboxMessage(received));
       const failed = WagerTransaction.create(props);
       const earlier = await findEarlier(transactions, failed);

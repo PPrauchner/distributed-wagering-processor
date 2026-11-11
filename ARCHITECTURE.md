@@ -114,7 +114,8 @@ transação SQL. Vale igual para HTTP, fila e workers. Ver
 ## Concorrência
 
 Lock pessimista na linha da carteira (`SELECT … FOR UPDATE`), primeiro passo de
-cada unidade de trabalho que move saldo; uma carteira por transação, sem lock
+cada unidade de trabalho que toca a carteira — move saldo ou insere uma linha com FK
+para ela; uma carteira por transação, sem lock
 global. `lock_timeout` de 2 s, por `SET LOCAL` logo antes do `SELECT … FOR UPDATE`
 — vale para a transação SQL que trava a carteira, nunca para a conexão, e cobre
 toda espera de lock depois dela: estourar é erro transitório
@@ -128,6 +129,12 @@ SQL curta e separada (`FOR UPDATE SKIP LOCKED` + `next_attempt_at = now() + leas
 com commit). O worker de referências pendentes processa cada item numa unidade de
 trabalho própria, que começa pela carteira; **o publicador da outbox não trava a
 carteira** — nenhuma das suas transações SQL toca `wallets` (emenda do ADR 0002).
+A gravação de `FAILED` do use case (segunda unidade de trabalho, depois do rollback
+de um erro permanente) insere a transação de aposta, cuja FK `wallet_id` toma
+`FOR KEY SHARE` na carteira: por isso começa pelo lock da carteira, com o mesmo
+`lock_timeout`, antes de qualquer outra escrita — a regra vale sem exceção (emenda
+do ADR 0002). A gravação de `FAILED` do worker de referências pendentes é um
+`UPDATE` que não muda a FK e não toca `wallets`.
 Worker morto: o lease expira e outra instância assume. Ver
 [ADR 0002](docs/adr/0002-lock-pessimista-por-carteira.md).
 
@@ -452,7 +459,8 @@ dispara.
 **Quem grava `FAILED`: o use case**, nas duas entradas. Como a transação SQL do
 erro permanente já sofreu rollback, uma **segunda unidade de trabalho** grava a
 transação de aposta como `FAILED`, com o código de falha (e o inbox, quando a
-entrada é a fila), pela chave de idempotência — sem saldo observado, sem lançamento
+entrada é a fila), pela chave de idempotência, começando pelo lock da carteira (ver
+[Concorrência](#concorrência)) — sem saldo observado, sem lançamento
 e sem evento. No HTTP, a resposta é 500 com `transactionId`, `status: FAILED` e
 `failureCode`, e o replay (mesma chave e hash) devolve o mesmo 500 com
 `idempotentReplay: true`; hash diferente → 409 `IDEMPOTENCY_CONFLICT`. A segunda
