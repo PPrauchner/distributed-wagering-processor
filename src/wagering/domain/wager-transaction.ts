@@ -119,7 +119,8 @@ export class WagerTransaction {
    * @returns The new transaction.
    * @throws {@link InvalidWagerTransactionError} If the amount is not positive
    *   (zero is allowed only for `LOSS`), or the reference is missing on a
-   *   `REFUND`/`ROLLBACK` or present on an `OPENING`/`BET`/`LOSS`.
+   *   `REFUND`/`ROLLBACK`, present on an `OPENING`/`BET`/`LOSS`, or equal to
+   *   the transaction's own external id.
    */
   static create(props: CreateWagerTransactionProps): WagerTransaction {
     const hasReference = props.referenceExternalTransactionId !== undefined;
@@ -128,6 +129,9 @@ export class WagerTransaction {
     }
     if (KINDS_WITHOUT_REFERENCE.has(props.kind) && hasReference) {
       throw new InvalidWagerTransactionError(`${props.kind} does not take a reference`);
+    }
+    if (props.referenceExternalTransactionId === props.externalTransactionId) {
+      throw new InvalidWagerTransactionError(`${props.kind} cannot reference itself`);
     }
     const amountFloorOk =
       props.kind === WagerTransactionKind.Loss ? !props.money.isNegative() : props.money.isPositive();

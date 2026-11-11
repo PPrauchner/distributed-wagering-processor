@@ -252,7 +252,8 @@ Com mais de uma violação, prevalece a primeira, na mesma ordem nos dois canais
 
 1. Chave ausente → `MISSING_IDEMPOTENCY_KEY` (na fila, `INVALID_PAYLOAD`).
 2. Forma do payload (campo desconhecido, `Money` inválido, `kind` fora do enum,
-   referência obrigatória ausente ou proibida presente) → `INVALID_PAYLOAD`;
+   referência obrigatória ausente ou proibida presente, referência ao próprio
+   `externalTransactionId`) → `INVALID_PAYLOAD`;
    `OPENING` bem formado → `INTERNAL_KIND_NOT_ALLOWED`.
 3. Hash do payload.
 4. Idempotência por provedor e chave, sem lock → replay ou `IDEMPOTENCY_CONFLICT`.
