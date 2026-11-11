@@ -17,8 +17,8 @@ beforeAll(async () => {
   sql = new SQL(loadConfig().databaseUrl);
   walletId = Bun.randomUUIDv7();
   await sql`
-    insert into wallets (id, player_id, currency, balance_amount, balance_currency, version, created_at, updated_at)
-    values (${walletId}, ${Bun.randomUUIDv7()}, 'BRL', '0.00', 'BRL', 1, now(), now())
+    insert into wallets (id, player_id, currency, balance_amount, balance_currency, version, created_at, updated_at, initial_balance_amount, initial_balance_currency)
+    values (${walletId}, ${Bun.randomUUIDv7()}, 'BRL', '0.00', 'BRL', 1, now(), now(), '0.00', 'BRL')
   `;
 });
 

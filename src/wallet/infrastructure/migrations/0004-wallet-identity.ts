@@ -1,6 +1,6 @@
 /**
  * Makes a wallet's identity immutable: `id`, `player_id` and `currency` never
- * change. The idempotent-creation slice extends this trigger to its columns.
+ * change. Migration 0012 extends this trigger to the creation columns.
  *
  * @packageDocumentation
  */
