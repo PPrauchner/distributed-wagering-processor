@@ -2,8 +2,8 @@
  * The single database error classifier against the real PostgreSQL: each row
  * whose constraint already exists is provoked through MikroORM's flush — the
  * same path a unit of work takes — and the error that comes out is classified.
- * The rows of constraints still to come (inbox, wallet creation key) are
- * covered by the unit tests of the mapping.
+ * The row of the constraint still to come (wallet creation key) is covered by
+ * the unit tests of the mapping.
  *
  * @packageDocumentation
  */
@@ -13,6 +13,7 @@ import { MikroORM, type EntityManager } from '@mikro-orm/postgresql';
 import { loadConfig } from '../../../src/config.ts';
 import { classifyDatabaseError, type DatabaseErrorClass } from '../../../src/database/classify-database-error.ts';
 import { createOrmConfig } from '../../../src/database/orm.config.ts';
+import { InboxMessage } from '../../../src/messaging/domain/inbox-message.ts';
 import { FailureCode } from '../../../src/shared/domain/failure-code.ts';
 import { Money } from '../../../src/shared/domain/money.ts';
 import { WagerTransaction, WagerTransactionKind } from '../../../src/wagering/domain/wager-transaction.ts';
@@ -234,6 +235,31 @@ describe('23505, by constraint', () => {
     // The constraint, so the row is reached by the reversal index and not by another.
     expect(Reflect.get(thrown as object, 'constraint')).toBe('wager_transactions_single_reversal_unique');
     expect(classifyDatabaseError(thrown)).toEqual(invariantViolation);
+  });
+
+  test('the inbox (consumer_name, message_id) → redelivery', async () => {
+    const messageId = Bun.randomUUIDv7();
+    const received = () =>
+      InboxMessage.receive({
+        consumerName: 'wager-transactions-consumer',
+        messageId,
+        payloadHash: 'a'.repeat(64),
+        receivedAt: new Date(),
+      });
+    await commit((em) => em.persist(received()));
+
+    let thrown: unknown;
+    try {
+      await orm.em.fork().transactional(async (em) => {
+        em.persist(received());
+      });
+    } catch (error) {
+      thrown = error;
+    }
+
+    // The constraint by its reserved name: the classifier knows it by that one.
+    expect(Reflect.get(thrown as object, 'constraint')).toBe('inbox_messages_pkey');
+    expect(classifyDatabaseError(thrown)).toEqual({ category: 'redelivery' });
   });
 
   test('any other unique constraint: a duplicate primary key → INFRA_UNEXPECTED', async () => {
