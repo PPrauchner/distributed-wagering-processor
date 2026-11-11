@@ -427,21 +427,8 @@ describe('with several violations, the first in the documented order wins', () =
   });
 });
 
+// The same bet 50 times and the race of §8 live in the concurrency suite (`bun run test:concurrency`).
 describe('concurrency, with real parallel HTTP requests', () => {
-  test('two simultaneous bets of 80.00 on 100.00: one PROCESSED, one REJECTED, 20.00 left, one debit', async () => {
-    const wallet = await createWallet('100.00');
-    const bet = (): JsonObject => betOn(wallet, { money: { amount: '80.00', currency: 'BRL' } });
-
-    const responses = await Promise.all([submit(bet()), submit(bet())]);
-
-    const results = await Promise.all(responses.map(readJson));
-    expect(responses.map((r) => r.status).sort()).toEqual([200, 422]);
-    expect(results.map((r) => r.status).sort()).toEqual(['PROCESSED', 'REJECTED']);
-    expect(results.find((r) => r.status === 'REJECTED')!.failureCode).toBe('INSUFFICIENT_FUNDS');
-    expect(await walletRow(wallet.id)).toEqual({ balance: '20.00', version: 2 });
-    expect(await debits(wallet.id)).toBe(1);
-  });
-
   test('the same key on two wallets at once, outside a shared lock: one PROCESSED, the other 409 IDEMPOTENCY_CONFLICT', async () => {
     const first = await createWallet('100.00');
     const second = await createWallet('100.00');
@@ -472,19 +459,5 @@ describe('concurrency, with real parallel HTTP requests', () => {
     const results = await Promise.all(responses.map(readJson));
     expect(responses.map((r) => r.status).sort()).toEqual([200, 409]);
     expect(results.find((r) => r.failureCode)!.failureCode).toBe('EXTERNAL_ID_CONFLICT');
-  });
-
-  test('the same bet sent 50 times in parallel debits once; the rest are replays of it', async () => {
-    const wallet = await createWallet('100.00');
-    const body = betOn(wallet);
-
-    const responses = await Promise.all(Array.from({ length: 50 }, () => submit(body)));
-
-    const results = await Promise.all(responses.map(readJson));
-    expect(results.filter((_, i) => responses[i]!.status !== 200)).toEqual([]);
-    expect(results.filter((r) => r.idempotentReplay === false)).toHaveLength(1);
-    expect(new Set(results.map((r) => r.transactionId)).size).toBe(1);
-    expect(await walletRow(wallet.id)).toEqual({ balance: '75.00', version: 2 });
-    expect(await debits(wallet.id)).toBe(1);
   });
 });

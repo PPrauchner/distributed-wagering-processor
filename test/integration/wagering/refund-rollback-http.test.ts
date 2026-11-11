@@ -363,7 +363,7 @@ describe('the reference rules', () => {
   });
 
   test.each(['REFUND', 'ROLLBACK'])(
-    'a %s citing a reference not there: 202 PENDING_REFERENCE, nothing moved, no event',
+    'a %s citing a reference not there: 202 PENDING_REFERENCE, nothing moved, only the pending event',
     async (kind) => {
       const wallet = await createWallet('100.00');
 
@@ -376,7 +376,7 @@ describe('the reference rules', () => {
       expect(await row(body.transactionId)).toMatchObject({ status: 'PENDING_REFERENCE', balance_after: null });
       expect(await walletRow(wallet.id)).toEqual({ balance: '100.00', version: 1 });
       expect(await entriesOf(body.transactionId)).toEqual([]);
-      expect(await eventsOf(body.transactionId)).toEqual([]);
+      expect(await eventsOf(body.transactionId)).toEqual(['WagerTransactionPendingReference']);
     },
   );
 

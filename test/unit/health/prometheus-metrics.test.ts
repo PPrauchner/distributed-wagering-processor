@@ -70,4 +70,19 @@ describe('PrometheusMetrics', () => {
     expect(text).toContain('lock_conflicts_total');
     expect(log.lines.length).toBeGreaterThan(0);
   });
+
+  test('the consumer retries and the DLQ sends are counted by failure code', async () => {
+    const metrics = new PrometheusMetrics(async () => ({ pending: 0, lagSeconds: 0 }), {
+      timeoutMs: 50,
+      log: recordingLog(),
+    });
+
+    metrics.consumerRetry('TRANSIENT_LOCK_TIMEOUT');
+    metrics.consumerRetry('TRANSIENT_LOCK_TIMEOUT');
+    metrics.deadLettered('INVALID_PAYLOAD');
+    const text = await metrics.registry.metrics();
+
+    expect(text).toContain('wager_transactions_consumer_retries_total{failure_code="TRANSIENT_LOCK_TIMEOUT"} 2');
+    expect(text).toContain('wager_transactions_dlq_messages_total{failure_code="INVALID_PAYLOAD"} 1');
+  });
 });

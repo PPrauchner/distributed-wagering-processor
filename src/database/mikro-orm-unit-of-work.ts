@@ -5,8 +5,10 @@
  * @packageDocumentation
  */
 import type { EntityManager } from '@mikro-orm/postgresql';
+import type { InboxRepositories } from '../messaging/application/inbox-repository.ts';
 import type { OutboxBacklogRepositories } from '../messaging/application/outbox-backlog.ts';
 import type { OutboxRepositories } from '../messaging/application/outbox-repository.ts';
+import { MikroOrmInboxRepository } from '../messaging/infrastructure/mikro-orm-inbox.repository.ts';
 import { MikroOrmOutboxBacklogQuery } from '../messaging/infrastructure/mikro-orm-outbox-backlog.query.ts';
 import { MikroOrmOutboxRepository } from '../messaging/infrastructure/mikro-orm-outbox.repository.ts';
 import type { FaultInjection, FaultPoint } from '../shared/application/fault-injector.ts';
@@ -27,6 +29,7 @@ export type Repositories = WalletRepositories &
   RejectedSubmissionRepositories &
   OutboxRepositories &
   OutboxBacklogRepositories &
+  InboxRepositories &
   FaultInjection;
 
 export class MikroOrmUnitOfWork implements UnitOfWork<Repositories> {
@@ -53,6 +56,7 @@ export class MikroOrmUnitOfWork implements UnitOfWork<Repositories> {
           rejectedSubmissions: new MikroOrmRejectedSubmissionRepository(tx),
           outbox: new MikroOrmOutboxRepository(tx),
           outboxBacklog: new MikroOrmOutboxBacklogQuery(tx),
+          inbox: new MikroOrmInboxRepository(tx),
           faults: new SqlFaultInjector(tx, this.faultPoints),
         }),
       );

@@ -434,15 +434,14 @@ legítimo; se o lock a serializa, o domínio teria visto antes, e é bug.
 | `wallets (creation_idempotency_key)` — `wallets_creation_idempotency_key_unique` | relê e compara o hash → replay ou conflito |
 | `(provider_id, idempotency_key)` — `wager_transactions_provider_idempotency_key_unique` | relê e compara o hash → replay ou conflito |
 | `(provider_id, external_transaction_id)` — `wager_transactions_provider_external_id_unique` | conflito → `EXTERNAL_ID_CONFLICT` |
-| `inbox (consumer_name, message_id)` — `inbox_messages_pkey` | redelivery → `ack` sem efeito |
+| `inbox (consumer_name, message_id)` — `inbox_messages_pkey` | redelivery → `ack` sem efeito (de um `FAILED`: DLQ de novo, depois `ack`) |
 | reversão única por referência — `wager_transactions_single_reversal_unique` | bug → permanente (`FAILED`, alerta) |
 | lançamento `(transaction_id, wallet_id)` — `wallet_ledger_entries_transaction_wallet_unique` | bug → permanente (`FAILED`, alerta) |
 | lançamento `(wallet_id, wallet_version)` — `wallet_ledger_entries_wallet_version_unique` | bug → permanente (`FAILED`, alerta) |
 | outra | permanente (`FAILED`, `INFRA_UNEXPECTED`) |
 
-As linhas do inbox e da chave da criação já estão no
-classificador, embora as constraints ainda não existam: o nome é o contrato que as
-fatias que as criam seguem.
+A linha da chave da criação já está no classificador, embora a constraint ainda
+não exista: o nome é o contrato que a fatia que a cria segue.
 
 Estouro numérico (`22003`) também é permanente (`INFRA_INVARIANT_VIOLATION`,
 alerta): com o teto de entrada, só um saldo acumulado além de `numeric(19,2)` o
@@ -482,11 +481,55 @@ falhar, a redelivery é reconhecida pelo inbox).
   `messageId` com hash diferente → DLQ, `MESSAGE_ID_CONFLICT`. Submissões não
   admitidas não gravam inbox: terminam na DLQ, com linha em `rejected_submissions`
   (ver [Submissões não admitidas](#submissões-não-admitidas)).
-- `ack` (`DeleteMessage`) só depois do commit.
-- **`SIGTERM`:** para o polling e as reivindicações dos workers; espera as
-  mensagens em andamento por até 20 s (`stop_grace_period` de 30 s no Compose);
-  devolve as não iniciadas com visibilidade 0; fecha HTTP e pool. Se o prazo
-  estourar, a transação SQL é atômica e a redelivery é segura; leases expiram.
+- `ack` (`DeleteMessage`) só depois do commit. A mensagem que vem pela fila passa
+  pelo mesmo use case da API, que grava o inbox na unidade de trabalho do
+  desfecho — também num replay, quando a mesma transação já veio por HTTP. A
+  redelivery é recusada pela PK do inbox no commit (`InboxRedeliveryError`):
+  `ack` sem efeito e `inbox_duplicates_total` incrementada — salvo quando a
+  transação da chave está `FAILED` (`FailedRedeliveryError`, com o código): o
+  envio à DLQ pode ter sido o que falhou, então a mensagem vai à DLQ de novo
+  antes do `ack`. O mesmo `messageId`
+  com hash diferente também esbarra na PK: o use case relê a linha do inbox,
+  compara o hash e responde `MessageIdConflictError`.
+- **Desfecho de cada mensagem:** `PROCESSED`, `REJECTED` ou `PENDING_REFERENCE` →
+  `ack`. Transitório (`TRANSIENT_LOCK_TIMEOUT`, `TRANSIENT_UNAVAILABLE`) e
+  `WALLET_NOT_FOUND` → sem `ack`, `ChangeMessageVisibility` de
+  `min(2^ApproximateReceiveCount s, 60 s)`. No 5º recebimento, o transitório vira
+  `FAILED` `INFRA_RETRIES_EXHAUSTED` (`giveUp` do use case, segunda unidade de
+  trabalho, com inbox) e vai à DLQ; a carteira ainda inexistente vai à DLQ como
+  submissão não admitida, sem `FAILED` (a FK impede). Se nem a desistência grava
+  (banco fora), a mensagem fica para o redrive (`maxReceiveCount` 6) e chega à DLQ
+  sem desfecho — limitação aceita. `FAILED` (erro permanente, ou o replay de um)
+  → DLQ com o código do classificador. Submissão não admitida → DLQ direto.
+- **Envio à DLQ:** feito pela aplicação (`SendMessage` em
+  `wager-transactions-dlq.fifo`, porta `DeadLetterQueue`), com o corpo e os
+  atributos originais mais o atributo `failureCode`; `MessageGroupId` = `walletId`
+  (ou `unroutable`), `MessageDeduplicationId` = `messageId` do envelope (ou o
+  SHA-256 do corpo, quando nem ele se extrai). Valor extraído que o SQS não aceita
+  como id (mais de 128 caracteres, ou fora de ASCII alfanumérico e pontuação) conta
+  como ausente. Dos atributos originais vão até 9, `correlationId` primeiro: o SQS
+  aceita 10 por mensagem, contando o `failureCode`. Ordem: DLQ, linha em
+  `rejected_submissions` (só nas não admitidas, com canal fila, `message_id` e
+  `correlation_id`), `ack`. Se qualquer passo falha, a mensagem fica e é
+  decidida de novo na reentrega — pelo inbox, quando já há desfecho; o
+  `MessageDeduplicationId` absorve o reenvio à DLQ dentro de 5 min.
+- O contexto de log de cada mensagem abre com o `messageId` do envelope e o
+  `correlationId` (atributo da mensagem, ou o `messageId`).
+- **Configuração por ambiente:** `WAGER_TRANSACTIONS_CONSUMER_ENABLED` (padrão
+  `true`), `WAGER_TRANSACTIONS_WAIT_SECONDS` (20, de 0 a 20),
+  `WAGER_TRANSACTIONS_BATCH_SIZE` (10, de 1 a 10),
+  `WAGER_TRANSACTIONS_VISIBILITY_SECONDS` (30), `WAGER_TRANSACTIONS_MAX_RECEIVES`
+  (5), `WAGER_TRANSACTIONS_RETRY_MAX_SECONDS` (60, o teto do backoff),
+  `WAGER_TRANSACTIONS_DRAIN_TIMEOUT_MS` (20000), `WAGER_TRANSACTIONS_QUEUE` e
+  `WAGER_TRANSACTIONS_DLQ` (`wager-transactions-dlq.fifo`).
+- **`SIGTERM`:** pelo `beforeApplicationShutdown` de cada um, o consumidor
+  interrompe o long polling (`AbortSignal`) e os workers param de reivindicar;
+  o consumidor espera as mensagens em andamento por até 20 s
+  (`stop_grace_period` de 30 s no Compose) e devolve com visibilidade 0 as que
+  chegaram já no desligamento, sem iniciá-las; depois o Nest fecha HTTP e pool.
+  Se o prazo estourar, a transação SQL é atômica e a redelivery é segura; leases
+  expiram. Um long polling interrompido depois de o SQS responder deixa suas
+  mensagens invisíveis até a visibilidade expirar.
 
 ### Publicador da outbox
 
@@ -571,6 +614,21 @@ latência da pendente é limitada pelo intervalo do worker.
   unidade de trabalho, com alerta. O desfecho é gravado na transação SQL que trava a
   carteira, e o item é relido sob lock: se outro worker já o resolveu, sai sem
   efeito.
+- **Agendamento:** `attempts` e `next_attempt_at` em `wager_transactions`; a
+  chegada grava `attempts = 0` e `next_attempt_at` pelo backoff, com o
+  `WagerTransactionPendingReference` na mesma transação SQL. A reivindicação é um
+  único `UPDATE … FROM (SELECT … FOR UPDATE SKIP LOCKED LIMIT 10)` que empurra
+  `next_attempt_at` para `now() + lease`; um lote cheio dispara o ciclo seguinte
+  na hora. Pendente que continua esperando conta a tentativa e reagenda, sem mudar
+  de estado.
+- **Parada:** em `beforeApplicationShutdown` o worker para de reivindicar, deixa
+  os itens do lote ainda não iniciados (seguem com lease, que expira) e espera o
+  item em processamento, antes de o ORM fechar. É o ponto que o desligamento geral
+  (`SIGTERM`) chama.
+- **Configuração por ambiente:** `PENDING_REFERENCES_WORKER_ENABLED` (padrão
+  `true`), `PENDING_REFERENCE_TTL_MS` (300000), `PENDING_REFERENCES_POLL_INTERVAL_MS`
+  (1000), `PENDING_REFERENCES_LEASE_MS` (30000), `PENDING_REFERENCES_RETRY_BASE_MS`
+  (1000) e `PENDING_REFERENCES_RETRY_MAX_MS` (60000).
 
 ## Autenticação
 
@@ -608,9 +666,13 @@ Keycloak.
     das submissões que terminaram numa transação;
   - `reconciliation_divergences_total`.
 
-  Retries por componente, DLQ por motivo (envios da aplicação) e profundidade da DLQ
-  (`ApproximateNumberOfMessages` no scrape, que cobre o redrive) entram com o
-  consumidor da fila.
+  - `wager_transactions_consumer_retries_total{failure_code}` — entregas da fila
+    de entrada devolvidas para retry;
+  - `wager_transactions_dlq_messages_total{failure_code}` — envios à DLQ feitos
+    pela aplicação.
+
+  A profundidade da DLQ (`ApproximateNumberOfMessages` no scrape, que cobriria o
+  redrive) ainda não entra.
 - **Health:** `/health/live` responde 200 enquanto o processo vive, sem tocar no
   banco nem na fila; `/health/ready` roda `SELECT 1` e `GetQueueAttributes` nas
   filas de entrada e de eventos, cada um com timeout de 1 s, e responde 200 ou 503
@@ -633,17 +695,31 @@ Keycloak.
   commit, altera a transação de aposta terminal recém-gravada, que o trigger
   recusa, para o erro verdadeiro passar pelo classificador —; `crash-after-send` —
   o publicador "morre" entre o envio e o `published_at`: lança
-  `SimulatedCrashError` antes de gravar, e a transação SQL da gravação desfaz —; e,
-  reservado para o consumidor, `crash-after-commit` (depois do commit, antes do
-  `ack`).
+  `SimulatedCrashError` antes de gravar, e a transação SQL da gravação desfaz —;
+  `crash-after-commit` — o consumidor "morre" depois do commit do desfecho e antes
+  do `ack`: a mensagem volta quando a visibilidade expira e o inbox a reconhece —;
+  e `transient-failure-in-resolution` — o worker de referências pendentes, já com
+  o lock da carteira, recebe `lock_not_available` do banco: transitório real, e o
+  item é reagendado. O `invariant-violation-before-commit` vale também para a
+  resolução de uma pendente, que grava então `FAILED`.
+  Os pontos de queda fora de uma unidade de trabalho vêm do `CrashFaultInjector`.
 - Os apps dos testes sobem sem publicador da outbox (`OUTBOX_PUBLISHER_ENABLED=false`
-  no preload); os testes do publicador ligam o seu, com fila própria. Como o banco
+  no preload) e sem consumidor da fila de entrada
+  (`WAGER_TRANSACTIONS_CONSUMER_ENABLED=false`) nem worker de referências
+  pendentes (`PENDING_REFERENCES_WORKER_ENABLED=false`); os testes do publicador e
+  do consumidor ligam o seu, com filas próprias, e os das pendentes chamam o ciclo
+  do worker direto, com TTL e backoff curtos. Como o banco
   de teste é compartilhado entre os arquivos, um publicador de teste pode entregar
   eventos de outros arquivos: as verificações olham os eventos do próprio teste, e
   "desconhecido" quer dizer fora da outbox.
 - Todo teste de integração e de concorrência termina verificando que o saldo é igual
   ao saldo reconstruído e que a sequência de versões não tem buracos.
 - Sem `sleep` fixo: espera por condição com timeout.
+- O teste do `SIGTERM` sobe o app como processo real (`Bun.spawn` de
+  `src/main.ts`). No Windows não há sinal POSIX — `kill('SIGTERM')` encerra o
+  processo na hora —, então lá o teste manda `SIGTERM` por IPC e o preload
+  `test/integration/support/shutdown-on-ipc.ts` o emite no processo, pelos mesmos
+  listeners do `enableShutdownHooks`; nos demais sistemas, sinal de verdade.
 
 ## Evolução possível
 

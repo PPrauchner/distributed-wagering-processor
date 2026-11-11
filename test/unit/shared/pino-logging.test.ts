@@ -41,6 +41,34 @@ describe('pino logging', () => {
     ]);
   });
 
+  test('a context opened by the log itself carries the queue message id', async () => {
+    const { lines, log } = capture();
+
+    await log.inContext({ messageId: 'msg-1' }, async () => {
+      log.enrich({ transactionId: 'tx-1' });
+      log.info('settled');
+    });
+    log.info('outside');
+
+    expect(lines[0]).toEqual(expect.objectContaining({ messageId: 'msg-1', transactionId: 'tx-1' }));
+    expect(lines[1]).not.toHaveProperty('messageId');
+  });
+
+  test('an alert is a warn line, with its context', () => {
+    const { lines, store, log } = capture();
+
+    store.run({ transactionId: 'tx-1' }, () => log.warn('pending reference failed', { failureCode: 'INFRA_UNEXPECTED' }));
+
+    expect(lines).toEqual([
+      expect.objectContaining({
+        level: 40,
+        msg: 'pending reference failed',
+        transactionId: 'tx-1',
+        failureCode: 'INFRA_UNEXPECTED',
+      }),
+    ]);
+  });
+
   test('concurrent contexts do not share fields', async () => {
     const { lines, store, log } = capture();
 

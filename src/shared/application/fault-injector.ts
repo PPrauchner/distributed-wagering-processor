@@ -14,13 +14,22 @@ export enum FaultPoint {
    * schema invariant, so the true error goes through the classifier.
    */
   InvariantViolationBeforeCommit = 'invariant-violation-before-commit',
-  /** Reserved for the queue consumer: after the commit, before the `ack`. */
+  /**
+   * The queue consumer dies after the outcome committed, before the `ack`:
+   * the message reappears once its visibility expires.
+   */
   CrashAfterCommit = 'crash-after-commit',
   /**
    * The outbox publisher dies after the send, before `published_at`: the lease
    * expires and another instance resends the same `eventId`.
    */
   CrashAfterSend = 'crash-after-send',
+  /**
+   * The worker of pending references, holding the wallet lock: the database
+   * answers `lock_not_available`, a real transient failure through the
+   * classifier, and the item is rescheduled.
+   */
+  TransientFailureInResolution = 'transient-failure-in-resolution',
 }
 
 /** The process "died" at a crash point: what came after it never ran. */

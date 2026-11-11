@@ -190,6 +190,19 @@ describe('the reference rules of a REFUND and a ROLLBACK', () => {
     expect(wallet.version).toBe(1);
   });
 
+  test('a pending reference retried by the worker: keeps waiting, then resolves once its reference is there', () => {
+    const wallet = walletWith(brl('100.00'));
+    const transaction = refund();
+    applyDependentTransaction(transaction, wallet, undefined, ids);
+
+    applyDependentTransaction(transaction, wallet, undefined, ids);
+    expect(transaction.status).toBe(WagerTransactionStatus.PendingReference);
+
+    const entry = applyDependentTransaction(transaction, wallet, cited(referenceOf(WagerTransactionKind.Bet)), ids);
+    expect(transaction.status).toBe(WagerTransactionStatus.Processed);
+    expect(entry?.direction).toBe(LedgerDirection.Credit);
+  });
+
   test.each([WagerTransactionStatus.Rejected, WagerTransactionStatus.Failed])(
     'a %s reference: rejected REFERENCE_NOT_PROCESSED',
     (status) => {
