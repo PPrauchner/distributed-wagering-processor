@@ -30,8 +30,13 @@ O saldo de um jogador numa moeda. Há no máximo uma carteira por jogador e moed
 _Avoid_: conta, wallet (em texto pt-BR)
 
 **Saldo** (`balance`):
-O valor disponível guardado na carteira.
+O valor disponível guardado na carteira. Fica entre zero e o **saldo máximo**.
 _Avoid_: saldo atual, crédito
+
+**Saldo máximo**:
+O maior saldo que uma carteira pode ter. Um crédito que o ultrapassaria é
+rejeitado, nunca truncado.
+_Avoid_: limite, teto (sozinhos)
 
 **Valor** (`Money`):
 Uma quantia exata numa moeda.
@@ -176,7 +181,8 @@ _Avoid_: rejeição, recusa, transação rejeitada
 
 **Falha transitória**:
 Indisponibilidade passageira que impede o processamento sem gerar desfecho; a
-transação é tentada de novo.
+transação é tentada de novo. Esgotadas as tentativas, a submissão também termina
+sem desfecho — nunca vira **Falha** — e pode ser reenviada com a mesma chave.
 _Avoid_: falha (sozinho, neste sentido)
 
 **Código de falha** (`failureCode`):
