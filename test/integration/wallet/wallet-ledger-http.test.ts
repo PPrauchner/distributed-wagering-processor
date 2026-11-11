@@ -11,7 +11,7 @@ import type { INestApplication } from '@nestjs/common';
 import { SQL } from 'bun';
 import { createApp } from '../../../src/app.ts';
 import { loadConfig } from '../../../src/config.ts';
-import { expectLedgerConsistent } from '../ledger-invariant.ts';
+import { excludeFromLedgerInvariant, expectLedgerConsistent } from '../ledger-invariant.ts';
 
 let app: INestApplication;
 let baseUrl: string;
@@ -265,6 +265,7 @@ describe('POST /wallets/:walletId/reconciliation', () => {
 
   test('a divergence is still a 200: consistent false, counted, nothing corrected', async () => {
     const wallet = await createWallet('100.00');
+    excludeFromLedgerInvariant(wallet.id);
     // Only this session's transaction turns the triggers off.
     await sql.begin(async (tx) => {
       await tx`set local session_replication_role = replica`;
