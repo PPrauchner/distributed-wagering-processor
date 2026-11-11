@@ -511,7 +511,8 @@ falhar, a redelivery é reconhecida pelo inbox).
 - **Configuração por ambiente:** `OUTBOX_PUBLISHER_ENABLED` (padrão `true`),
   `OUTBOX_POLL_INTERVAL_MS` (500), `OUTBOX_LEASE_MS` (30000),
   `OUTBOX_RETRY_BASE_MS` (1000), `OUTBOX_RETRY_MAX_MS` (300000),
-  `WAGERING_EVENTS_QUEUE` (`wagering-events.fifo`), `SQS_ENDPOINT`
+  `WAGERING_EVENTS_QUEUE` (`wagering-events.fifo`), `WAGER_TRANSACTIONS_QUEUE`
+  (`wager-transactions.fifo`, consultada pela prontidão), `SQS_ENDPOINT`
   (`http://127.0.0.1:4566`), `AWS_REGION` e credenciais (padrões do LocalStack).
 - **Filas na subida:** o Compose monta `localstack/init/ready.d/create-queues.sh`
   no LocalStack, que cria `wager-transactions.fifo`, `wager-transactions-dlq.fifo`
@@ -577,21 +578,39 @@ Keycloak.
 
 ## Observabilidade
 
-- **Logs:** JSON pelo pino, atrás de um adaptador do `LoggerService` do Nest.
-  Contexto por `AsyncLocalStorage`: `correlationId`, `messageId`, `transactionId`,
-  `walletId`, `providerId`. O `correlationId` vem do header `X-Correlation-Id` (ou é
-  gerado) no HTTP e do atributo `correlationId` (ou do `messageId`) na fila, e segue
-  até os eventos, com `causationId` = `transactionId`. Só identificadores, `kind`,
-  `status` e `failureCode` — nunca valores nem payload; `redact` do pino como rede.
-- **Métricas:** prom-client em `GET /metrics`, aberto: transações por
-  `kind`/`status`/canal, replays, conflitos de idempotência, duplicatas do inbox,
-  retries por componente, DLQ por motivo (envios da aplicação) e profundidade da DLQ
-  (`ApproximateNumberOfMessages` no scrape, que cobre o redrive), conflitos de lock
-  (`lock_timeout`, deadlock), `outbox_lag_seconds` e `outbox_pending` (lidos do
-  banco), latência por canal e tipo, divergências de reconciliação e submissões não
-  admitidas por código.
-- **Health:** `/health/live` responde enquanto o processo vive; `/health/ready`
-  checa `SELECT 1` e `GetQueueAttributes`, com timeout de 1 s cada.
+- **Logs:** JSON pelo pino, atrás de um adaptador do `LoggerService` do Nest e da
+  porta `ContextLog` dos use cases (`shared`). Contexto por `AsyncLocalStorage`:
+  `correlationId`, `messageId`, `transactionId`, `walletId`, `providerId`, misturados
+  em toda linha emitida dentro dele. O HTTP abre o contexto por requisição com o
+  `X-Correlation-Id`, quando há; sem ele, o use case acrescenta o id que gera — o
+  mesmo gravado na transação, uma fonte só. Na fila, o `correlationId` vem do
+  atributo `correlationId` (ou do `messageId`), e segue até os eventos, com
+  `causationId` = `transactionId`. Só identificadores, `kind`, `status` e
+  `failureCode` — nunca valores nem payload; o `redact` do pino (dinheiro, saldos,
+  corpos) é a rede.
+- **Métricas:** prom-client em `GET /metrics`, aberto, num registro próprio por
+  aplicação (os testes sobem várias num processo). Todas existem desde a partida:
+  - `wager_transactions_total{kind,status,channel}` — transações novas;
+  - `wager_transaction_idempotent_replays_total{channel}`;
+  - `wager_transaction_idempotency_conflicts_total{channel}`;
+  - `rejected_submissions_total{failure_code,channel}` — submissões não admitidas;
+  - `inbox_duplicates_total` — registrada em zero, incrementada pelo consumidor;
+  - `lock_conflicts_total{reason}` — `lock_timeout`, `deadlock` ou
+    `serialization_failure`, que o classificador distingue pelo SQLSTATE;
+  - `outbox_pending` e `outbox_lag_seconds` (`now() − min(occurred_at)` das não
+    publicadas), lidos do banco a cada scrape;
+  - `wager_transaction_processing_seconds{channel,kind}` — histograma da latência
+    das submissões que terminaram numa transação;
+  - `reconciliation_divergences_total`.
+
+  Retries por componente, DLQ por motivo (envios da aplicação) e profundidade da DLQ
+  (`ApproximateNumberOfMessages` no scrape, que cobre o redrive) entram com o
+  consumidor da fila.
+- **Health:** `/health/live` responde 200 enquanto o processo vive, sem tocar no
+  banco nem na fila; `/health/ready` roda `SELECT 1` e `GetQueueAttributes` nas
+  filas de entrada e de eventos, cada um com timeout de 1 s, e responde 200 ou 503
+  com o estado de cada sonda. As sondas de fila têm um cliente SQS próprio, sem
+  retry, para falhar dentro do prazo. Nenhum dos dois é autenticado.
 
 ## Testes
 
