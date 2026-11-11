@@ -27,7 +27,7 @@ import { WAGERING_METRICS, type WageringMetrics } from '../application/wagering-
 import { PendingReferencesWorker } from './pending-references.worker.ts';
 import { RejectedSubmissionAudit } from './rejected-submission.audit.ts';
 import { WagerTransactionConsumer } from './wager-transaction.consumer.ts';
-import { WagerTransactionController } from './wager-transaction.controller.ts';
+import { ProviderWagerTransactionController, WagerTransactionController } from './wager-transaction.controller.ts';
 
 @Module({})
 export class WageringModule {
@@ -44,7 +44,7 @@ export class WageringModule {
     const referenceWait = { ttlMs, backoff: { baseMs: retryBaseMs, maxMs: retryMaxMs } };
     return {
       module: WageringModule,
-      controllers: [WagerTransactionController],
+      controllers: [WagerTransactionController, ProviderWagerTransactionController],
       providers: [
         {
           provide: ProcessWagerTransaction,

@@ -1,8 +1,10 @@
 /**
- * `POST /wagering/transactions`, which submits a wager transaction and answers
- * with its outcome, and `GET /wagering/transactions/:transactionId`, which
- * queries one. Refused submissions and unknown transactions are turned into
- * responses by the global HTTP error filter.
+ * Wager transaction endpoints: `POST /wagering/transactions` submits one and
+ * answers with its outcome; `GET /wagering/transactions/:transactionId` and
+ * `GET /providers/:providerId/wagering/transactions/:externalTransactionId`
+ * query one by its internal id or by the id its provider gave it. Refused
+ * submissions and unknown transactions are turned into responses by the
+ * global HTTP error filter.
  *
  * @packageDocumentation
  */
@@ -50,5 +52,18 @@ export class WagerTransactionController {
     const outcome = toWagerTransactionResponse(settled);
     response.status(outcome.statusCode);
     return outcome.body;
+  }
+}
+
+@Controller('providers/:providerId/wagering/transactions')
+export class ProviderWagerTransactionController {
+  constructor(private readonly getWagerTransaction: GetWagerTransaction) {}
+
+  @Get(':externalTransactionId')
+  async show(
+    @Param('providerId') providerId: string,
+    @Param('externalTransactionId') externalTransactionId: string,
+  ): Promise<WagerTransactionView> {
+    return toWagerTransactionView(await this.getWagerTransaction.byExternalId(providerId, externalTransactionId));
   }
 }
