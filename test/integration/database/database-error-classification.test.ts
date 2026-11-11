@@ -285,7 +285,11 @@ describe('transient', () => {
         Reflect.set(loaded, '_updatedAt', new Date());
       });
 
-      expect(result).toEqual({ category: 'transient', failureCode: FailureCode.TransientLockTimeout });
+      expect(result).toEqual({
+        category: 'transient',
+        failureCode: FailureCode.TransientLockTimeout,
+        lockConflict: 'lock_timeout',
+      });
     } finally {
       await holder`rollback`;
       holder.release();

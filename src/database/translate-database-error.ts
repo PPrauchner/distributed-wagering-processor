@@ -25,7 +25,10 @@ export function translateDatabaseError(error: unknown): unknown {
   const message = (error as Error).message;
   switch (classified.category) {
     case 'transient':
-      return new TransientFailureError(classified.failureCode, { cause: error });
+      return new TransientFailureError(classified.failureCode, {
+        cause: error,
+        lockConflict: 'lockConflict' in classified ? classified.lockConflict : undefined,
+      });
     case 'permanent':
       return new PermanentFailureError(classified.failureCode, { cause: error });
     case 'conflict':
