@@ -21,6 +21,8 @@
  *
  * @packageDocumentation
  */
+import type { InboxEntry, InboxRepositories } from '../../messaging/application/inbox-repository.ts';
+import { InboxMessage } from '../../messaging/domain/inbox-message.ts';
 import type { OutboxRepositories, OutboxRepository } from '../../messaging/application/outbox-repository.ts';
 import { OutboxMessage } from '../../messaging/domain/outbox-message.ts';
 import type { ContextLog } from '../../shared/application/context-log.ts';
@@ -98,7 +100,7 @@ const SUPPORTED_KINDS = new Set([
 export class ProcessWagerTransaction {
   constructor(
     private readonly unitOfWork: UnitOfWork<
-      WalletRepositories & WageringRepositories & OutboxRepositories & FaultInjection
+      WalletRepositories & WageringRepositories & OutboxRepositories & InboxRepositories & FaultInjection
     >,
     private readonly generateId: () => string,
     private readonly metrics: WageringMetrics,
@@ -108,6 +110,9 @@ export class ProcessWagerTransaction {
   /**
    * @param command - The submission, with its idempotency key already present.
    * @param channel - Where it came from, for the metrics.
+   * @param inbox - The queue message it came in, when it came by the queue:
+   *   recorded in the inbox, in the SQL transaction of the outcome — a replay's
+   *   too.
    * @returns The transaction it ended in — `PROCESSED`, `REJECTED`,
    *   `PENDING_REFERENCE` or, after a permanent error, `FAILED` — new or replayed;
    *   a replay of a pending one answers its current status.
@@ -125,11 +130,17 @@ export class ProcessWagerTransaction {
    *   or the database is unavailable: nothing was recorded.
    * @throws {@link PermanentFailureError} If even the `FAILED` could not be
    *   recorded for a permanent reason.
+   * @throws {@link InboxRedeliveryError} If the inbox already holds the
+   *   message: nothing was recorded this time.
    */
-  async execute(command: SubmitWagerTransactionCommand, channel: SubmissionChannel): Promise<WagerTransactionOutcome> {
+  async execute(
+    command: SubmitWagerTransactionCommand,
+    channel: SubmissionChannel,
+    inbox?: InboxEntry,
+  ): Promise<WagerTransactionOutcome> {
     const started = performance.now();
     try {
-      const outcome = await this.process(command);
+      const outcome = await this.process(command, inbox);
       const { id, kind, status, failureCode } = outcome.transaction;
       const { idempotentReplay } = outcome;
       // A replay answers the transaction recorded first, not the one this submission would have created.
@@ -145,14 +156,14 @@ export class ProcessWagerTransaction {
     }
   }
 
-  private async process(command: SubmitWagerTransactionCommand): Promise<WagerTransactionOutcome> {
+  private async process(command: SubmitWagerTransactionCommand, inbox?: InboxEntry): Promise<WagerTransactionOutcome> {
     const { props, submitted } = this.validated(command);
     // The correlation id generated here, when the channel had none, is the one recorded.
     const { correlationId, id: transactionId, walletId, providerId } = props;
     this.log.enrich({ correlationId, transactionId, walletId, providerId });
 
     try {
-      return await this.settled(props, () => this.record(submitted));
+      return await this.settled(props, () => this.record(submitted, inbox));
     } catch (error) {
       if (!(error instanceof PermanentFailureError)) throw error;
       // The SQL transaction rolled back: record the failure in a unit of work of its own.
@@ -177,9 +188,15 @@ export class ProcessWagerTransaction {
     }
   }
 
-  /** Steps 4 to 8 of the order, in one unit of work. */
-  private record(submitted: WagerTransaction): Promise<WagerTransactionOutcome> {
-    return this.unitOfWork.run(async ({ wallets, ledger, transactions, outbox, faults }) => {
+  /**
+   * Steps 4 to 8 of the order, in one unit of work. The inbox row, when the
+   * submission came by the queue, is written with whatever the unit of work
+   * commits — a new outcome or nothing but the row, on a replay —, so a
+   * redelivery fails the commit on the inbox's primary key.
+   */
+  private record(submitted: WagerTransaction, received?: InboxEntry): Promise<WagerTransactionOutcome> {
+    return this.unitOfWork.run(async ({ wallets, ledger, transactions, outbox, inbox, faults }) => {
+      if (received) inbox.add(processedInboxMessage(received));
       const earlier = await findEarlier(transactions, submitted);
       if (earlier) return earlier;
 
@@ -324,6 +341,13 @@ export class ProcessWagerTransaction {
     if (!SUPPORTED_KINDS.has(props.kind)) throw new UnsupportedKindError(props.kind);
     return { props, submitted };
   }
+}
+
+function processedInboxMessage(entry: InboxEntry): InboxMessage {
+  const now = new Date();
+  const message = InboxMessage.receive({ ...entry, receivedAt: now });
+  message.markProcessed(now);
+  return message;
 }
 
 /** What identifies a submission to its provider, and its fingerprint. */
