@@ -921,7 +921,8 @@ uma porta de identidade do provedor. O ponto de extensão no código:
   atributo `correlationId` (ou do `messageId`), e segue até os eventos, com
   `causationId` = `transactionId`. Só identificadores, `kind`, `status` e
   `failureCode` — nunca valores nem payload; o `redact` do pino (dinheiro, saldos,
-  corpos) é a rede.
+  corpos) é a rede. Nível por `LOG_LEVEL` (padrão `info`; os níveis do pino,
+  `silent` incluído; outro valor é recusado na carga da configuração).
 - **Métricas:** prom-client em `GET /metrics`, aberto, num registro próprio por
   aplicação (os testes sobem várias num processo). Todas existem desde a partida,
   e as séries das combinações conhecidas de label — derivadas dos enums, não de
@@ -1056,6 +1057,11 @@ agregação:
   de teste é compartilhado entre os arquivos, um publicador de teste pode entregar
   eventos de outros arquivos: as verificações olham os eventos do próprio teste, e
   "desconhecido" quer dizer fora da outbox.
+- O preload também põe `LOG_LEVEL=silent` quando a variável não vem definida: o
+  log do app (~480 KB por execução) escondia o `(fail)` e o resumo do bun. Vale para
+  os apps em processo e os filhos que herdam o ambiente; `LOG_LEVEL=info` o religa.
+  Os testes que leem as linhas fixam o próprio nível pela opção `logLevel` do
+  `createApp`; os processos da concorrência logam em `info` nos seus arquivos.
 - Todo teste de integração e de concorrência termina verificando que o saldo é igual
   ao saldo reconstruído e que a sequência de versões não tem buracos.
 - Sem `sleep` fixo: espera por condição com timeout, por um helper único

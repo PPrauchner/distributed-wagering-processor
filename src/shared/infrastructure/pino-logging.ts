@@ -11,7 +11,7 @@
  */
 import { AsyncLocalStorage } from 'node:async_hooks';
 import type { LoggerService } from '@nestjs/common';
-import pino, { type DestinationStream, type Logger } from 'pino';
+import pino, { type DestinationStream, type LevelWithSilent, type Logger } from 'pino';
 import type { ContextLog, LogContextFields, LogDetails } from '../application/context-log.ts';
 import { summarizeError } from '../application/error-summary.ts';
 
@@ -91,12 +91,17 @@ export class LogContextStore {
 /**
  * @param context - Whose fields every line carries.
  * @param destination - Where the lines go; stdout by default.
+ * @param level - The lowest level written; `silent` writes nothing.
  * @returns The pino logger.
  */
-export function createPinoLogger(context: LogContextStore, destination?: DestinationStream): Logger {
+export function createPinoLogger(
+  context: LogContextStore,
+  destination?: DestinationStream,
+  level: LevelWithSilent = 'info',
+): Logger {
   return pino(
     {
-      level: 'info',
+      level,
       base: undefined,
       timestamp: pino.stdTimeFunctions.isoTime,
       mixin: () => ({ ...context.get() }),

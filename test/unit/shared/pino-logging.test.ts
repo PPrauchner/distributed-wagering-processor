@@ -169,6 +169,16 @@ describe('pino logging', () => {
     expect(raw).not.toContain('987.65');
   });
 
+  test('at the silent level, no line is written', () => {
+    const silentLines: string[] = [];
+    const logger = createPinoLogger(new LogContextStore(), { write: (line: string) => silentLines.push(line) }, 'silent');
+
+    new PinoLoggerService(logger).error(new TypeError('a bug'), 'Test');
+    logger.info('started');
+
+    expect(silentLines).toEqual([]);
+  });
+
   test("an error's stack goes only to the debug level", () => {
     const debugLines: Record<string, unknown>[] = [];
     const logger = createPinoLogger(new LogContextStore(), { write: (line: string) => debugLines.push(JSON.parse(line)) });

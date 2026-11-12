@@ -36,7 +36,10 @@ const logLines: string[] = [];
 
 beforeAll(async () => {
   const config = loadConfig();
-  app = await createApp(config, { logDestination: { write: (line: string) => void logLines.push(line) } });
+  app = await createApp(config, {
+    logDestination: { write: (line: string) => void logLines.push(line) },
+    logLevel: 'info',
+  });
   await app.listen(0, '127.0.0.1');
   baseUrl = await app.getUrl();
   sql = new SQL(config.databaseUrl);
