@@ -9,6 +9,7 @@
  * @packageDocumentation
  */
 import { Logger, type BeforeApplicationShutdown, type OnApplicationBootstrap } from '@nestjs/common';
+import { describeError } from '../../shared/application/error-summary.ts';
 import {
   PENDING_REFERENCES_BATCH_SIZE,
   type ResolvePendingReferences,
@@ -49,7 +50,7 @@ export class PendingReferencesWorker implements OnApplicationBootstrap, BeforeAp
       try {
         claimed = await this.resolvePendingReferences.resolveDue(() => !this.running);
       } catch (error) {
-        this.logger.warn(`pending references cycle failed: ${error instanceof Error ? error.message : String(error)}`);
+        this.logger.warn(`pending references cycle failed: ${describeError(error)}`);
       }
       if (this.running && claimed < PENDING_REFERENCES_BATCH_SIZE) await this.pause();
     }

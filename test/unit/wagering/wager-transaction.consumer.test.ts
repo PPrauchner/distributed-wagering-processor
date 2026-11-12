@@ -35,6 +35,7 @@ import {
   SubmissionWalletNotFoundError,
 } from '../../../src/wagering/application/wagering-errors.ts';
 import { WagerTransactionConsumer } from '../../../src/wagering/interface/wager-transaction.consumer.ts';
+import { captureNestLogs } from '../../support/nest-log-capture.ts';
 
 const WALLET_ID = '01890a5d-ac96-774b-bcce-b302099a8057';
 const MESSAGE_ID = 'message-1';
@@ -320,6 +321,15 @@ describe('a permanent error', () => {
     await h.consumer.handle(messageOf());
 
     expect(h.acknowledged).toEqual([]);
+  });
+
+  test('a message left unacknowledged is logged by the error name, never its message', async () => {
+    const h = harness({ execute: async () => outcome('FAILED', FailureCode.InfraUnexpected), dlqFails: true });
+
+    const lines = await captureNestLogs(async () => void (await h.consumer.handle(messageOf())));
+
+    expect(lines.join(' ')).toContain('Error');
+    expect(lines.join(' ')).not.toContain('DLQ unavailable');
   });
 });
 
