@@ -18,9 +18,13 @@ dispensa decorators no domínio.
 
 ## Spike (10/11/2026)
 
-Aceito depois do spike em `spike/` (Bun 1.4.4, NestJS 12.4, MikroORM 7.2.8,
-TypeScript 6.0, PostgreSQL 17), com testes contra banco real, estáveis em execuções
-repetidas:
+Aceito depois de um spike (Bun 1.4.4, NestJS 12.4, MikroORM 7.2.8, TypeScript 6.0,
+PostgreSQL 17), com testes contra banco real, estáveis em execuções repetidas. O
+spike foi removido do repositório depois de cumprir seu papel; o código dele está
+no commit
+[`001415f`](https://github.com/PPrauchner/distributed-wagering-processor/tree/001415f/spike).
+Hoje os testes de concorrência (`test/concurrency/`, `bun run test:concurrency`)
+provam o mesmo sobre o código real. O spike cobria:
 
 - migrations de ida e volta pelo `migrator`, num script Bun, sem o CLI;
 - classe de domínio com construtor privado, mapeada por `defineEntity`, hidratada
