@@ -59,3 +59,29 @@ describe('before the application shuts down', () => {
     expect(stopped).toBe(true);
   });
 });
+
+describe('a cycle that never ends', () => {
+  test('holds the shutdown no longer than the drain timeout, and is logged', async () => {
+    let cycleStarted: (() => void) | undefined;
+    const started = new Promise<void>((resolve) => (cycleStarted = resolve));
+    const publishOutbox = {
+      publishDue: () => {
+        cycleStarted?.();
+        return new Promise<number>(() => {});
+      },
+    } as unknown as PublishOutbox;
+    const worker = new OutboxPublisherWorker(publishOutbox, {
+      enabled: true,
+      pollIntervalMs: 10_000,
+      drainTimeoutMs: 20,
+    });
+
+    const lines = await captureNestLogs(async () => {
+      worker.onApplicationBootstrap();
+      await started;
+      await worker.beforeApplicationShutdown();
+    });
+
+    expect(lines.join(' ')).toContain('still in flight after 20 ms');
+  });
+});

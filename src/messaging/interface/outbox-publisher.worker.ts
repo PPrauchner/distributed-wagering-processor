@@ -8,11 +8,17 @@
  */
 import { Logger, type BeforeApplicationShutdown, type OnApplicationBootstrap } from '@nestjs/common';
 import { describeError } from '../../shared/application/error-summary.ts';
+import { waitAtMost } from '../../shared/application/wait-at-most.ts';
 import { OUTBOX_BATCH_SIZE, type PublishOutbox } from '../application/publish-outbox.ts';
+
+/** How long a shutdown waits for the cycle in flight, by default — inside the Compose's 30 s grace period. */
+const DEFAULT_DRAIN_TIMEOUT_MS = 20_000;
 
 export interface OutboxPublisherWorkerOptions {
   enabled: boolean;
   pollIntervalMs: number;
+  /** How long a shutdown waits for the cycle in flight; 20 s by default. */
+  drainTimeoutMs?: number;
 }
 
 export class OutboxPublisherWorker implements OnApplicationBootstrap, BeforeApplicationShutdown {
@@ -36,7 +42,11 @@ export class OutboxPublisherWorker implements OnApplicationBootstrap, BeforeAppl
   async beforeApplicationShutdown(): Promise<void> {
     this.running = false;
     this.wake?.();
-    await this.loop;
+    if (!this.loop) return;
+    const drainTimeoutMs = this.options.drainTimeoutMs ?? DEFAULT_DRAIN_TIMEOUT_MS;
+    if (!(await waitAtMost(this.loop, drainTimeoutMs))) {
+      this.logger.warn(`publication cycle still in flight after ${drainTimeoutMs} ms; shutting down`);
+    }
   }
 
   private async run(): Promise<void> {
