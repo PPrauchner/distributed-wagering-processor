@@ -566,7 +566,7 @@ intactos. `REJECTED` vem só do domínio, nunca do classificador. Ver
 | Erro | Categoria |
 |---|---|
 | `55P03` (`lock_timeout`; o MikroORM não o mapeia, é reconhecido pelo código), `40P01`, `40001` | transitório → 503 `TRANSIENT_LOCK_TIMEOUT` |
-| queda ou recusa de conexão (`ECONNREFUSED` e afins, classe `08`, `53300`, `57P01`–`57P03`) | transitório → 503 `TRANSIENT_UNAVAILABLE` |
+| queda ou recusa de conexão (`ECONNREFUSED` e afins, classe `08`, `53300`, `57P01`–`57P03`, e as falhas de conexão que o `pg` lança sem código, como `Connection terminated unexpectedly` e o timeout do pool) | transitório → 503 `TRANSIENT_UNAVAILABLE` |
 | `23505` | pela constraint, tabela abaixo |
 | `23514` (`CHECK`), `23503` (FK de moeda), `23502`, `23000` (os triggers do schema) e `22003` | permanente → `FAILED`, `INFRA_INVARIANT_VIOLATION` |
 | qualquer outro | permanente → `FAILED`, `INFRA_UNEXPECTED` |

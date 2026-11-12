@@ -34,6 +34,23 @@ describe('classifyDatabaseError', () => {
     expect(classifyDatabaseError(error)).toEqual(expected);
   });
 
+  // `pg` and `pg-pool` throw these without a code; MikroORM's wrapper keeps the message.
+  test.each([
+    'Connection terminated unexpectedly',
+    'Connection terminated',
+    'Connection terminated due to connection timeout',
+    'timeout exceeded when trying to connect',
+    'Client has encountered a connection error and is not queryable',
+    'Client was closed and is not queryable',
+  ])('the driver connection failure without a code "%s" → transient', (message) => {
+    const error = new Error(message);
+    expect(isDatabaseError(error)).toBe(true);
+    expect(classifyDatabaseError(error)).toEqual({
+      category: 'transient',
+      failureCode: FailureCode.TransientUnavailable,
+    });
+  });
+
   test.each<[string, string, DatabaseErrorClass]>([
     [
       'the provider idempotency key',
