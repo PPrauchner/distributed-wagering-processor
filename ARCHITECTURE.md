@@ -817,7 +817,8 @@ uma porta de identidade do provedor. O ponto de extensão no código:
     três gauges;
   - `wager_transaction_processing_seconds{channel,kind,outcome}` — histograma da
     latência de cada submissão: `outcome` é `settled` (terminou numa transação,
-    replay incluído), `not_admitted`, `transient` ou `permanent`; `kind` fora do
+    replay incluído), `not_admitted` (recusada antes de virar transação),
+    `transient` ou `permanent` (inclusive um erro inesperado); `kind` fora do
     enum vira `UNKNOWN`. Uma reentrega que o inbox já tinha não é observada;
   - `reconciliation_divergences_total`.
 

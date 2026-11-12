@@ -39,7 +39,7 @@ import { PermanentFailureError, TransientFailureError } from '../../shared/appli
 import type { UnitOfWork } from '../../shared/application/unit-of-work.ts';
 import { isUuid } from '../../shared/application/uuid.ts';
 import { FailureCode } from '../../shared/domain/failure-code.ts';
-import { Money, type MoneyProps } from '../../shared/domain/money.ts';
+import { CurrencyMismatchError, InvalidMoneyError, Money, type MoneyProps } from '../../shared/domain/money.ts';
 import type { WalletRepositories } from '../../wallet/application/wallet-repository.ts';
 import { SubmissionChannel } from '../domain/rejected-submission.ts';
 import {
@@ -87,15 +87,28 @@ export interface WagerTransactionOutcome {
 
 const KINDS = new Set<string>(Object.values(WagerTransactionKind));
 
+/** The refusals of a submission before it became a transaction. */
+const NOT_ADMITTED_ERRORS = [
+  InvalidMoneyError,
+  CurrencyMismatchError,
+  InvalidWagerTransactionError,
+  InternalKindNotAllowedError,
+  IdempotencyConflictError,
+  ExternalIdConflictError,
+  SubmissionWalletNotFoundError,
+  MessageIdConflictError,
+];
+
 /**
  * How a submission that did not end in a transaction ended; `undefined` for a
  * redelivery the inbox already held — not a processing, counted as a duplicate.
+ * An error nobody translated — a bug — is `permanent`, never a refusal.
  */
 function processingFailureOf(error: unknown): ProcessingFailure | undefined {
   if (error instanceof InboxRedeliveryError) return undefined;
   if (error instanceof TransientFailureError) return 'transient';
-  if (error instanceof PermanentFailureError) return 'permanent';
-  return 'not_admitted';
+  if (NOT_ADMITTED_ERRORS.some((type) => error instanceof type)) return 'not_admitted';
+  return 'permanent';
 }
 
 export class ProcessWagerTransaction {
