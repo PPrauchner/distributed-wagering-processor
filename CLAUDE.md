@@ -32,7 +32,7 @@ bun run typecheck               # tsc --noEmit (TypeScript 6.0)
 bun run test                    # unit + integration (exige o Compose de pé); ~3 min
                                 # por execução — critério de "N execuções seguidas"
                                 # custa ~3N min
-bun run test:unit               # só domínio, sem I/O
+bun run test:unit               # domínio, aplicação e interface com fakes, sem I/O
 bun run test:integration        # app em processo contra PostgreSQL e LocalStack reais; recria o
                                 # banco <db>_test a cada execução
 bun run test:concurrency        # os 8 cenários do §13, com processos reais do app;
