@@ -14,7 +14,8 @@
  * Error path (`ARCHITECTURE.md` § Classificação de falhas): a transient failure
  * records nothing and reaches the caller; a permanent one rolls the SQL
  * transaction back, and a second unit of work records the transaction as
- * `FAILED` — with its inbox row, when it came by the queue —, so the key keeps
+ * `FAILED` — with `WagerTransactionFailed` in the outbox and its inbox row,
+ * when it came by the queue —, so the key keeps
  * answering the same outcome. A transient failure never becomes `FAILED`: a
  * queue consumer out of receives sends the message to the DLQ with no outcome.
  *
@@ -48,7 +49,7 @@ import {
   WagerTransactionStatus,
   type CreateWagerTransactionProps,
 } from '../domain/wager-transaction.ts';
-import { enqueueOutcomeEvents, settleOnWallet, type ReferenceWaitPolicy } from './settle-wager-transaction.ts';
+import { enqueueFailureEvent, enqueueOutcomeEvents, settleOnWallet, type ReferenceWaitPolicy } from './settle-wager-transaction.ts';
 import { hashWagerPayload, type WagerPayload } from './wager-payload.ts';
 import type { WagerTransactionRepository, WageringRepositories } from './wager-transaction-repository.ts';
 import { UNKNOWN_KIND, type ProcessingFailure, type WageringMetrics } from './wagering-metrics.ts';
@@ -284,7 +285,8 @@ export class ProcessWagerTransaction {
 
   /**
    * The second unit of work: `FAILED`, with nothing observed and no ledger
-   * entry, and the inbox row when it came by the queue — a replay's too. It
+   * entry, its `WagerTransactionFailed` — none on a replay —, and the inbox
+   * row when it came by the queue — a replay's too. It
    * starts with the wallet lock, like every unit of work that touches the
    * wallet: inserting a row with a foreign key to it touches it (ADR 0002).
    */
@@ -293,7 +295,7 @@ export class ProcessWagerTransaction {
     code: FailureCode,
     received?: InboxEntry,
   ): Promise<WagerTransactionOutcome> {
-    return this.unitOfWork.run(async ({ wallets, transactions, inbox }) => {
+    return this.unitOfWork.run(async ({ wallets, transactions, outbox, inbox }) => {
       const wallet = await wallets.findByIdForUpdate(props.walletId);
       if (!wallet) throw new SubmissionWalletNotFoundError(props.walletId, props.payloadHash);
       if (received) inbox.add(processedInboxMessage(received));
@@ -302,6 +304,7 @@ export class ProcessWagerTransaction {
       if (earlier) return earlier;
       failed.fail(code);
       transactions.add(failed);
+      enqueueFailureEvent(outbox, failed, this.generateId);
       return { transaction: failed, idempotentReplay: false };
     });
   }

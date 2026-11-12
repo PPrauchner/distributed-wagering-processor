@@ -350,7 +350,7 @@ describe('the worker under failure', () => {
     expect(resolved).toMatchObject({ status: 'PROCESSED', balance_after: '100.00' });
   });
 
-  test('a permanent error in the resolution records FAILED, with no event of the outcome', async () => {
+  test('a permanent error in the resolution records FAILED, with WagerTransactionFailed and no event of the settlement', async () => {
     const faultyApp = await startApp({ ...config, faultPoints: [FaultPoint.InvariantViolationBeforeCommit] });
     const faulty = faultyApp.get(ResolvePendingReferences);
     const wallet = await createWallet('100.00');
@@ -363,10 +363,17 @@ describe('the worker under failure', () => {
 
     expect(resolved).toMatchObject({ status: 'FAILED', failure_code: 'INFRA_INVARIANT_VIOLATION', balance_after: null });
     expect(await walletRow(wallet.id)).toEqual({ balance: '75.00', version: 2 });
-    expect((await eventsOf(pending.body.transactionId)).map((event) => event.event_type)).toEqual([
+    const events = await eventsOf(pending.body.transactionId);
+    expect(events.map((event) => event.event_type)).toEqual([
+      'WagerTransactionFailed',
       'WagerTransactionPendingReference',
     ]);
+    expect(events[0]!.payload).toMatchObject({
+      correlationId: (events[1]!.payload as JsonObject).correlationId,
+      data: { failureCode: 'INFRA_INVARIANT_VIOLATION' },
+    });
     expect((await submit(refund)).status).toBe(500);
+    expect(await eventsOf(pending.body.transactionId)).toHaveLength(2);
   });
 
   test('two workers over the same pending references: each resolved once', async () => {

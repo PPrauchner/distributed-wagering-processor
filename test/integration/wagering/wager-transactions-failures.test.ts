@@ -140,6 +140,13 @@ async function messagingRows(walletId: string): Promise<{ outbox: string[]; inbo
   return { outbox: outbox.map((row: { id: string }) => row.id), inbox };
 }
 
+/** The outbox rows a transaction caused. */
+async function eventsOf(transactionId: unknown): Promise<{ event_type: string; payload: JsonObject }[]> {
+  return sql`
+    select event_type, payload from outbox_messages where aggregate_id = ${transactionId} order by occurred_at
+  `;
+}
+
 describe('a permanent error: FAILED, recorded by a second unit of work', () => {
   let faultyUrl: string;
 
@@ -147,7 +154,7 @@ describe('a permanent error: FAILED, recorded by a second unit of work', () => {
     faultyUrl = await startApp({ ...config, faultPoints: [FaultPoint.InvariantViolationBeforeCommit] });
   });
 
-  test('an invariant violated before the commit → 500 FAILED INFRA_INVARIANT_VIOLATION; balance, ledger, outbox and inbox untouched', async () => {
+  test('an invariant violated before the commit → 500 FAILED INFRA_INVARIANT_VIOLATION; balance, ledger and inbox untouched, one WagerTransactionFailed', async () => {
     const wallet = await createWallet('100.00');
     const before = await messagingRows(wallet.id);
 
@@ -181,8 +188,29 @@ describe('a permanent error: FAILED, recorded by a second unit of work', () => {
         from wallets where id = ${wallet.id}
     `;
     expect(walletRow).toEqual({ balance: '100.00', version: 1, entries: 1 });
-    // Atomicity: the first unit of work left no event; the second, by HTTP, writes no inbox row.
-    expect(await messagingRows(wallet.id)).toEqual(before);
+    // Atomicity: the first unit of work left no event; the second wrote only
+    // WagerTransactionFailed and, by HTTP, no inbox row.
+    const after = await messagingRows(wallet.id);
+    expect(after.inbox).toBe(before.inbox);
+    expect(after.outbox).toHaveLength(before.outbox.length + 1);
+    expect(await eventsOf(result.transactionId)).toEqual([
+      {
+        event_type: 'WagerTransactionFailed',
+        payload: expect.objectContaining({
+          eventType: 'WagerTransactionFailed',
+          version: 1,
+          aggregateId: result.transactionId,
+          causationId: result.transactionId,
+          data: expect.objectContaining({
+            transactionId: result.transactionId,
+            walletId: wallet.id,
+            money: { amount: '25.00', currency: 'BRL' },
+            failureCode: 'INFRA_INVARIANT_VIOLATION',
+            failedAt: expect.any(String),
+          }),
+        }),
+      },
+    ]);
   });
 
   test('the replay answers the same 500, with idempotentReplay; another payload is a conflict', async () => {
@@ -198,6 +226,10 @@ describe('a permanent error: FAILED, recorded by a second unit of work', () => {
     expect(conflict.status).toBe(409);
     expect(await conflict.json()).toMatchObject({ failureCode: 'IDEMPOTENCY_CONFLICT' });
     expect(await transactionCount(wallet.id)).toBe(1);
+    // The key already had its outcome: neither the replay nor the conflict enqueued another event.
+    expect((await eventsOf(original.transactionId)).map((event) => event.event_type)).toEqual([
+      'WagerTransactionFailed',
+    ]);
   });
 
   describe('the FAILED write starts with the wallet lock (ADR 0002)', () => {

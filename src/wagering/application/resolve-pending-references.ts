@@ -20,7 +20,7 @@
  * A transient failure reschedules the item, with no limit of attempts — the
  * TTL already limits the wait; a permanent one — or one the classifier left
  * unclassified, recorded `INFRA_UNEXPECTED` — records it `FAILED` in a second
- * unit of work, with an alert and no event. With no caller to tell, an error
+ * unit of work, with `WagerTransactionFailed` and an alert. With no caller to tell, an error
  * that still escapes an item is logged and left to its lease: the rest of the
  * batch goes on. A worker that dies leaves its items leased, and another takes
  * them once the lease expires.
@@ -36,7 +36,7 @@ import { FailureCode } from '../../shared/domain/failure-code.ts';
 import type { WalletRepositories } from '../../wallet/application/wallet-repository.ts';
 import { WagerTransactionStatus, type WagerTransaction } from '../domain/wager-transaction.ts';
 import { rejectOn } from '../domain/wallet-coherence.ts';
-import { enqueueOutcomeEvents, settleOnWallet, type ReferenceWaitPolicy } from './settle-wager-transaction.ts';
+import { enqueueFailureEvent, enqueueOutcomeEvents, settleOnWallet, type ReferenceWaitPolicy } from './settle-wager-transaction.ts';
 import type { PendingReferenceClaim, WageringRepositories } from './wager-transaction-repository.ts';
 import type { WageringMetrics } from './wagering-metrics.ts';
 
@@ -167,12 +167,17 @@ export class ResolvePendingReferences {
     }
   }
 
-  /** The second unit of work: `FAILED`, with nothing observed, no event, and an alert. */
+  /**
+   * The second unit of work: `FAILED`, with nothing observed, its
+   * `WagerTransactionFailed` — none when another worker resolved it
+   * meanwhile —, and an alert.
+   */
   private async recordFailure(claim: PendingReferenceClaim, error: PermanentFailureError): Promise<void> {
-    const failed = await this.unitOfWork.run(async ({ transactions }) => {
+    const failed = await this.unitOfWork.run(async ({ transactions, outbox }) => {
       const pending = await transactions.findById(claim.transactionId);
       if (pending?.status !== WagerTransactionStatus.PendingReference) return undefined;
       pending.fail(error.failureCode);
+      enqueueFailureEvent(outbox, pending, this.generateId);
       return pending;
     });
     if (failed) {
