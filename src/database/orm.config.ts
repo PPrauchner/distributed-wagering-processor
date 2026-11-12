@@ -26,6 +26,7 @@ import { Migration0010InboxMessages } from '../messaging/infrastructure/migratio
 import { Migration0011WagerTransactionReferenceSchedule } from '../wagering/infrastructure/migrations/0011-wager-transaction-reference-schedule.ts';
 import { Migration0012WalletCreationIdempotency } from '../wallet/infrastructure/migrations/0012-wallet-creation-idempotency.ts';
 import { Migration0013WalletLedgerTransactionCoherence } from '../wallet/infrastructure/migrations/0013-wallet-ledger-transaction-coherence.ts';
+import { Migration0014WalletLedgerTransactionFkDeferred } from '../wallet/infrastructure/migrations/0014-wallet-ledger-transaction-fk-deferred.ts';
 
 /**
  * @param databaseUrl - PostgreSQL connection URL.
@@ -64,6 +65,10 @@ export function createOrmConfig(databaseUrl: string): Options {
         {
           name: 'Migration0013WalletLedgerTransactionCoherence',
           class: Migration0013WalletLedgerTransactionCoherence,
+        },
+        {
+          name: 'Migration0014WalletLedgerTransactionFkDeferred',
+          class: Migration0014WalletLedgerTransactionFkDeferred,
         },
       ],
       // Hand-written migrations; the snapshot only serves automatic diffs.
