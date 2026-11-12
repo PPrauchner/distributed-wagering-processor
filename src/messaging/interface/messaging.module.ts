@@ -5,14 +5,16 @@
  *
  * @packageDocumentation
  */
-import { Inject, Logger, Module, type DynamicModule, type OnApplicationShutdown } from '@nestjs/common';
+import { Inject, Module, type DynamicModule, type OnApplicationShutdown } from '@nestjs/common';
 import { SQSClient } from '@aws-sdk/client-sqs';
 import type { AppConfig } from '../../config.ts';
+import { CONTEXT_LOG, type ContextLog } from '../../shared/application/context-log.ts';
 import type { FaultInjection } from '../../shared/application/fault-injector.ts';
 import { UNIT_OF_WORK, type UnitOfWork } from '../../shared/application/unit-of-work.ts';
 import type { EventPublisher } from '../application/event-publisher.ts';
 import { WAGER_TRANSACTIONS_DLQ } from '../application/dead-letter-queue.ts';
 import { WAGER_TRANSACTIONS_QUEUE } from '../application/input-queue.ts';
+import { OUTBOX_METRICS, type OutboxMetrics } from '../application/outbox-metrics.ts';
 import type { OutboxRepositories } from '../application/outbox-repository.ts';
 import { PublishOutbox } from '../application/publish-outbox.ts';
 import { SqsDeadLetterQueue } from '../infrastructure/sqs-dead-letter-queue.ts';
@@ -70,8 +72,13 @@ export class MessagingModule implements OnApplicationShutdown {
         },
         {
           provide: PublishOutbox,
-          inject: [UNIT_OF_WORK, EVENT_PUBLISHER],
-          useFactory: (unitOfWork: UnitOfWork<OutboxRepositories & FaultInjection>, publisher: EventPublisher) =>
+          inject: [UNIT_OF_WORK, EVENT_PUBLISHER, CONTEXT_LOG, OUTBOX_METRICS],
+          useFactory: (
+            unitOfWork: UnitOfWork<OutboxRepositories & FaultInjection>,
+            publisher: EventPublisher,
+            log: ContextLog,
+            metrics: OutboxMetrics,
+          ) =>
             new PublishOutbox(
               unitOfWork,
               publisher,
@@ -79,7 +86,8 @@ export class MessagingModule implements OnApplicationShutdown {
                 leaseMs: outboxPublisher.leaseMs,
                 backoff: { baseMs: outboxPublisher.retryBaseMs, maxMs: outboxPublisher.retryMaxMs },
               },
-              new Logger('OutboxPublisher'),
+              log,
+              metrics,
             ),
         },
         {
