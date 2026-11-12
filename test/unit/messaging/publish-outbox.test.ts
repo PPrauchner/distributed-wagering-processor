@@ -72,7 +72,7 @@ function metricsSpy(): OutboxMetrics & { retries: number } {
 
 const failing: EventPublisher = {
   publish: async () => {
-    throw new Error('AWS.SimpleQueueService.NonExistentQueue');
+    throw Object.assign(new Error('queue for 123.45 does not exist'), { name: 'AWS.SimpleQueueService.NonExistentQueue' });
   },
 };
 
@@ -103,6 +103,7 @@ describe('a batch that could not be sent at all', () => {
     expect(log.warnings).toHaveLength(1);
     expect(log.warnings[0]).toContain('2');
     expect(log.warnings[0]).toContain('AWS.SimpleQueueService.NonExistentQueue');
+    expect(log.warnings[0]).not.toContain('123.45');
   });
 });
 

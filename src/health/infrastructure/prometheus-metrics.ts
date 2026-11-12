@@ -21,6 +21,7 @@ import {
   TRANSIENT_FAILURE_CODES,
   type LockConflictReason,
 } from '../../shared/application/infrastructure-failures.ts';
+import { describeError } from '../../shared/application/error-summary.ts';
 import { FailureCode } from '../../shared/domain/failure-code.ts';
 import { SubmissionChannel } from '../../wagering/domain/rejected-submission.ts';
 import { WagerTransactionKind, WagerTransactionStatus } from '../../wagering/domain/wager-transaction.ts';
@@ -66,6 +67,15 @@ export interface MetricsSources {
   readDlqDepth(): Promise<number>;
 }
 
+/** A read that outlasted its time limit; logged by its name. */
+class ReadTimeoutError extends Error {
+  override readonly name = 'ReadTimeoutError';
+
+  constructor(timeoutMs: number) {
+    super(`timed out after ${timeoutMs} ms`);
+  }
+}
+
 /**
  * A read made on each scrape, bounded in time, keeping its last value when it
  * fails: one read in flight at a time, shared by every gauge of the scrape.
@@ -92,15 +102,14 @@ class BoundedRead<T> {
     let timer: ReturnType<typeof setTimeout> | undefined;
     const timeout = new Promise<never>((_, reject) => {
       timer = setTimeout(
-        () => reject(new Error(`timed out after ${this.options.timeoutMs} ms`)),
+        () => reject(new ReadTimeoutError(this.options.timeoutMs)),
         this.options.timeoutMs,
       );
     });
     try {
       this.last = await Promise.race([this.read(), timeout]);
     } catch (error) {
-      const reason = error instanceof Error ? error.message : String(error);
-      this.options.log.warn(`${this.what} read failed, keeping the last value: ${reason}`);
+      this.options.log.warn(`${this.what} read failed, keeping the last value: ${describeError(error)}`);
     } finally {
       clearTimeout(timer);
     }

@@ -36,10 +36,12 @@ export class SqsEventPublisher implements EventPublisher {
     );
     const messageAt = (entryId: string | undefined): OutboxMessage | undefined => messages[Number(entryId)];
     const published = (response.Successful ?? []).flatMap((entry) => messageAt(entry.Id)?.id ?? []);
+    // A refusal is reported by its code only: the reason reaches the logs, and
+    // SQS's free-text message is never logged.
     const refused = new Map(
       (response.Failed ?? []).flatMap((entry) => {
         const id = messageAt(entry.Id)?.id;
-        return id === undefined ? [] : [[id, `${entry.Code}: ${entry.Message ?? 'no message'}`] as const];
+        return id === undefined ? [] : [[id, entry.Code ?? 'unknown SQS error'] as const];
       }),
     );
     const sent = new Set(published);

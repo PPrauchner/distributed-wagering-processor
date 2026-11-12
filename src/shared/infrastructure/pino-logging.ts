@@ -3,8 +3,9 @@
  * current context — an `AsyncLocalStorage` opened per HTTP request or unit of
  * work outside HTTP — mixed into every line. The same logger serves Nest, as
  * its `LoggerService`, and the use cases, as their `ContextLog`. Money, balance
- * and body fields are redacted, a safety net under the rule of logging only
- * identifiers.
+ * and body fields are redacted at any depth, a safety net under the rule of
+ * logging only identifiers; an error is logged by name and failure code, its
+ * stack only at the debug level.
  *
  * @packageDocumentation
  */
@@ -12,6 +13,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import type { LoggerService } from '@nestjs/common';
 import pino, { type DestinationStream, type Logger } from 'pino';
 import type { ContextLog, LogContextFields, LogDetails } from '../application/context-log.ts';
+import { summarizeError } from '../application/error-summary.ts';
 
 const REDACTED_KEYS = [
   'money',
@@ -26,7 +28,37 @@ const REDACTED_KEYS = [
   'body',
   'payload',
 ];
-const REDACT_PATHS = REDACTED_KEYS.flatMap((key) => [key, `*.${key}`]);
+const REDACTED = new Set(REDACTED_KEYS);
+const CENSOR = '[redacted]';
+
+/**
+ * A copy of the logged object with every redacted key masked, at any depth. An
+ * object with a `toJSON` — `Money`, an event — is masked in the shape it would
+ * be serialized in; `seen` holds only the current path, so a reference shared
+ * by two branches is not taken for a cycle.
+ */
+function redact(value: unknown, seen = new WeakSet<object>()): unknown {
+  if (typeof value !== 'object' || value === null) return value;
+  if (seen.has(value)) return '[circular]';
+  const toJSON: unknown = Reflect.get(value, 'toJSON');
+  if (typeof toJSON === 'function') {
+    seen.add(value);
+    const serialized = redact(toJSON.call(value), seen);
+    seen.delete(value);
+    return serialized;
+  }
+  if (!Array.isArray(value) && Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null) {
+    return value;
+  }
+  seen.add(value);
+  const copy = Array.isArray(value)
+    ? value.map((item) => redact(item, seen))
+    : Object.fromEntries(
+        Object.entries(value).map(([key, field]) => [key, REDACTED.has(key) ? CENSOR : redact(field, seen)]),
+      );
+  seen.delete(value);
+  return copy;
+}
 
 /** The context of the current request or unit of work, carried across its awaits. */
 export class LogContextStore {
@@ -68,7 +100,7 @@ export function createPinoLogger(context: LogContextStore, destination?: Destina
       base: undefined,
       timestamp: pino.stdTimeFunctions.isoTime,
       mixin: () => ({ ...context.get() }),
-      redact: { paths: REDACT_PATHS, censor: '[redacted]' },
+      formatters: { log: (object) => redact(object) as Record<string, unknown> },
     },
     destination,
   );
@@ -102,16 +134,21 @@ export class PinoLoggerService implements LoggerService {
     this.write('fatal', message, params);
   }
 
-  // Nest passes the context last, and an error's stack before it.
+  // Nest passes the context last, and an error's stack before it. An error is
+  // logged by name and failure code: its message, cause and stack may carry
+  // values, so the stack goes only to the debug level.
   private write(level: pino.Level, message: unknown, params: unknown[]): void {
     const context = params.length > 0 && typeof params.at(-1) === 'string' ? (params.at(-1) as string) : undefined;
     if (message instanceof Error) {
-      this.logger[level]({ context, err: message }, message.message);
+      const summary = summarizeError(message);
+      this.logger[level]({ context, ...summary }, summary.error);
+      this.logger.debug({ context, stack: message.stack }, summary.error);
       return;
     }
     const stack = level === 'error' && params.length > 1 ? params[0] : undefined;
-    if (typeof message === 'string') this.logger[level]({ context, stack }, message);
-    else this.logger[level]({ context, stack, data: message });
+    if (typeof message === 'string') this.logger[level]({ context }, message);
+    else this.logger[level]({ context, data: message });
+    if (stack !== undefined) this.logger.debug({ context, stack }, 'stack of the error above');
   }
 }
 

@@ -19,6 +19,7 @@
 import { FaultPoint, type FaultInjection } from '../../shared/application/fault-injector.ts';
 import type { UnitOfWork } from '../../shared/application/unit-of-work.ts';
 import type { ContextLog } from '../../shared/application/context-log.ts';
+import { describeError } from '../../shared/application/error-summary.ts';
 import { STUCK_ATTEMPTS, type OutboxMessage, type RetryBackoff } from '../domain/outbox-message.ts';
 import type { EventPublisher, PublishResult } from './event-publisher.ts';
 import type { OutboxMetrics } from './outbox-metrics.ts';
@@ -94,7 +95,7 @@ export class PublishOutbox {
     try {
       result = await this.publisher.publish(messages);
     } catch (error) {
-      const reason = error instanceof Error ? error.message : String(error);
+      const reason = describeError(error);
       this.log.warn(`outbox batch of ${messages.length} could not be sent, rescheduled: ${reason}`);
       return { published: [], failed: messages.map((message) => ({ id: message.id, reason })) };
     }

@@ -110,11 +110,83 @@ describe('pino logging', () => {
     expect(lines[0]).toMatchObject({ context: 'Test' });
   });
 
-  test("Nest's errors keep their message and context", () => {
+  test('money nested at any depth is redacted', () => {
     const { lines, nest } = capture();
 
-    nest.error(new Error('boom'), 'HttpErrorFilter');
+    nest.log({ data: { transaction: { money: { amount: '123.45' } } }, items: [{ balance: '987.65' }] }, 'Test');
+    nest.warn({ result: { wallet: { storedBalance: '555.55' } } }, 'Test');
 
-    expect(lines[0]).toMatchObject({ level: 50, msg: 'boom', context: 'HttpErrorFilter' });
+    const raw = JSON.stringify(lines);
+    expect(raw).not.toContain('123.45');
+    expect(raw).not.toContain('987.65');
+    expect(raw).not.toContain('555.55');
+    expect(lines[0]).toMatchObject({ data: { data: { transaction: { money: '[redacted]' } } } });
+  });
+
+  test('money inside an object serialized by its toJSON is redacted', () => {
+    const { lines, nest } = capture();
+    class Event {
+      toJSON(): unknown {
+        return { kind: 'BET', payload: { money: { amount: '123.45' }, balanceAfter: '987.65' } };
+      }
+    }
+    class Amount {
+      toJSON(): unknown {
+        return { amount: '555.55', currency: 'BRL' };
+      }
+    }
+
+    nest.log({ event: new Event(), price: new Amount() }, 'Test');
+
+    const raw = JSON.stringify(lines);
+    expect(raw).not.toContain('123.45');
+    expect(raw).not.toContain('987.65');
+    expect(raw).not.toContain('555.55');
+    expect(lines[0]).toMatchObject({ data: { event: { kind: 'BET', payload: '[redacted]' }, price: { currency: 'BRL' } } });
+  });
+
+  test('the same object logged in two places is not taken for a cycle', () => {
+    const { lines, nest } = capture();
+    const wallet = { walletId: 'wallet-1' };
+
+    nest.log({ from: wallet, to: wallet }, 'Test');
+
+    expect(lines[0]).toMatchObject({ data: { from: { walletId: 'wallet-1' }, to: { walletId: 'wallet-1' } } });
+  });
+
+  test("Nest's errors are logged by name and failure code, never by message", () => {
+    const { lines, nest } = capture();
+    const error = Object.assign(new Error('insert into ledger values (123.45)', { cause: new Error('987.65') }), {
+      failureCode: 'INFRA_UNEXPECTED',
+    });
+
+    nest.error(error, 'HttpErrorFilter');
+
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatchObject({ level: 50, msg: 'Error', error: 'Error', failureCode: 'INFRA_UNEXPECTED', context: 'HttpErrorFilter' });
+    const raw = JSON.stringify(lines);
+    expect(raw).not.toContain('123.45');
+    expect(raw).not.toContain('987.65');
+  });
+
+  test("an error's stack goes only to the debug level", () => {
+    const debugLines: Record<string, unknown>[] = [];
+    const logger = createPinoLogger(new LogContextStore(), { write: (line: string) => debugLines.push(JSON.parse(line)) });
+    logger.level = 'debug';
+
+    new PinoLoggerService(logger).error(new TypeError('a bug'), 'Test');
+
+    expect(debugLines.map((line) => line.level)).toEqual([50, 20]);
+    expect(debugLines[0]).not.toHaveProperty('stack');
+    expect(debugLines[1]).toHaveProperty('stack');
+  });
+
+  test("Nest's string errors keep their stack out of the error line", () => {
+    const { lines, nest } = capture();
+
+    nest.error('handler failed', 'Error: secret 123.45\n    at x', 'ExceptionsHandler');
+
+    expect(lines).toEqual([expect.objectContaining({ level: 50, msg: 'handler failed', context: 'ExceptionsHandler' })]);
+    expect(JSON.stringify(lines)).not.toContain('123.45');
   });
 });
