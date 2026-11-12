@@ -3,7 +3,9 @@
  * both present, the key unique) and the initial balance, which the replay
  * returns. Existing wallets get their initial balance from the opening entry,
  * or zero when they have none. The identity trigger of 0004 is extended to the
- * new columns: none of them ever changes.
+ * new columns: none of them ever changes. The ledger trigger's events raised by
+ * the backfill are checked before the second `ALTER TABLE`, which would
+ * otherwise refuse to run over a table with wallets.
  *
  * @packageDocumentation
  */
@@ -28,6 +30,10 @@ export class Migration0012WalletCreationIdempotency extends Migration {
                0),
              initial_balance_currency = w.currency;
     `);
+    // The backfill fires the deferred ledger trigger of 0003 once per wallet, and
+    // PostgreSQL refuses ALTER TABLE on a table with pending trigger events (55006).
+    // Checking now drains them: balance and version are untouched, so they pass.
+    this.addSql('set constraints wallets_balance_ledger immediate;');
     this.addSql(`
       alter table wallets
         alter column initial_balance_amount set not null,
