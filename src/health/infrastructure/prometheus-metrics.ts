@@ -15,6 +15,7 @@
 import { Counter, Gauge, Histogram, Registry } from 'prom-client';
 import type { ConsumerMetrics } from '../../messaging/application/consumer-metrics.ts';
 import type { OutboxBacklog } from '../../messaging/application/outbox-backlog.ts';
+import type { OutboxMetrics } from '../../messaging/application/outbox-metrics.ts';
 import {
   LOCK_CONFLICT_REASONS,
   TRANSIENT_FAILURE_CODES,
@@ -114,7 +115,9 @@ function zero<L extends string>(counter: Counter<L>, values: Record<L, readonly 
   for (const labels of combinations(values)) counter.inc(labels, 0);
 }
 
-export class PrometheusMetrics implements WageringMetrics, ConsumerMetrics, ReconciliationDivergenceCounter {
+export class PrometheusMetrics
+  implements WageringMetrics, ConsumerMetrics, OutboxMetrics, ReconciliationDivergenceCounter
+{
   readonly registry = new Registry();
   private readonly transactions: Counter<'kind' | 'status' | 'channel'>;
   private readonly replays: Counter<'channel'>;
@@ -126,6 +129,7 @@ export class PrometheusMetrics implements WageringMetrics, ConsumerMetrics, Reco
   private readonly lockConflicts: Counter<'reason'>;
   private readonly latency: Histogram<'channel' | 'kind'>;
   private readonly divergences: Counter;
+  private readonly outboxRetries: Counter;
 
   /**
    * @param sources - What is read on each scrape: the outbox backlog, the DLQ depth.
@@ -192,6 +196,11 @@ export class PrometheusMetrics implements WageringMetrics, ConsumerMetrics, Reco
       help: 'Reconciliations that found the stored balance or the ledger sequence divergent.',
       registers,
     });
+    this.outboxRetries = new Counter({
+      name: 'outbox_publish_retries_total',
+      help: 'Outbox messages rescheduled after a failed send.',
+      registers,
+    });
     zero(this.transactions, { kind: PROVIDER_KINDS, status: COUNTED_STATUSES, channel: CHANNELS });
     zero(this.replays, { channel: CHANNELS });
     zero(this.idempotencyConflicts, { channel: CHANNELS });
@@ -201,7 +210,7 @@ export class PrometheusMetrics implements WageringMetrics, ConsumerMetrics, Reco
     zero(this.lockConflicts, { reason: LOCK_CONFLICT_REASONS });
 
     // Both gauges are collected in the same scrape: they share one read.
-    const backlogRead = new BoundedRead('outbox backlog', sources.readBacklog, { pending: 0, lagSeconds: 0 }, options);
+    const backlogRead = new BoundedRead('outbox backlog', sources.readBacklog, { pending: 0, lagSeconds: 0, stuck: 0 }, options);
     const backlog = () => backlogRead.current();
     new Gauge({
       name: 'outbox_pending',
@@ -217,6 +226,14 @@ export class PrometheusMetrics implements WageringMetrics, ConsumerMetrics, Reco
       registers,
       async collect() {
         this.set((await backlog()).lagSeconds);
+      },
+    });
+    new Gauge({
+      name: 'outbox_stuck_messages',
+      help: 'Outbox messages not published yet after 10 failed attempts or more.',
+      registers,
+      async collect() {
+        this.set((await backlog()).stuck);
       },
     });
     const dlqDepth = new BoundedRead('DLQ depth', sources.readDlqDepth, 0, options);
@@ -259,6 +276,10 @@ export class PrometheusMetrics implements WageringMetrics, ConsumerMetrics, Reco
 
   deadLettered(failureCode: string): void {
     this.deadLetters.inc({ failure_code: failureCode });
+  }
+
+  publishRetry(): void {
+    this.outboxRetries.inc();
   }
 
   increment(): void {
