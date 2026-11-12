@@ -85,8 +85,16 @@ curl -s -X POST http://127.0.0.1:3000/wagering/transactions \
 Repetir a aposta com a mesma `Idempotency-Key` devolve o mesmo resultado, com
 `idempotentReplay: true` e sem novo débito. Repetir a criação da carteira devolve
 409 `WALLET_ALREADY_EXISTS` com o `walletId` existente: há uma carteira por
-jogador e moeda. As rotas de consulta e de
-reconciliação são as do §9 do enunciado. Os status HTTP e os códigos de falha
+jogador e moeda.
+
+```bash
+# Confere o saldo da carteira contra o livro-razão (só leitura)
+curl -s -X POST http://127.0.0.1:3000/wallets/<walletId>/reconciliation
+```
+
+A resposta traz `consistent`, o saldo guardado e o reconstruído, a diferença, os
+buracos na sequência de versões (`versionGaps`) e as versões da carteira e do
+último lançamento. As demais rotas de consulta são as do §9 do enunciado. Os status HTTP e os códigos de falha
 estão em [`ARCHITECTURE.md` § Status HTTP](ARCHITECTURE.md#status-http) e
 [§ Códigos de falha](ARCHITECTURE.md#códigos-de-falha).
 
@@ -131,8 +139,25 @@ A fila de entrada é `wager-transactions.fifo`. Cada mensagem leva o envelope do
   paralelo;
 - `MessageDeduplicationId` = `messageId` do envelope.
 
+Pelo `awslocal` de dentro do container do LocalStack (sem AWS CLI no host), a mesma
+aposta do exemplo HTTP, agora pela fila:
+
+```bash
+docker compose exec localstack awslocal sqs send-message \
+  --queue-url http://localhost:4566/000000000000/wager-transactions.fifo \
+  --message-group-id <walletId> \
+  --message-deduplication-id msg-123 \
+  --message-body '{"messageId":"msg-123","type":"WagerTransactionRequested","occurredAt":"2026-07-29T15:00:00.000Z","data":{"providerId":"provider-a","externalTransactionId":"transaction-124","idempotencyKey":"provider-a:transaction-124","playerId":"0192f28f-5dc0-7d58-bdb2-814ad6a0f4a1","walletId":"<walletId>","roundId":"round-987","gameId":"fortune-chimp","kind":"BET","money":{"amount":"25.00","currency":"BRL"}}}'
+```
+
+Com o AWS CLI no host, o comando é o mesmo com `aws --endpoint-url
+http://127.0.0.1:4566` no lugar de `awslocal` (credenciais quaisquer, região
+`us-east-1`). Para reenviar à fila o que está na DLQ, ver
+[`ARCHITECTURE.md` § Limitações conhecidas](ARCHITECTURE.md#limitações-conhecidas).
+
 Os desfechos são publicados em `wagering-events.fifo` (`WagerTransactionProcessed`,
-`WagerTransactionRejected`, `WagerTransactionFailed`, `WalletBalanceChanged`). Uma
+`WagerTransactionRejected`, `WagerTransactionPendingReference`,
+`WagerTransactionFailed`, `WalletBalanceChanged`). Uma
 submissão não admitida vai à DLQ com o atributo `failureCode`. Detalhes em
 [`ARCHITECTURE.md` § Consumidor](ARCHITECTURE.md#consumidor).
 
