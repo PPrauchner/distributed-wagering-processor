@@ -3,7 +3,7 @@
  *
  * @packageDocumentation
  */
-import { Money } from '../../shared/domain/money.ts';
+import { CurrencyMismatchError, Money } from '../../shared/domain/money.ts';
 import { LedgerDirection, WalletLedgerEntry } from './wallet-ledger-entry.ts';
 
 /**
@@ -169,6 +169,7 @@ export class Wallet {
    *   maximum — check {@link Wallet.canCredit} first.
    */
   credit(props: MovementProps): WalletLedgerEntry {
+    this.assertSameCurrency(props.money);
     if (!this.canCredit(props.money)) {
       throw new BalanceLimitExceededError(`crediting ${props.money} would take wallet ${this.id} past the maximum balance`);
     }
@@ -186,6 +187,7 @@ export class Wallet {
    *   exceeds the balance — check {@link Wallet.canDebit} first.
    */
   debit(props: MovementProps): WalletLedgerEntry {
+    this.assertSameCurrency(props.money);
     return this.move(LedgerDirection.Debit, props, this._balance.subtract(props.money));
   }
 
@@ -206,6 +208,13 @@ export class Wallet {
   canCredit(money: Money): boolean {
     const maximum = Money.fromPersisted({ amount: MAX_BALANCE, currency: this.currency });
     return !maximum.isLessThan(this._balance.add(money));
+  }
+
+  /** @throws {@link CurrencyMismatchError} If the amount is not in the wallet's currency. */
+  private assertSameCurrency(money: Money): void {
+    if (money.currency !== this.currency) {
+      throw new CurrencyMismatchError(`wallet ${this.id} is in ${this.currency}, not ${money.currency}`);
+    }
   }
 
   private move(direction: LedgerDirection, props: MovementProps, balanceAfter: Money): WalletLedgerEntry {
