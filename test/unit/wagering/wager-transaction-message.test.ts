@@ -58,6 +58,10 @@ describe('parseWagerTransactionMessage', () => {
     expect(message.command.correlationId).toBe('corr-1');
   });
 
+  test.each(['2026-07-29T15:00:00Z', '2026-07-29T12:00:00.5-03:00'])('accepts occurredAt %s', (occurredAt) => {
+    expect(parseWagerTransactionMessage(envelope({ occurredAt }), {}).messageId).toBe('msg-123');
+  });
+
   test('keeps the reference of a dependent transaction', () => {
     const withReference = { ...data, kind: 'REFUND', referenceExternalTransactionId: 'bet-1' };
 
@@ -74,6 +78,12 @@ describe('parseWagerTransactionMessage', () => {
     ['data without idempotencyKey', envelope({ data: { ...data, idempotencyKey: undefined } })],
     ['an unknown data field', envelope({ data: { ...data, channel: 'SQS' } })],
     ['money that is not an object', envelope({ data: { ...data, money: '25.00' } })],
+    ['a type other than WagerTransactionRequested', envelope({ type: 'Foo' })],
+    ['a type that is not a string', envelope({ type: 1 })],
+    ['an occurredAt that is a number', envelope({ occurredAt: 42 })],
+    ['an occurredAt that is not ISO-8601', envelope({ occurredAt: 'yesterday' })],
+    ['an occurredAt without a time zone', envelope({ occurredAt: '2026-07-29T15:00:00' })],
+    ['an occurredAt that is not a real date', envelope({ occurredAt: '2026-02-30T15:00:00Z' })],
   ])('refuses %s', (_case, body) => {
     expect(() => parseWagerTransactionMessage(body, {})).toThrow(InvalidPayloadError);
   });

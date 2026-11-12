@@ -74,9 +74,9 @@ const STATUS_CODES: Partial<Record<WagerTransactionStatus, number>> = {
  * @param body - The untrusted request body.
  * @param headers - The `Idempotency-Key` and `X-Correlation-Id` headers; an
  *   empty correlation id counts as absent, and the use case generates one.
- * @returns The submission command.
- * @throws {@link MissingIdempotencyKeyError} If the key is absent or empty —
- *   checked before the body.
+ * @returns The submission command, with the key trimmed.
+ * @throws {@link MissingIdempotencyKeyError} If the key is absent, empty or
+ *   only whitespace — checked before the body.
  * @throws {@link InvalidPayloadError} If the body has a wrong shape, a wrong type
  *   or any unknown field, at any level.
  */
@@ -84,7 +84,8 @@ export function parseSubmitWagerTransactionRequest(
   body: unknown,
   headers: { idempotencyKey?: string; correlationId?: string },
 ): SubmitWagerTransactionCommand {
-  if (!headers.idempotencyKey) throw new MissingIdempotencyKeyError();
+  const idempotencyKey = headers.idempotencyKey?.trim();
+  if (!idempotencyKey) throw new MissingIdempotencyKeyError();
   const request = expectExactObject(body, FIELDS, 'body', OPTIONAL_FIELDS);
   const money = expectExactObject(request.money, ['amount', 'currency'], 'body.money');
   const strings = Object.fromEntries(
@@ -92,7 +93,7 @@ export function parseSubmitWagerTransactionRequest(
   ) as Record<(typeof STRING_FIELDS)[number], string>;
   return {
     ...strings,
-    idempotencyKey: headers.idempotencyKey,
+    idempotencyKey,
     correlationId: headers.correlationId || undefined,
     money: {
       amount: expectString(money.amount, 'body.money.amount'),
