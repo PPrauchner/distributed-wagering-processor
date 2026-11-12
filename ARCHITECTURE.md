@@ -234,8 +234,8 @@ Unicidade da reversão: índice único parcial em `reference_transaction_id` com
   lock, numa única consulta (snapshot consistente) — saldo, soma com sinal dos
   lançamentos, contagem, buracos na sequência e maior versão lançada. A resposta
   do §9 ganha `versionGaps`, `walletVersion` e `lastEntryVersion`. Divergência de
-  valor, buraco ou lançamento acima da versão da carteira → `consistent: false`, log `error`
-  e métrica; nada é corrigido; HTTP 200, porque o achado é o relatório.
+  valor, buraco ou lançamento acima da versão da carteira → `consistent: false`, log
+  `warn` com `walletId` como campo (sem valores) e métrica; nada é corrigido; HTTP 200, porque o achado é o relatório.
 
 ## Reembolso e reversão
 
@@ -618,8 +618,10 @@ a falha transitória nunca vira `FAILED`, nem esgotada.
   mostra o mesmo `eventId` e o mesmo corpo nas duas publicações.
 - Polling a cada 500 ms, lotes de até 10, lease de 30 s. Falha → `scheduleRetry`
   com `min(1 s × 2^attempts, 5 min)` e jitter. **Sem limite de tentativas** —
-  desistir perderia evento confirmado; a partir de 10 tentativas, métrica e log de
-  alerta. Um lote cheio dispara o ciclo seguinte na hora, sem esperar o polling.
+  desistir perderia evento confirmado. Cada reagendamento conta em
+  `outbox_publish_retries_total`; a 10ª tentativa falha gera um log de alerta com
+  o id e o tipo da mensagem (sem payload), e a partir dela a mensagem conta em
+  `outbox_stuck_messages`. Um lote cheio dispara o ciclo seguinte na hora, sem esperar o polling.
 - **Três passos, duas transações SQL curtas, nenhuma na carteira:** reivindicação
   (`PublishOutbox`, um único `UPDATE … WHERE id IN (SELECT … FOR UPDATE SKIP LOCKED
   LIMIT 10) RETURNING id`), envio fora de transação, e gravação do desfecho de cada
@@ -745,34 +747,52 @@ uma porta de identidade do provedor. O ponto de extensão no código:
   `failureCode` — nunca valores nem payload; o `redact` do pino (dinheiro, saldos,
   corpos) é a rede.
 - **Métricas:** prom-client em `GET /metrics`, aberto, num registro próprio por
-  aplicação (os testes sobem várias num processo). Todas existem desde a partida:
-  - `wager_transactions_total{kind,status,channel}` — transações novas;
+  aplicação (os testes sobem várias num processo). Todas existem desde a partida,
+  e as séries das combinações conhecidas de label — derivadas dos enums, não de
+  lista à mão — começam em 0: `kind` (sem `OPENING`) × `status` (sem `PENDING`) ×
+  `channel` (`HTTP`, `QUEUE`, `WORKER`), `channel`, `reason`, `failure_code`
+  (todos os códigos; nos retries do consumidor, só os transitórios). O
+  histograma não é pré-registrado.
+  - `wager_transactions_total{kind,status,channel}` — transações novas, pelo
+    status com que foram gravadas; `channel="WORKER"` é o desfecho que o worker
+    de referências pendentes gravou;
   - `wager_transaction_idempotent_replays_total{channel}`;
   - `wager_transaction_idempotency_conflicts_total{channel}`;
   - `rejected_submissions_total{failure_code,channel}` — submissões não admitidas;
-  - `inbox_duplicates_total` — registrada em zero, incrementada pelo consumidor;
-  - `lock_conflicts_total{reason}` — `lock_timeout`, `deadlock` ou
-    `serialization_failure`, que o classificador distingue pelo SQLSTATE;
-  - `outbox_pending` e `outbox_lag_seconds` (`now() − min(occurred_at)` das não
-    publicadas), lidos do banco numa única leitura por scrape, compartilhada
-    pelos dois gauges, com limite de 1 s — se a leitura
-    falha ou estoura o prazo, os gauges ficam no último valor lido e a falha vai
-    para o log, e o resto do `/metrics` continua sendo coletado;
-  - `wager_transaction_processing_seconds{channel,kind}` — histograma da latência
-    das submissões que terminaram numa transação;
-  - `reconciliation_divergences_total`.
-
+  - `inbox_duplicates_total` — mensagens que o inbox já tinha;
   - `wager_transactions_consumer_retries_total{failure_code}` — entregas da fila
     de entrada devolvidas para retry;
   - `wager_transactions_dlq_messages_total{failure_code}` — envios à DLQ feitos
-    pela aplicação.
+    por este processo;
+  - `wager_transactions_dlq_depth` — `ApproximateNumberOfMessages` da DLQ, lido
+    do SQS no scrape: cobre o redrive nativo e sobrevive a restart;
+  - `lock_conflicts_total{reason}` — `lock_timeout`, `deadlock` ou
+    `serialization_failure`, que o classificador distingue pelo SQLSTATE; vêm do
+    processamento, do worker de pendentes e da criação de carteira (que não
+    define `lock_timeout`: ali só os outros dois);
+  - `pending_reference_retries_total` — pendentes que o worker reagendou, ainda
+    esperando a referência ou após uma falha transitória;
+  - `outbox_publish_retries_total` — mensagens da outbox reagendadas após um
+    envio que falhou;
+  - `outbox_pending`, `outbox_lag_seconds` (`now() − min(occurred_at)` das não
+    publicadas) e `outbox_stuck_messages` (não publicadas com 10 tentativas ou
+    mais), lidos do banco numa única consulta por scrape, compartilhada pelos
+    três gauges;
+  - `wager_transaction_processing_seconds{channel,kind,outcome}` — histograma da
+    latência de cada submissão: `outcome` é `settled` (terminou numa transação,
+    replay incluído), `not_admitted`, `transient` ou `permanent`; `kind` fora do
+    enum vira `UNKNOWN`. Uma reentrega que o inbox já tinha não é observada;
+  - `reconciliation_divergences_total`.
 
-  A profundidade da DLQ (`ApproximateNumberOfMessages` no scrape, que cobriria o
-  redrive) ainda não entra.
+  As leituras do scrape (backlog da outbox e profundidade da DLQ) têm limite de
+  1 s cada; se uma falha ou estoura o prazo, seus gauges ficam no último valor
+  lido, a falha vai para o log, e o resto do `/metrics` continua sendo coletado.
 - **Health:** `/health/live` responde 200 enquanto o processo vive, sem tocar no
   banco nem na fila; `/health/ready` roda `SELECT 1` e `GetQueueAttributes` nas
-  filas de entrada e de eventos, cada um com timeout de 1 s, e responde 200 ou 503
-  com o estado de cada sonda. As sondas de fila têm um cliente SQS próprio, sem
+  filas de entrada, de eventos e na DLQ, cada um com timeout de 1 s, e responde
+  200 ou 503 com o estado de cada sonda (`checks`) e, para as que caíram, o
+  motivo (`reasons`: o nome do erro, ou `TimeoutError`; nunca a stack). Cada
+  sonda que falha gera um log `warn` com o nome da sonda e o do erro. As sondas de fila têm um cliente SQS próprio, sem
   retry, para falhar dentro do prazo. Nenhum dos dois é autenticado.
 
 ## Testes
