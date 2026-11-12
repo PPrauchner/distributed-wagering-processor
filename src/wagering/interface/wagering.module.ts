@@ -67,16 +67,18 @@ export class WageringModule {
         },
         {
           provide: ResolvePendingReferences,
-          inject: [UNIT_OF_WORK, CONTEXT_LOG],
+          inject: [UNIT_OF_WORK, CONTEXT_LOG, WAGERING_METRICS],
           useFactory: (
             unitOfWork: UnitOfWork<WalletRepositories & WageringRepositories & OutboxRepositories & FaultInjection>,
             log: ContextLog,
+            metrics: WageringMetrics,
           ) =>
             new ResolvePendingReferences(
               unitOfWork,
               () => Bun.randomUUIDv7(),
               { leaseMs: config.pendingReferences.leaseMs, referenceWait },
               log,
+              metrics,
             ),
         },
         {

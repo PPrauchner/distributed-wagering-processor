@@ -51,7 +51,7 @@ import {
 import { enqueueOutcomeEvents, settleOnWallet, type ReferenceWaitPolicy } from './settle-wager-transaction.ts';
 import { hashWagerPayload, type WagerPayload } from './wager-payload.ts';
 import type { WagerTransactionRepository, WageringRepositories } from './wager-transaction-repository.ts';
-import type { WageringMetrics } from './wagering-metrics.ts';
+import { UNKNOWN_KIND, type ProcessingFailure, type WageringMetrics } from './wagering-metrics.ts';
 import {
   DuplicateExternalIdError,
   DuplicateIdempotencyKeyError,
@@ -85,6 +85,17 @@ export interface WagerTransactionOutcome {
 }
 
 const KINDS = new Set<string>(Object.values(WagerTransactionKind));
+
+/**
+ * How a submission that did not end in a transaction ended; `undefined` for a
+ * redelivery the inbox already held — not a processing, counted as a duplicate.
+ */
+function processingFailureOf(error: unknown): ProcessingFailure | undefined {
+  if (error instanceof InboxRedeliveryError) return undefined;
+  if (error instanceof TransientFailureError) return 'transient';
+  if (error instanceof PermanentFailureError) return 'permanent';
+  return 'not_admitted';
+}
 
 export class ProcessWagerTransaction {
   constructor(
@@ -132,7 +143,9 @@ export class ProcessWagerTransaction {
     channel: SubmissionChannel,
     inbox?: InboxEntry,
   ): Promise<WagerTransactionOutcome> {
-    return this.observed(channel, () => this.redeliveryChecked(command, inbox, () => this.process(command, inbox)));
+    return this.observed(channel, command.kind, () =>
+      this.redeliveryChecked(command, inbox, () => this.process(command, inbox)),
+    );
   }
 
   /**
@@ -165,9 +178,13 @@ export class ProcessWagerTransaction {
     }
   }
 
-  /** Logs, counts and times the submission once it ended in a transaction. */
+  /**
+   * Logs, counts and times the submission once it ended in a transaction;
+   * times it too, by how it ended, when it did not.
+   */
   private async observed(
     channel: SubmissionChannel,
+    submittedKind: string,
     work: () => Promise<WagerTransactionOutcome>,
   ): Promise<WagerTransactionOutcome> {
     const started = performance.now();
@@ -184,6 +201,12 @@ export class ProcessWagerTransaction {
     } catch (error) {
       if (error instanceof IdempotencyConflictError) this.metrics.idempotencyConflict(channel);
       if (error instanceof TransientFailureError && error.lockConflict) this.metrics.lockConflict(error.lockConflict);
+      const outcome = processingFailureOf(error);
+      if (outcome) {
+        const kind = KINDS.has(submittedKind) ? (submittedKind as WagerTransactionKind) : UNKNOWN_KIND;
+        const durationSeconds = (performance.now() - started) / 1000;
+        this.metrics.processingFailed({ channel, kind, outcome, durationSeconds });
+      }
       throw error;
     }
   }

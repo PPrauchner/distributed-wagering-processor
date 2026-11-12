@@ -14,6 +14,9 @@
  * - records the outcome's events with the transaction's original correlation
  *   id, in the SQL transaction of the outcome.
  *
+ * Each recorded outcome, each reschedule and each lock conflict is counted
+ * (`ARCHITECTURE.md` § Observabilidade), on the `WORKER` channel.
+ *
  * A transient failure reschedules the item, with no limit of attempts — the
  * TTL already limits the wait; a permanent one — or one the classifier left
  * unclassified, recorded `INFRA_UNEXPECTED` — records it `FAILED` in a second
@@ -35,6 +38,7 @@ import { WagerTransactionStatus, type WagerTransaction } from '../domain/wager-t
 import { rejectOn } from '../domain/wallet-coherence.ts';
 import { enqueueOutcomeEvents, settleOnWallet, type ReferenceWaitPolicy } from './settle-wager-transaction.ts';
 import type { PendingReferenceClaim, WageringRepositories } from './wager-transaction-repository.ts';
+import type { WageringMetrics } from './wagering-metrics.ts';
 
 /** How many pending references one cycle claims. */
 export const PENDING_REFERENCES_BATCH_SIZE = 10;
@@ -52,6 +56,7 @@ export class ResolvePendingReferences {
     private readonly generateId: () => string,
     private readonly options: ResolvePendingReferencesOptions,
     private readonly log: ContextLog,
+    private readonly metrics: WageringMetrics,
   ) {}
 
   /**
@@ -85,9 +90,13 @@ export class ResolvePendingReferences {
 
   private async resolveOne(claim: PendingReferenceClaim): Promise<void> {
     try {
-      await this.attempt(claim);
+      const attempted = await this.attempt(claim);
+      // Counted once committed.
+      if (attempted === 'retried') this.metrics.pendingReferenceRetried();
+      else if (attempted) this.metrics.pendingReferenceResolved(attempted.kind, attempted.status);
     } catch (error) {
       if (error instanceof TransientFailureError) {
+        if (error.lockConflict) this.metrics.lockConflict(error.lockConflict);
         this.log.info('pending reference attempt failed transiently, rescheduled', { failureCode: error.failureCode });
         await this.rescheduleAfterTransient(claim);
         return;
@@ -101,15 +110,20 @@ export class ResolvePendingReferences {
     }
   }
 
-  /** The unit of work that resolves the item, or counts and reschedules it. */
-  private attempt(claim: PendingReferenceClaim): Promise<void> {
+  /**
+   * The unit of work that resolves the item, or counts and reschedules it.
+   *
+   * @returns The transaction resolved, `'retried'` when rescheduled, nothing
+   *   when another worker resolved it first.
+   */
+  private attempt(claim: PendingReferenceClaim): Promise<WagerTransaction | 'retried' | undefined> {
     return this.unitOfWork.run(async ({ wallets, ledger, transactions, outbox, faults }) => {
       // The wallet lock comes first, as in every SQL transaction touching a wallet (ADR 0002).
       const wallet = await wallets.findByIdForUpdate(claim.walletId);
       await faults.inject(FaultPoint.TransientFailureInResolution, { transactionId: claim.transactionId });
       const pending = await transactions.findById(claim.transactionId);
       // Another worker resolved it meanwhile.
-      if (!wallet || !pending || pending.status !== WagerTransactionStatus.PendingReference) return;
+      if (!wallet || !pending || pending.status !== WagerTransactionStatus.PendingReference) return undefined;
       this.log.enrich({ correlationId: pending.correlationId, providerId: pending.providerId });
 
       // The reference is looked for before the TTL: one that arrived is never turned down for being late.
@@ -119,7 +133,7 @@ export class ResolvePendingReferences {
           rejectOn(pending, wallet, { code: FailureCode.ReferenceNotFound });
         } else {
           pending.retryReference(new Date(), this.options.referenceWait.backoff);
-          return;
+          return 'retried';
         }
       }
       if (entry) ledger.add(entry);
@@ -130,6 +144,7 @@ export class ResolvePendingReferences {
       );
       this.logSettled(pending);
       await faults.inject(FaultPoint.InvariantViolationBeforeCommit, { transactionId: pending.id });
+      return pending;
     });
   }
 
@@ -139,11 +154,13 @@ export class ResolvePendingReferences {
    */
   private async rescheduleAfterTransient(claim: PendingReferenceClaim): Promise<void> {
     try {
-      await this.unitOfWork.run(async ({ transactions }) => {
+      const rescheduled = await this.unitOfWork.run(async ({ transactions }) => {
         const pending = await transactions.findById(claim.transactionId);
-        if (pending?.status !== WagerTransactionStatus.PendingReference) return;
+        if (pending?.status !== WagerTransactionStatus.PendingReference) return false;
         pending.retryReference(new Date(), this.options.referenceWait.backoff);
+        return true;
       });
+      if (rescheduled) this.metrics.pendingReferenceRetried();
     } catch (error) {
       if (!(error instanceof TransientFailureError)) throw error;
       this.log.info('pending reference not rescheduled; its lease will expire', { failureCode: error.failureCode });
@@ -159,6 +176,7 @@ export class ResolvePendingReferences {
       return pending;
     });
     if (failed) {
+      this.metrics.pendingReferenceResolved(failed.kind, failed.status);
       this.log.warn('pending reference failed permanently', {
         failureCode: error.failureCode,
         error: errorName(error.cause ?? error),

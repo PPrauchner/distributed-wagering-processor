@@ -24,7 +24,12 @@ import {
 import { FailureCode } from '../../shared/domain/failure-code.ts';
 import { SubmissionChannel } from '../../wagering/domain/rejected-submission.ts';
 import { WagerTransactionKind, WagerTransactionStatus } from '../../wagering/domain/wager-transaction.ts';
-import type { WagerTransactionObservation, WageringMetrics } from '../../wagering/application/wagering-metrics.ts';
+import {
+  WORKER_CHANNEL,
+  type ProcessingFailureObservation,
+  type WagerTransactionObservation,
+  type WageringMetrics,
+} from '../../wagering/application/wagering-metrics.ts';
 import type { ReconciliationDivergenceCounter } from '../../wallet/application/reconciliation.ts';
 
 /** Latency buckets, in seconds: a submission takes milliseconds, up to the 2 s lock timeout. */
@@ -37,6 +42,8 @@ const COUNTED_STATUSES = Object.values(WagerTransactionStatus).filter(
   (status) => status !== WagerTransactionStatus.Pending,
 );
 const CHANNELS = Object.values(SubmissionChannel);
+/** Where a new transaction's outcome is recorded: the submission channels and the worker. */
+const OUTCOME_CHANNELS = [...CHANNELS, WORKER_CHANNEL];
 const FAILURE_CODES = Object.values(FailureCode);
 
 /** Where a failed read is reported. */
@@ -127,7 +134,8 @@ export class PrometheusMetrics
   private readonly consumerRetries: Counter<'failure_code'>;
   private readonly deadLetters: Counter<'failure_code'>;
   private readonly lockConflicts: Counter<'reason'>;
-  private readonly latency: Histogram<'channel' | 'kind'>;
+  private readonly latency: Histogram<'channel' | 'kind' | 'outcome'>;
+  private readonly pendingReferenceRetries: Counter;
   private readonly divergences: Counter;
   private readonly outboxRetries: Counter;
 
@@ -186,8 +194,10 @@ export class PrometheusMetrics
     });
     this.latency = new Histogram({
       name: 'wager_transaction_processing_seconds',
-      help: 'Processing time of a submission that ended in a transaction, by channel and kind.',
-      labelNames: ['channel', 'kind'],
+      help:
+        'Processing time of a submission, by channel, kind (UNKNOWN when it named none) and outcome: ' +
+        'settled, not_admitted, transient or permanent.',
+      labelNames: ['channel', 'kind', 'outcome'],
       buckets: LATENCY_BUCKETS,
       registers,
     });
@@ -196,12 +206,17 @@ export class PrometheusMetrics
       help: 'Reconciliations that found the stored balance or the ledger sequence divergent.',
       registers,
     });
+    this.pendingReferenceRetries = new Counter({
+      name: 'pending_reference_retries_total',
+      help: 'Pending references the worker rescheduled: still waiting for the reference, or a transient failure.',
+      registers,
+    });
     this.outboxRetries = new Counter({
       name: 'outbox_publish_retries_total',
       help: 'Outbox messages rescheduled after a failed send.',
       registers,
     });
-    zero(this.transactions, { kind: PROVIDER_KINDS, status: COUNTED_STATUSES, channel: CHANNELS });
+    zero(this.transactions, { kind: PROVIDER_KINDS, status: COUNTED_STATUSES, channel: OUTCOME_CHANNELS });
     zero(this.replays, { channel: CHANNELS });
     zero(this.idempotencyConflicts, { channel: CHANNELS });
     zero(this.notAdmitted, { failure_code: FAILURE_CODES, channel: CHANNELS });
@@ -251,7 +266,20 @@ export class PrometheusMetrics
     const { channel, kind, status, idempotentReplay, durationSeconds } = observation;
     if (idempotentReplay) this.replays.inc({ channel });
     else this.transactions.inc({ kind, status, channel });
-    this.latency.observe({ channel, kind }, durationSeconds);
+    this.latency.observe({ channel, kind, outcome: 'settled' }, durationSeconds);
+  }
+
+  processingFailed(observation: ProcessingFailureObservation): void {
+    const { channel, kind, outcome, durationSeconds } = observation;
+    this.latency.observe({ channel, kind, outcome }, durationSeconds);
+  }
+
+  pendingReferenceResolved(kind: WagerTransactionKind, status: WagerTransactionStatus): void {
+    this.transactions.inc({ kind, status, channel: WORKER_CHANNEL });
+  }
+
+  pendingReferenceRetried(): void {
+    this.pendingReferenceRetries.inc();
   }
 
   idempotencyConflict(channel: SubmissionChannel): void {
