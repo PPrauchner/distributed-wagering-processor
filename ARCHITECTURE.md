@@ -524,8 +524,9 @@ Disparar o `22003` é bug.
 erro permanente já sofreu rollback, uma **segunda unidade de trabalho** grava a
 transação de aposta como `FAILED`, com o código de falha (e o inbox, quando a
 entrada é a fila), pela chave de idempotência, começando pelo lock da carteira (ver
-[Concorrência](#concorrência)) — sem saldo observado, sem lançamento
-e sem evento. No HTTP, a resposta é 500 com `transactionId`, `status: FAILED` e
+[Concorrência](#concorrência)) — sem saldo observado e sem lançamento, com
+`WagerTransactionFailed` na outbox (ver [Eventos de
+integração](#eventos-de-integração)). No HTTP, a resposta é 500 com `transactionId`, `status: FAILED` e
 `failureCode`, e o replay (mesma chave e hash) devolve o mesmo 500 com
 `idempotentReplay: true`; hash diferente → 409 `IDEMPOTENCY_CONFLICT`. A segunda
 unidade de trabalho relê a chave antes de gravar: se um concorrente já a gravou, ou
@@ -688,12 +689,18 @@ ao worker, minutos depois, emitir a pendente resolvida com o contexto original;
 | `WagerTransactionProcessed` | `referenceTransactionId` (se houver), `balanceAfter`, `walletVersion`, `processedAt` |
 | `WagerTransactionRejected` | `failureCode`, `balanceAfter`, `walletVersion`, `rejectedAt` |
 | `WagerTransactionPendingReference` | `expiresAt` (criação + TTL) |
+| `WagerTransactionFailed` | `failureCode`, `failedAt` — sem `balanceAfter` nem `walletVersion`: o `FAILED` não observa a carteira |
 | `WalletBalanceChanged` | o `data` do §11 (só `walletId`, `transactionId`, `direction`, `money`, `balanceBefore`, `balanceAfter`, `walletVersion`) |
 
 O `WalletBalanceChanged` sai com o `Processed` só quando o saldo muda; a `LOSS`
-emite só o `Processed`. `FAILED` não emite evento: não está nos mínimos e é falha
-nossa, não fato de negócio — o sinal é o log de alerta e a métrica. A rejeição de
-uma pendente (TTL ou referência inválida) emite `Rejected`.
+emite só o `Processed`. `FAILED` emite `WagerTransactionFailed`, além dos quatro
+mínimos do §11: quem submete pela fila não tem resposta síncrona e só conhece o
+desfecho pelos eventos — sem ele, o provedor não saberia que precisa reenviar com
+chave nova. Vai na outbox pela unidade de trabalho que grava o `FAILED` (a do use
+case, por HTTP ou fila, e a do worker de referências pendentes), na mesma
+transação SQL, sozinho; quando a chave já tem desfecho (replay ou corrida), nada é
+enfileirado. O log de alerta e a métrica continuam sendo o sinal operacional. A
+rejeição de uma pendente (TTL ou referência inválida) emite `Rejected`.
 
 ## Referências fora de ordem
 
@@ -720,7 +727,7 @@ latência da pendente é limitada pelo intervalo do worker.
 - **Erros:** transitório reagenda com o mesmo backoff e conta nos retries do
   worker, sem limite de tentativas — o TTL já limita a vida da pendente; permanente
   grava `FAILED` (`INFRA_INVARIANT_VIOLATION` ou `INFRA_UNEXPECTED`) numa segunda
-  unidade de trabalho, com alerta. O desfecho é gravado na transação SQL que trava a
+  unidade de trabalho, com `WagerTransactionFailed` e alerta. O desfecho é gravado na transação SQL que trava a
   carteira, e o item é relido sob lock: se outro worker já o resolveu, sai sem
   efeito.
 - **Agendamento:** `attempts` e `next_attempt_at` em `wager_transactions`; a
@@ -934,5 +941,13 @@ uma porta de identidade do provedor. O ponto de extensão no código:
   o grupo assim que uma mensagem dele fica visível, outra instância pode recebê-las
   antes, e a ordem do grupo se inverte. No SQS real, o grupo fica bloqueado
   enquanto a anterior está em voo.
+- Devolver uma mensagem com visibilidade 0 no `SIGTERM` conta como recebimento:
+  com reinícios seguidos, ela pode esgotar o `maxReceiveCount` e chegar à DLQ pelo
+  redrive nativo sem ter falhado — sem desfecho gravado, portanto reprocessável.
+- Não há heartbeat de visibilidade: o visibility timeout é de 30 s
+  (`WAGER_TRANSACTIONS_VISIBILITY_SECONDS`) e não é estendido durante o
+  processamento. Como as mensagens de um grupo rodam em série, o pior caso de um
+  lote é ~10 × `lock_timeout` de 2 s ≈ 20 s, abaixo do timeout. Se ele expirar
+  mesmo assim, a mensagem é reentregue e o inbox impede efeito duplicado.
 - A auditoria das submissões não admitidas é de melhor esforço: com o banco fora do
   ar, a resposta sai igual e a linha se perde (o erro é logado).
