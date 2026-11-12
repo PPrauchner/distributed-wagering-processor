@@ -7,7 +7,7 @@
 import 'reflect-metadata';
 import { Module, type DynamicModule, type INestApplication } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
-import type { DestinationStream } from 'pino';
+import type { DestinationStream, LevelWithSilent } from 'pino';
 import type { AppConfig, SqsConfig } from './config.ts';
 import { DatabaseModule } from './database/database.module.ts';
 import { HealthModule } from './health/interface/health.module.ts';
@@ -114,6 +114,11 @@ export interface CreateAppOptions {
   /** Where the JSON log lines go; stdout by default. The tests read them. */
   logDestination?: DestinationStream;
   /**
+   * The log's level, over the configuration's: a test that reads the lines
+   * fixes its own, whatever `LOG_LEVEL` the suite runs with.
+   */
+  logLevel?: LevelWithSilent;
+  /**
    * How the process dies at an enabled crash fault point. `main.ts` gives the
    * real death, `SIGKILL`; in process — the integration tests — the default
    * `SimulatedCrashError` keeps the test runner alive.
@@ -128,13 +133,13 @@ export interface CreateAppOptions {
 
 /**
  * @param config - Service configuration.
- * @param options - Where the logs go, how a crash fault point dies, and who
- *   the requests are authenticated as.
+ * @param options - Where the logs go and at which level, how a crash fault
+ *   point dies, and who the requests are authenticated as.
  * @returns The application, initialized but not listening yet.
  */
 export async function createApp(config: AppConfig, options: CreateAppOptions = {}): Promise<INestApplication> {
   const logContext = new LogContextStore();
-  const logger = createPinoLogger(logContext, options.logDestination);
+  const logger = createPinoLogger(logContext, options.logDestination, options.logLevel ?? config.logLevel);
   const appModule = AppModule.forConfig(
     config,
     new PinoContextLog(logger, logContext),
