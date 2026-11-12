@@ -40,7 +40,8 @@ process.env.WAGER_TRANSACTIONS_CONSUMER_ENABLED = 'false';
 process.env.PENDING_REFERENCES_WORKER_ENABLED = 'false';
 // The app's JSON log would bury the runner's failures and summary: silent,
 // unless LOG_LEVEL is already set — `LOG_LEVEL=info bun run test:integration`
-// turns it back on, for the apps in process and those spawned alike.
+// turns it back on for the apps in process. The processes the concurrency suite
+// spawns ignore it: they always log at `info`, each to a file of its own.
 process.env.LOG_LEVEL ??= 'silent';
 
 const orm = await MikroORM.init(createOrmConfig(process.env.DATABASE_URL));
