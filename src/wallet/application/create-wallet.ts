@@ -97,8 +97,9 @@ export class CreateWallet<TOpeningRepositories = unknown> {
    * @throws {@link WalletAlreadyExistsError} If the player already has a wallet in
    *   that currency that the key did not create — also when a simultaneous
    *   creation without that key wins the race.
-   * @throws {@link TransientFailureError} If the creation waited on a lock
-   *   past the lock timeout — counted — or the database was unavailable.
+   * @throws {@link TransientFailureError} If the creation hit a lock conflict
+   *   (deadlock or serialization failure — counted; it sets no `lock_timeout`)
+   *   or the database was unavailable.
    */
   async execute(command: CreateWalletCommand): Promise<CreatedWallet> {
     try {

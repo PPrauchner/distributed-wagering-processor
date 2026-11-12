@@ -3,7 +3,7 @@
 O schema que as migrations do serviço produzem, e as invariantes que ele garante
 sozinho, sem depender do código. Escrito a partir do catálogo do PostgreSQL
 (`pg_constraint`, `pg_indexes`, `pg_trigger`) depois de aplicar as migrations
-`0001`–`0013` num banco limpo pelo runner Bun (`bun run db:migrate up`), e
+`0001`–`0014` num banco limpo pelo runner Bun (`bun run db:migrate up`), e
 conferido na volta (`down` deixa só a tabela de controle do MikroORM).
 
 As migrations ficam em `src/<módulo>/infrastructure/migrations/`.

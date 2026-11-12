@@ -2,10 +2,43 @@
 
 Decisões, trade-offs e limitações da solução. Este documento é o mapa: cada seção
 resume a decisão e aponta para o ADR que guarda o porquê completo
-(`docs/adr/`). O vocabulário segue o glossário em `CONTEXT.md`.
+(`docs/adr/`). O vocabulário segue o glossário em `CONTEXT.md`. Setup e comandos
+ficam no [`README.md`](README.md).
 
-> **Esqueleto em construção.** Seções marcadas *A definir* ainda não foram
-> decididas; cada decisão nova atualiza a seção correspondente.
+## Sumário
+
+- [Trade-offs principais](#trade-offs-principais)
+- [Visão geral](#visão-geral) · [Organização do código](#organização-do-código)
+- Dados: [Persistência e ORM](#persistência-e-orm) ·
+  [Mapeamento do `Money`](#mapeamento-do-money) ·
+  [Estratégia transacional](#estratégia-transacional) ·
+  [Concorrência](#concorrência) · [Invariantes no schema](#invariantes-no-schema)
+- Regras: [Carteira e livro-razão](#carteira-e-livro-razão) ·
+  [Reembolso e reversão](#reembolso-e-reversão) ·
+  [Transições da transação de aposta](#transições-da-transação-de-aposta) ·
+  [Ordem das validações](#ordem-das-validações) ·
+  [Idempotência e deduplicação](#idempotência-e-deduplicação)
+- Erros: [Status HTTP](#status-http) · [Códigos de falha](#códigos-de-falha) ·
+  [Classificação de falhas](#classificação-de-falhas)
+- Assíncrono: [Mensageria: SQS, inbox e outbox](#mensageria-sqs-inbox-e-outbox) ·
+  [Referências fora de ordem](#referências-fora-de-ordem)
+- [Autenticação](#autenticação) · [Observabilidade](#observabilidade) ·
+  [Testes](#testes)
+- [Interpretações do enunciado](#interpretações-do-enunciado) ·
+  [Evolução possível](#evolução-possível) ·
+  [Limitações conhecidas](#limitações-conhecidas)
+
+## Trade-offs principais
+
+| Decisão | Custo aceito | Detalhe |
+|---|---|---|
+| **Lock pessimista** na linha da carteira, não lock otimista por `version` | a vazão de uma carteira é limitada pela duração da transação; sob disputa, a espera passa de 2 s e vira 503 com retry | [Concorrência](#concorrência), [ADR 0002](docs/adr/0002-lock-pessimista-por-carteira.md) |
+| **Submissão HTTP síncrona**, com desfecho e saldo na resposta, em vez de 202 + worker | a requisição espera o lock; picos numa carteira não são absorvidos por fila | [Visão geral](#visão-geral) |
+| **Desvio do §6.0:** as classes de domínio são as entidades do ORM, hidratadas por `Object.create` | a factory `rehydrate` não é o caminho de leitura do ORM; a garantia (não revalidar transições) se mantém | [Persistência e ORM](#persistência-e-orm) |
+| **Outbox sem limite de tentativas** | uma mensagem que nunca publica fica para sempre na outbox; vira alerta e `outbox_stuck_messages`, não DLQ | [Publicador da outbox](#publicador-da-outbox) |
+| **Eventos pelo menos uma vez** | o consumidor dos eventos precisa deduplicar por `eventId` e ordenar por `walletVersion` | [Publicador da outbox](#publicador-da-outbox), [Eventos de integração](#eventos-de-integração) |
+| **Uma reversão por referência**, de qualquer tipo, em vez de uma por tipo (§7, regra 4) | depois de `BET` → `REFUND` → `ROLLBACK` do `REFUND`, a aposta não pode mais ser desfeita | [Reembolso e reversão](#reembolso-e-reversão) |
+| **`WALLET_NOT_FOUND` como 422**, sem transação; **na fila, retry transitório** antes da DLQ | o HTTP não grava nada (o reenvio depois de criar a carteira passa); a fila segura a mensagem ~30 s antes de desistir, cobrindo a corrida criação-por-HTTP × `BET`-pela-fila | [Submissões não admitidas](#submissões-não-admitidas) |
 
 ## Visão geral
 
@@ -98,6 +131,25 @@ Entre os módulos, a direção é **`health` → `wagering` → `wallet` → `me
 infraestrutura e migrations programáticas por script Bun. Ver
 [ADR 0001](docs/adr/0001-mikroorm-7-com-invariantes-no-schema.md).
 
+**Por que o MikroORM.** É o preferido do enunciado, e pelos recursos de que este
+desenho depende:
+
+- **Unit of Work** — o use case altera carteira, transação de aposta, lançamento,
+  inbox e outbox como objetos, e um único flush grava tudo na transação SQL que já
+  segura o lock;
+- **Identity Map** — dentro da unidade de trabalho, a carteira travada é a mesma
+  instância em todo repositório que a lê, então ninguém aplica regra sobre uma
+  cópia desatualizada;
+- **`em.transactional()` e `LockMode.PESSIMISTIC_WRITE`** — a transação SQL e o
+  `SELECT … FOR UPDATE` da carteira saem do ORM, sem SQL à mão no caminho principal.
+
+Com o TypeORM, aceito pelo enunciado, a transação com lock e a gravação de cada
+objeto teriam de ser orquestradas à mão. O MikroORM 7 trocou o Knex pelo Kysely e
+desacoplou core e drivers do Node, o que tirou o atrito com o Bun; o
+`defineEntity` dispensa decorators no domínio. As garantias financeiras não
+dependem do ORM: moram no schema ([Invariantes no schema](#invariantes-no-schema)),
+e trocar de ORM afetaria só a infraestrutura.
+
 - **Desvio declarado do §6.0 do enunciado:** o MikroORM hidrata as entidades por
   `Object.create`, sem passar pela factory `rehydrate`. A garantia do §6.0 se
   mantém — reidratar não revalida transições —, e o `rehydrate` existe para
@@ -137,6 +189,15 @@ infraestrutura a implementa com `em.fork().transactional()`. Transação de apos
 saldo, lançamento, inbox e evento da outbox são confirmados juntos numa única
 transação SQL. Vale igual para HTTP, fila e workers. Ver
 [ADR 0001](docs/adr/0001-mikroorm-7-com-invariantes-no-schema.md).
+
+**Por que assim.** Uma transação SQL por submissão é o que dá a atomicidade que o
+§5 exige — nada é publicado antes do commit, porque o evento é só uma linha da
+outbox no mesmo commit, e o inbox e a chave de idempotência confirmam junto com o
+saldo, então uma reentrega nunca encontra o efeito pela metade. O `em.fork()` dá a
+cada execução seu próprio Identity Map: duas mensagens processadas em paralelo
+na mesma instância não compartilham estado do ORM. A porta `UnitOfWork` deixa a
+abertura da transação com o use case — o mesmo nas três entradas, como pede o §10
+—, sem que `application/` importe o `EntityManager`.
 
 ## Concorrência
 
@@ -209,8 +270,10 @@ com as quatro colunas, e `wager_transactions_ledger_terms_unique` `(id,
 wallet_id, amount, currency)` existe só para isso — a PK já garante a
 unicidade. O custo é um índice a mais em todo insert de transação; o ganho é o
 schema recusar sozinho um lançamento de valor, moeda ou carteira diferente dos
-da transação. A FK pode ser imediata porque essas colunas da transação nunca
-mudam (`wager_transactions_identity_immutable`).
+da transação. A FK é checada no commit (`DEFERRABLE INITIALLY DEFERRED`, 0014),
+como a outra FK do lançamento para a transação; o alvo dela é estável porque
+essas colunas da transação nunca mudam (trigger `wager_transactions_guard`, que
+recusa a mudança de identidade com `wager_transactions_identity_immutable`).
 
 **Saldo máximo:** `99999999999999999.99`, o limite de `numeric(19,2)`. Não há
 `CHECK` próprio: o tipo da coluna já recusa o valor acima dele (`22003`) antes de
@@ -224,7 +287,11 @@ valores do banco por `Money.fromPersisted`, sem esse teto, e reporta saldos de
 16 e 17 dígitos normalmente.
 
 Tempos que dependem de relógio — TTL das pendentes e leases dos workers — usam o
-`now()` do banco, nunca o relógio da instância.
+`now()` do banco, nunca o relógio da instância: quem decide se um item está
+vencido é a própria query (a reivindicação filtra `next_attempt_at <= now()`; o
+TTL é `created_at + ttl <= now()`). O `OutboxMessage.isDue(now)` do domínio
+expressa a mesma regra, mas não decide nada em produção — só os testes de unidade
+o chamam.
 
 Unicidade da reversão: índice único parcial em `reference_transaction_id` com
 `WHERE status = 'PROCESSED' AND kind IN ('REFUND', 'ROLLBACK')` — ver
@@ -769,7 +836,39 @@ uma porta de identidade do provedor. O ponto de extensão no código:
   `INVALID_PAYLOAD` de forma vêm antes. As rotas de carteira e a consulta por id
   interno não declaram provedor: o guard só resolve a identidade.
 
-*A definir* — o desenho que seria adotado com Keycloak.
+### Desenho com Keycloak (não implementado)
+
+- **Um client por provedor**, num realm dedicado aos provedores de jogos:
+  *confidential client* com só o fluxo **client credentials** (OAuth 2.0)
+  habilitado — sem usuário, sem navegador. O provedor troca `client_id` e
+  `client_secret` (ou `private_key_jwt`, para não trafegar segredo) por um access
+  token curto (5 min) e o manda em `Authorization: Bearer <token>`.
+- **Claim de identidade:** `providerId` sai de um claim próprio,
+  `provider_id`, posto no token por um *hardcoded claim mapper* do client — não do
+  `azp`/`client_id`, para que o nome técnico do client possa mudar (rotação,
+  ambiente) sem mudar o `providerId` gravado nas transações. Um *audience mapper*
+  põe o serviço em `aud`.
+- **Validação no serviço, sem chamada ao Keycloak por requisição:** uma
+  implementação `JwtProviderIdentity` da porta `ProviderIdentity`, em
+  `shared/infrastructure`, verifica a assinatura pelo JWKS do realm (chaves em
+  cache, recarregadas quando aparece um `kid` desconhecido), `iss`, `aud`, `exp`
+  e a presença de `provider_id`, lendo o token de `headers` do
+  `ProviderIdentityRequest`. Token ausente ou inválido → 401, com um código novo
+  no enum (`UNAUTHENTICATED`) e sem transação de aposta; o 403
+  `PROVIDER_IDENTITY_MISMATCH` segue igual, agora contra uma identidade de fato
+  autenticada.
+- **Troca:** só o provider `PROVIDER_IDENTITY` em `src/app.ts` muda, de
+  `DeclaredProviderIdentity` para `JwtProviderIdentity`; o guard, os controllers e
+  os use cases não mudam. Configuração por `AUTH_ISSUER_URL` e `AUTH_AUDIENCE`.
+- **Fila:** continua sem token. Ela é canal interno; quem pode enviar a ela é
+  decidido por política de IAM da fila (um principal por provedor), e o
+  `providerId` do envelope seria conferido contra o atributo de sistema `SenderId`
+  da mensagem, mapeado para o provedor.
+- **Rotas administrativas** (criação de carteira, reconciliação) passariam a
+  exigir um client de operação com um *role* próprio, verificado por um segundo
+  guard; hoje são abertas, como o resto.
+- **No Compose:** um serviço `keycloak` com o realm importado de um JSON
+  versionado, com um client por provedor dos testes.
 
 ## Observabilidade
 
@@ -833,6 +932,46 @@ uma porta de identidade do provedor. O ponto de extensão no código:
   sonda que falha gera um log `warn` com o nome da sonda e o do erro. As sondas de fila têm um cliente SQS próprio, sem
   retry, para falhar dentro do prazo. Nenhum dos dois é autenticado.
 
+### Métricas com várias instâncias
+
+Cada instância expõe o próprio `/metrics`, e o Prometheus raspa todas. Na
+agregação:
+
+- **Contadores e o histograma** são por processo: some entre as instâncias
+  (`sum by (…) (rate(wager_transactions_total[5m]))`;
+  `histogram_quantile(0.99, sum by (le) (rate(wager_transaction_processing_seconds_bucket[5m])))`).
+- **Gauges globais** — `outbox_pending`, `outbox_lag_seconds`,
+  `outbox_stuck_messages` e `wager_transactions_dlq_depth` — são lidos do banco ou
+  do SQS, iguais em toda instância: **não some**. Use `max()` entre as instâncias,
+  ou raspe só uma para esses quatro; somar três réplicas triplica o backlog.
+
+### Diagnóstico
+
+| Sintoma | Onde olhar | Ação |
+|---|---|---|
+| Muitos 503 / retries na fila | `lock_conflicts_total{reason}`, `wager_transactions_consumer_retries_total{failure_code}` | `lock_timeout` concentrado numa carteira é disputa (esperado); `TRANSIENT_UNAVAILABLE` é banco ou SQS fora — `/health/ready` diz qual |
+| DLQ crescendo | `wager_transactions_dlq_depth`, `wager_transactions_dlq_messages_total{failure_code}`, `rejected_submissions` | pelo `failureCode`: `INVALID_PAYLOAD`/conflitos são do provedor; `INFRA_RETRIES_EXHAUSTED`/`WALLET_NOT_FOUND` são reprocessáveis — redrive (ver [Limitações conhecidas](#limitações-conhecidas)) |
+| Eventos atrasando | `outbox_lag_seconds`, `outbox_pending`, `outbox_publish_retries_total` | log `warn` do publicador traz o motivo do envio recusado; fila de eventos inexistente ou SQS fora |
+| Mensagem da outbox que não sai | `outbox_stuck_messages`, log de alerta da 10ª tentativa (id e tipo) | corrigir a causa; ela continua sendo tentada sozinha, sem limite |
+| Pendentes acumulando | `pending_reference_retries_total`, `wager_transactions_total{status="PENDING_REFERENCE"}` | referência não enviada pelo provedor; o TTL de 5 min as rejeita com `REFERENCE_NOT_FOUND` |
+| `FAILED` / 500 | `wager_transactions_total{status="FAILED"}`; log `error` do filtro HTTP; na fila, `warn` `queue message sent to the DLQ` com o `failureCode`; no worker, `warn` `pending reference failed permanently` | `INFRA_INVARIANT_VIOLATION` é bug: o schema recusou o que o domínio deixou passar |
+| Saldo divergente | `reconciliation_divergences_total`, log `warn` com o `walletId` | `POST /wallets/:walletId/reconciliation` para ver valor e buracos; nada é corrigido sozinho |
+
+**Seguir uma submissão de ponta a ponta pelo `correlationId`:**
+
+1. **Entrada.** No HTTP, é o `X-Correlation-Id` enviado; sem ele, o use case gera
+   um. Na fila, é o atributo de mensagem `correlationId`, ou o `messageId` do
+   envelope.
+2. **Logs.** Toda linha emitida dentro da requisição ou da mensagem traz o campo
+   `correlationId`: filtrar por ele junta entrada, use case, consumidor e envio à
+   DLQ, com `transactionId` e `walletId` ao lado.
+3. **Banco.** `wager_transactions.correlation_id` guarda o id na primeira
+   gravação (é por aí que se acha o id gerado, que a resposta HTTP não devolve);
+   uma submissão não admitida fica em `rejected_submissions.correlation_id`.
+4. **Eventos.** Todo evento na `wagering-events.fifo` leva o mesmo `correlationId`
+   no envelope, com `causationId` = `transactionId` — inclusive o desfecho que o
+   worker de pendentes grava minutos depois.
+
 ## Testes
 
 - `test:unit` (sem I/O), `test:integration` (app em processo contra PostgreSQL e
@@ -885,6 +1024,54 @@ uma porta de identidade do provedor. O ponto de extensão no código:
   `test/integration/support/shutdown-on-ipc.ts` o emite no processo, pelos mesmos
   listeners do `enableShutdownHooks`; nos demais sistemas, sinal de verdade.
 
+## Interpretações do enunciado
+
+Onde o enunciado (`docs/Desafio.md`) é ambíguo ou silencia, a leitura adotada — a
+maioria decidida nos grills do PRD (`docs/grills_logs/transversal/prd.md` e
+`lacunas-prd.md`) e detalhada na seção indicada:
+
+- **Submissão HTTP síncrona** (§9, §10): a resposta traz o desfecho e o saldo;
+  `PENDING` nunca é persistido; o único aceite pendente é `PENDING_REFERENCE`
+  (202) — [Visão geral](#visão-geral).
+- **Hidratação sem a factory** (§6.0): desvio declarado — o MikroORM hidrata por
+  `Object.create` — [Persistência e ORM](#persistência-e-orm).
+- **"Arredondamento"** (§13): nada é arredondado; mais de 2 casas decimais é
+  recusado. Teto de 15 dígitos inteiros na entrada; piso por tipo; moeda por
+  `^[A-Z]{3}$`, sem lista ISO — [Mapeamento do `Money`](#mapeamento-do-money).
+- **`REFUND` e `ROLLBACK` da mesma referência** (§7, regra 4): uma referência é
+  desfeita no máximo uma vez, por qualquer dos dois tipos —
+  [Reembolso e reversão](#reembolso-e-reversão).
+- **Referência do `WIN` opcional** (§7): quando citada, resolve como a de uma
+  transação dependente, sem igualdade de valor e sem contar como desfazer; `LOSS`
+  não leva referência — [Reembolso e reversão](#reembolso-e-reversão).
+- **Rodada sem máquina de estados:** `WIN` sem `BET`, ou `WIN` e `LOSS` na mesma
+  rodada, são aceitos — [Transições](#transições-da-transação-de-aposta).
+- **Rejeição × submissão não admitida** (§10): só a rejeição de regra de negócio
+  cria transação de aposta `REJECTED`; payload inválido, conflito de chave e
+  carteira inexistente não criam nada e são auditados à parte —
+  [Submissões não admitidas](#submissões-não-admitidas).
+- **Na fila, toda submissão não admitida termina na DLQ**, com o código no
+  atributo `failureCode`; `WALLET_NOT_FOUND` passa antes pelo retry transitório —
+  [Consumidor](#consumidor).
+- **Replay devolve o saldo observado** na hora do desfecho, não o atual; replay
+  de uma pendente devolve o estado atual —
+  [Idempotência e deduplicação](#idempotência-e-deduplicação).
+- **`FAILED` é terminal para a chave** e publica `WagerTransactionFailed`, além
+  dos quatro eventos mínimos do §11: quem submete pela fila só conhece o desfecho
+  pelos eventos — [Eventos de integração](#eventos-de-integração).
+- **Criação de carteira idempotente por `Idempotency-Key` opcional**; saldo
+  inicial zero é permitido, sem abertura nem lançamento, e saldo positivo grava a
+  `OPENING` — [Carteira e livro-razão](#carteira-e-livro-razão).
+- **`MessageGroupId` = `walletId`** é contrato do produtor da fila de entrada
+  (§8: a carteira é a unidade de concorrência) — [Consumidor](#consumidor).
+- **Eventos pelo menos uma vez e sem ordem garantida** entre publicadores; o
+  consumidor deduplica por `eventId` e ordena por `walletVersion` os eventos que
+  a carregam —
+  [Publicador da outbox](#publicador-da-outbox).
+- **Prazo e leases pelo relógio do banco** (`now()`), nunca pelo da instância.
+- **Autenticação fora do escopo** (§2): guard no-op atrás de uma porta —
+  [Autenticação](#autenticação).
+
 ## Evolução possível
 
 - **Processamento assíncrono da submissão** — ver [Visão geral](#visão-geral).
@@ -918,10 +1105,22 @@ uma porta de identidade do provedor. O ponto de extensão no código:
   bug: corrigido o bug, o provedor reenvia com uma chave nova. Só erro permanente
   grava `FAILED`; a falha transitória esgotada não.
 - Eventos de uma mesma carteira podem ser publicados fora de ordem por publicadores
-  concorrentes; o consumidor ordena por `walletVersion`/`occurredAt`.
+  concorrentes. O consumidor ordena por `walletVersion` só os eventos que a
+  carregam — `WagerTransactionProcessed`, `WagerTransactionRejected` e
+  `WalletBalanceChanged`; `WagerTransactionPendingReference` e
+  `WagerTransactionFailed` não observam a carteira e não têm versão. E a versão
+  só avança quando o saldo muda: uma `LOSS` ou uma rejeição repete a versão do
+  último lançamento, então ela ordena mudanças de saldo, não todo evento —
+  dentro da mesma versão, vale o `occurredAt`.
 - Eventos são publicados pelo menos uma vez; duplicatas carregam o mesmo `eventId`
   e o mesmo corpo, e o consumidor deduplica por `eventId`.
 - Linhas publicadas da outbox não são expurgadas.
+- Vencimento é decidido pelo relógio do banco, na query: a reivindicação dos
+  workers (`next_attempt_at <= now()`) e o TTL das pendentes
+  (`created_at + ttl <= now()`). O `OutboxMessage.isDue` do domínio não é
+  consultado em produção — se divergir da query, vale a query. O `expiresAt` do
+  `WagerTransactionPendingReference` é calculado na aplicação (criação + TTL) e
+  é informativo.
 - A chave de idempotência da criação de carteira é global, não por provedor: a
   carteira não tem provedor e a autenticação está fora do escopo.
 - O saldo máximo é o limite técnico da coluna (`99999999999999999.99`), não uma
@@ -947,8 +1146,37 @@ uma porta de identidade do provedor. O ponto de extensão no código:
   redrive nativo sem ter falhado — sem desfecho gravado, portanto reprocessável.
 - Não há heartbeat de visibilidade: o visibility timeout é de 30 s
   (`WAGER_TRANSACTIONS_VISIBILITY_SECONDS`) e não é estendido durante o
-  processamento. Como as mensagens de um grupo rodam em série, o pior caso de um
-  lote é ~10 × `lock_timeout` de 2 s ≈ 20 s, abaixo do timeout. Se ele expirar
-  mesmo assim, a mensagem é reentregue e o inbox impede efeito duplicado.
+  processamento. As mensagens de um grupo rodam em série, e cada uma pode esperar
+  o lock até o `lock_timeout` de 2 s; no caminho do erro permanente, espera
+  **duas vezes** — na unidade de trabalho que falhou e na segunda, que grava o
+  `FAILED` começando pelo lock. O pior caso de um lote de 10 do mesmo grupo é
+  então ~10 × 2 × 2 s ≈ 40 s, acima do timeout; só com erro transitório ou sem
+  erro, ~20 s, abaixo. Se a visibilidade expirar, a mensagem é reentregue e o
+  inbox (ou a chave de idempotência) impede efeito duplicado.
+- **Banco fora do ar e a fila:** a falha é transitória, e a mensagem volta com
+  backoff de `min(2^n s, 60 s)` — 2 + 4 + 8 + 16 ≈ **30 s** entre o 1º e o 5º
+  recebimento. Uma queda mais longa que isso esgota as tentativas, e a mensagem vai
+  à DLQ sem desfecho (`INFRA_RETRIES_EXHAUSTED`, ou sem `failureCode` se nem a DLQ
+  pôde ser gravada — ver o item acima). Normalizado o banco, o **redrive** a
+  devolve à fila de entrada, e a idempotência torna o reprocessamento seguro:
+
+  ```bash
+  docker compose exec localstack awslocal sqs start-message-move-task \
+    --source-arn arn:aws:sqs:us-east-1:000000000000:wager-transactions-dlq.fifo \
+    --destination-arn arn:aws:sqs:us-east-1:000000000000:wager-transactions.fifo
+  docker compose exec localstack awslocal sqs list-message-move-tasks \
+    --source-arn arn:aws:sqs:us-east-1:000000000000:wager-transactions-dlq.fifo
+  ```
+
+  O `--destination-arn` é obrigatório no LocalStack 4.14: sem ele, a tarefa
+  termina `FAILED`. Antes, confira o `failureCode` das mensagens: as de
+  `INVALID_PAYLOAD` ou de conflito voltariam à DLQ, porque o defeito está nelas.
+- **`test:load` não existe.** O tempo foi para a correção sob concorrência
+  (`test:concurrency`, os 8 cenários do §13); não há números de vazão medidos.
+- O SQS é emulado pelo `localstack/localstack:4.14.0`, fixado: é a última imagem
+  que roda sem conta nem token (as tags posteriores e `latest` exigem). As
+  divergências conhecidas do SQS real estão nos itens acima e em
+  [Consumidor](#consumidor); a alternativa de saída é o MiniStack, no mesmo
+  endpoint `:4566`.
 - A auditoria das submissões não admitidas é de melhor esforço: com o banco fora do
   ar, a resposta sai igual e a linha se perde (o erro é logado).

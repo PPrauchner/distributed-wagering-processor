@@ -54,7 +54,8 @@ services:
         condition: service_healthy
 
   localstack:
-    # 4.14.0 é a última versão que roda sem conta/token (ver CLAUDE.md).
+    # 4.14.0 é a última versão que roda sem conta/token (ver ARCHITECTURE.md
+    # § Limitações conhecidas).
     image: localstack/localstack:4.14.0
     environment:
       SERVICES: sqs
