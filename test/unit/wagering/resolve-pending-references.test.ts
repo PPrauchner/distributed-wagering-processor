@@ -76,7 +76,7 @@ function database(options: { failureRecordingFails?: boolean } = {}): {
         { transactionId: POISON, walletId: `w-${POISON}` },
         { transactionId: HEALTHY, walletId: `w-${HEALTHY}` },
       ],
-      findById: async (id: string) => {
+      findByIdForUpdate: async (id: string) => {
         if (options.failureRecordingFails) throw new Error('the failure could not be recorded either');
         return pending(id);
       },

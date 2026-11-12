@@ -5,8 +5,8 @@
  *
  * - claims a batch of due ones by lease, in a short unit of work of its own;
  * - resolves each in a unit of work of its own that starts by locking its
- *   wallet and re-reads it under that lock — one already resolved by another
- *   worker is left alone;
+ *   wallet, then the item itself, and re-reads it under those locks — one
+ *   already resolved by another worker is left alone;
  * - looks for the reference **before** the TTL, with the rules of the arrival:
  *   present and valid → `PROCESSED`; present and invalid → `REJECTED` with its
  *   code; absent (or itself pending) with the TTL over → `REJECTED`
@@ -20,7 +20,10 @@
  * A transient failure reschedules the item, with no limit of attempts — the
  * TTL already limits the wait; a permanent one — or one the classifier left
  * unclassified, recorded `INFRA_UNEXPECTED` — records it `FAILED` in a second
- * unit of work, with `WagerTransactionFailed` and an alert. With no caller to tell, an error
+ * unit of work, with `WagerTransactionFailed` and an alert. Both re-read the
+ * item under its own lock and record nothing when another worker resolved it
+ * meanwhile — never an `INFRA_INVARIANT_VIOLATION` from the immutability
+ * trigger. With no caller to tell, an error
  * that still escapes an item is logged and left to its lease: the rest of the
  * batch goes on. A worker that dies leaves its items leased, and another takes
  * them once the lease expires.
@@ -121,7 +124,7 @@ export class ResolvePendingReferences {
       // The wallet lock comes first, as in every SQL transaction touching a wallet (ADR 0002).
       const wallet = await wallets.findByIdForUpdate(claim.walletId);
       await faults.inject(FaultPoint.TransientFailureInResolution, { transactionId: claim.transactionId });
-      const pending = await transactions.findById(claim.transactionId);
+      const pending = await transactions.findByIdForUpdate(claim.transactionId);
       // Another worker resolved it meanwhile.
       if (!wallet || !pending || pending.status !== WagerTransactionStatus.PendingReference) return undefined;
       this.log.enrich({ correlationId: pending.correlationId, providerId: pending.providerId });
@@ -155,7 +158,8 @@ export class ResolvePendingReferences {
   private async rescheduleAfterTransient(claim: PendingReferenceClaim): Promise<void> {
     try {
       const rescheduled = await this.unitOfWork.run(async ({ transactions }) => {
-        const pending = await transactions.findById(claim.transactionId);
+        // Under its lock: one another worker resolved meanwhile is left alone.
+        const pending = await transactions.findByIdForUpdate(claim.transactionId);
         if (pending?.status !== WagerTransactionStatus.PendingReference) return false;
         pending.retryReference(new Date(), this.options.referenceWait.backoff);
         return true;
@@ -174,7 +178,8 @@ export class ResolvePendingReferences {
    */
   private async recordFailure(claim: PendingReferenceClaim, error: PermanentFailureError): Promise<void> {
     const failed = await this.unitOfWork.run(async ({ transactions, outbox }) => {
-      const pending = await transactions.findById(claim.transactionId);
+      // Under its lock: one another worker resolved meanwhile is left alone.
+      const pending = await transactions.findByIdForUpdate(claim.transactionId);
       if (pending?.status !== WagerTransactionStatus.PendingReference) return undefined;
       pending.fail(error.failureCode);
       enqueueFailureEvent(outbox, pending, this.generateId);
