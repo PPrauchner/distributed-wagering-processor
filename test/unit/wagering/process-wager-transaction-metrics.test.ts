@@ -1,12 +1,16 @@
 /**
  * Unit tests for how `ProcessWagerTransaction` times a submission that did not
  * end in a transaction: only a refusal of the submission is `not_admitted`;
- * an error nobody translated — a bug — is `permanent`, never a refusal.
+ * an error nobody translated — a bug — whose `FAILED` could not be recorded
+ * either leaves as a permanent `INFRA_UNEXPECTED`, timed `permanent`, never a
+ * refusal.
  *
  * @packageDocumentation
  */
 import { describe, expect, test } from 'bun:test';
 import type { ContextLog } from '../../../src/shared/application/context-log.ts';
+import { FailureCode } from '../../../src/shared/domain/failure-code.ts';
+import { PermanentFailureError } from '../../../src/shared/application/infrastructure-failures.ts';
 import type { UnitOfWork } from '../../../src/shared/application/unit-of-work.ts';
 import {
   ProcessWagerTransaction,
@@ -38,8 +42,12 @@ const log: ContextLog = {
   warn: () => undefined,
 };
 
-/** Runs a submission whose unit of work throws `error`; returns the failures it timed. */
-async function failuresTimedFor(error: Error): Promise<ProcessingFailureObservation[]> {
+/**
+ * Runs a submission whose every unit of work throws `error`.
+ *
+ * @returns What the submission rejected with, and the failures it timed.
+ */
+async function failuresTimedFor(error: Error): Promise<{ rejection: unknown; failures: ProcessingFailureObservation[] }> {
   const failures: ProcessingFailureObservation[] = [];
   const metrics: WageringMetrics = {
     transactionSettled: () => undefined,
@@ -60,20 +68,28 @@ async function failuresTimedFor(error: Error): Promise<ProcessingFailureObservat
     backoff: { baseMs: 1000, maxMs: 5000 },
   });
 
-  await expect(useCase.execute(COMMAND, SubmissionChannel.Http)).rejects.toBe(error);
-  return failures;
+  const rejection = await useCase.execute(COMMAND, SubmissionChannel.Http).then(
+    () => undefined,
+    (thrown: unknown) => thrown,
+  );
+  return { rejection, failures };
 }
 
 describe('a submission that did not end in a transaction', () => {
   test('refused by its key is timed not_admitted', async () => {
-    const failures = await failuresTimedFor(new IdempotencyConflictError('provider-a', 'k', 'a'.repeat(64)));
+    const error = new IdempotencyConflictError('provider-a', 'k', 'a'.repeat(64));
+    const { rejection, failures } = await failuresTimedFor(error);
 
+    expect(rejection).toBe(error);
     expect(failures.map((failure) => failure.outcome)).toEqual(['not_admitted']);
   });
 
-  test('ended by an error nobody translated is timed permanent, not as a refusal', async () => {
-    const failures = await failuresTimedFor(new TypeError('cannot read properties of undefined'));
+  test('ended by an error nobody translated, its FAILED not recorded either, is a permanent INFRA_UNEXPECTED, not a refusal', async () => {
+    const bug = new TypeError('cannot read properties of undefined');
+    const { rejection, failures } = await failuresTimedFor(bug);
 
+    expect(rejection).toBeInstanceOf(PermanentFailureError);
+    expect(rejection).toMatchObject({ failureCode: FailureCode.InfraUnexpected, cause: bug });
     expect(failures.map((failure) => failure.outcome)).toEqual(['permanent']);
   });
 });

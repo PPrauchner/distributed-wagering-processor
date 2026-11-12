@@ -19,8 +19,13 @@ import { SQL } from 'bun';
 import { createApp } from '../../../src/app.ts';
 import { loadConfig, type AppConfig } from '../../../src/config.ts';
 import { PrometheusMetrics } from '../../../src/health/infrastructure/prometheus-metrics.ts';
-import { FaultPoint } from '../../../src/shared/application/fault-injector.ts';
+import { MikroORM } from '@mikro-orm/postgresql';
+import { MikroOrmUnitOfWork, type Repositories } from '../../../src/database/mikro-orm-unit-of-work.ts';
+import type { ContextLog } from '../../../src/shared/application/context-log.ts';
+import { FaultPoint, SimulatedBugError } from '../../../src/shared/application/fault-injector.ts';
+import type { UnitOfWork } from '../../../src/shared/application/unit-of-work.ts';
 import { ResolvePendingReferences } from '../../../src/wagering/application/resolve-pending-references.ts';
+import { WAGERING_METRICS } from '../../../src/wagering/application/wagering-metrics.ts';
 import { expectLedgerConsistent } from '../ledger-invariant.ts';
 import { waitUntil } from '../../support/wait-until.ts';
 
@@ -113,6 +118,40 @@ async function submit(
   return { status: response.status, body: (await response.json()) as JsonObject };
 }
 
+/**
+ * The first app's unit of work, where the attempt on `target` runs `race`
+ * holding its wallet lock, then fails transiently — a real `lock_not_available`
+ * — unless `race` threw first. Every other item is resolved as usual.
+ */
+function racingUnitOfWork(target: string, race: () => Promise<void>): UnitOfWork<Repositories> {
+  const real = new MikroOrmUnitOfWork(apps[0]!.get(MikroORM).em, [FaultPoint.TransientFailureInResolution]);
+  return {
+    run: (work) =>
+      real.run((repositories) =>
+        work({
+          ...repositories,
+          faults: {
+            inject: async (point, context) => {
+              if (point !== FaultPoint.TransientFailureInResolution || context.transactionId !== target) return;
+              await race();
+              await repositories.faults.inject(point, context);
+            },
+          },
+        }),
+      ),
+  };
+}
+
+function logSpy(): ContextLog & { warnings: string[] } {
+  const warnings: string[] = [];
+  return {
+    warnings,
+    inContext: (_fields, work) => work(),
+    enrich: () => undefined,
+    info: () => undefined,
+    warn: (line) => void warnings.push(line),
+  };
+}
 
 /** Runs worker cycles until the transaction leaves `PENDING_REFERENCE`. */
 async function resolvedBy(resolver: ResolvePendingReferences, transactionId: unknown): Promise<JsonObject> {
@@ -375,6 +414,56 @@ describe('the worker under failure', () => {
     expect((await submit(refund)).status).toBe(500);
     expect(await eventsOf(pending.body.transactionId)).toHaveLength(2);
   });
+
+  test.each(['transient', 'permanent'] as const)(
+    'a %s failure, the item resolved by another worker before it is recorded: left alone, with no alert',
+    async (failure) => {
+      const wallet = await createWallet('100.00');
+      const pending = await submit(citing(wallet, 'REFUND', transactionOn(wallet, 'BET')));
+      const target = pending.body.transactionId as string;
+      const attemptsBefore = (await row(target)).attempts;
+      const other = await sql.reserve();
+      const log = logSpy();
+      // The attempt on the target fails; meanwhile, another worker holds the item.
+      const racing = racingUnitOfWork(target, async () => {
+        await other`begin`;
+        await other`select id from wager_transactions where id = ${target} for update`;
+        if (failure === 'permanent') throw new SimulatedBugError(FaultPoint.TransientFailureInResolution);
+      });
+      const resolver = new ResolvePendingReferences(racing, () => Bun.randomUUIDv7(), {
+        leaseMs: 30_000,
+        referenceWait: { ttlMs: TTL_MS, backoff: { baseMs: 20, maxMs: 100 } },
+      }, log, apps[0]!.get(WAGERING_METRICS));
+      try {
+        await waitUntil(async () => {
+          const [due] = await sql`select next_attempt_at <= now() as due from wager_transactions where id = ${target}`;
+          return due.due ? true : undefined;
+        });
+        const cycle = resolver.resolveDue();
+        // The recording of the failure waits for the other worker, which resolves the item and commits.
+        await waitUntil(async () => {
+          const [waiting] = await sql`
+            select count(*)::int as n from pg_stat_activity
+             where datname = current_database() and wait_event_type = 'Lock' and query ilike '%wager_transactions%'
+          `;
+          return waiting.n > 0 ? true : undefined;
+        });
+        await other`update wager_transactions set status = 'FAILED', failure_code = 'INFRA_INVARIANT_VIOLATION' where id = ${target}`;
+        await other`commit`;
+        await cycle;
+      } finally {
+        other.release();
+      }
+
+      expect(await row(target)).toMatchObject({
+        status: 'FAILED',
+        failure_code: 'INFRA_INVARIANT_VIOLATION',
+        attempts: attemptsBefore,
+      });
+      expect((await eventsOf(target)).map((event) => event.event_type)).toEqual(['WagerTransactionPendingReference']);
+      expect(log.warnings).toEqual([]);
+    },
+  );
 
   test('two workers over the same pending references: each resolved once', async () => {
     const other = (await startApp(config)).get(ResolvePendingReferences);

@@ -14,6 +14,12 @@ export interface PendingReferenceClaim {
 
 export interface WagerTransactionRepository {
   findById(id: string): Promise<WagerTransaction | null>;
+  /**
+   * Locks the transaction's row and reads it as last committed: a worker that
+   * waited for another one sees what that one recorded. Waits no longer than
+   * the wallet's `lock_timeout` (ADR 0002).
+   */
+  findByIdForUpdate(id: string): Promise<WagerTransaction | null>;
   findByIdempotencyKey(providerId: string, idempotencyKey: string): Promise<WagerTransaction | null>;
   findByExternalId(providerId: string, externalTransactionId: string): Promise<WagerTransaction | null>;
   /**

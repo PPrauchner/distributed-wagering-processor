@@ -3,7 +3,8 @@
  * PostgreSQL: transient failures answer 503 with `Retry-After` and record
  * nothing; a permanent error — provoked by the `FaultInjector` with a real
  * schema violation — records the transaction as `FAILED` and answers 500, and
- * so does its replay. Ends checking the ledger invariant of every wallet it
+ * so does its replay; an application error nobody classified — a bug, provoked
+ * by the same injector — does the same as `INFRA_UNEXPECTED`. Ends checking the ledger invariant of every wallet it
  * touched.
  *
  * @packageDocumentation
@@ -314,5 +315,32 @@ describe('a permanent error: FAILED, recorded by a second unit of work', () => {
       `;
       expect(entries).toBe(1);
     }, 15_000);
+  });
+});
+
+describe('an error nobody classified — a bug: FAILED INFRA_UNEXPECTED, like a permanent one', () => {
+  test('an application error before the commit → 500 FAILED INFRA_UNEXPECTED, balance untouched, one WagerTransactionFailed', async () => {
+    const faultyUrl = await startApp({ ...config, faultPoints: [FaultPoint.UnexpectedErrorBeforeCommit] });
+    const wallet = await createWallet('100.00');
+
+    const response = await submit(faultyUrl, betOn(wallet));
+
+    expect(response.status).toBe(500);
+    const result = (await response.json()) as JsonObject;
+    expect(result).toEqual({
+      transactionId: expect.any(String),
+      status: 'FAILED',
+      failureCode: 'INFRA_UNEXPECTED',
+      idempotentReplay: false,
+    });
+    const rows = await sql`
+      select id, status, failure_code from wager_transactions where wallet_id = ${wallet.id} and kind <> 'OPENING'
+    `;
+    expect(rows).toEqual([{ id: result.transactionId, status: 'FAILED', failure_code: 'INFRA_UNEXPECTED' }]);
+    const [walletRow] = await sql`select balance_amount::text as balance, version from wallets where id = ${wallet.id}`;
+    expect(walletRow).toEqual({ balance: '100.00', version: 1 });
+    expect((await eventsOf(result.transactionId)).map((event) => event.event_type)).toEqual([
+      'WagerTransactionFailed',
+    ]);
   });
 });

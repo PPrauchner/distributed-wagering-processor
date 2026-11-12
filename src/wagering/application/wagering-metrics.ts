@@ -20,7 +20,8 @@ export type OutcomeChannel = SubmissionChannel | typeof WORKER_CHANNEL;
 /**
  * How a submission that did not end in a transaction ended: refused before it
  * became one, a transient failure — resend —, or a permanent one even the
- * `FAILED` could not record, an unexpected error included.
+ * `FAILED` could not record — an unclassified error recorded `FAILED`
+ * `INFRA_UNEXPECTED` ended in a transaction, and is not one of them.
  */
 export const PROCESSING_FAILURES = ['not_admitted', 'transient', 'permanent'] as const;
 export type ProcessingFailure = (typeof PROCESSING_FAILURES)[number];

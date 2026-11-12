@@ -15,6 +15,11 @@ export enum FaultPoint {
    */
   InvariantViolationBeforeCommit = 'invariant-violation-before-commit',
   /**
+   * Inside the unit of work, before the commit: throws an error of the
+   * application, not of the database — a bug no classifier knows.
+   */
+  UnexpectedErrorBeforeCommit = 'unexpected-error-before-commit',
+  /**
    * The queue consumer dies after the outcome committed, before the `ack`:
    * the message reappears once its visibility expires.
    */
@@ -38,6 +43,15 @@ export class SimulatedCrashError extends Error {
 
   constructor(readonly point: FaultPoint) {
     super(`simulated crash at ${point}`);
+  }
+}
+
+/** A bug on purpose: an application error no classifier knows. */
+export class SimulatedBugError extends Error {
+  override readonly name = 'SimulatedBugError';
+
+  constructor(readonly point: FaultPoint) {
+    super(`simulated bug at ${point}`);
   }
 }
 

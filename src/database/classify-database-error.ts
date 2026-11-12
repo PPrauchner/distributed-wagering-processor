@@ -43,6 +43,15 @@ const NETWORK_ERRORS = new Set([
   'ENETUNREACH',
 ]);
 
+// What `pg` and `pg-pool` throw without a code when the connection is lost or
+// never comes; MikroORM's wrapper keeps the message.
+const CODELESS_CONNECTION_FAILURES = [
+  /^Connection terminated/, // unexpectedly, on end, or by the connection timeout
+  /^timeout exceeded when trying to connect$/, // the pool's connection timeout
+  /^Client has encountered a connection error and is not queryable$/,
+  /^Client was closed and is not queryable$/,
+];
+
 const UNAVAILABLE_STATES = new Set([
   '53300', // too_many_connections
   '57P01', // admin_shutdown
@@ -82,6 +91,7 @@ const UNIQUE_CONSTRAINTS: Record<string, DatabaseErrorClass> = {
  *   recognized is permanent `INFRA_UNEXPECTED`.
  */
 export function classifyDatabaseError(error: unknown): DatabaseErrorClass {
+  if (isCodelessConnectionFailure(error)) return { category: 'transient', failureCode: FailureCode.TransientUnavailable };
   const code = errorCode(error);
   if (code === undefined) return unexpected();
   const lockConflict = LOCK_CONFLICTS.get(code);
@@ -95,10 +105,11 @@ export function classifyDatabaseError(error: unknown): DatabaseErrorClass {
 /**
  * @param error - Whatever a unit of work threw.
  * @returns Whether it came from the database or the connection to it — an
- *   error carrying a SQLSTATE or a network error code — rather than from the
- *   application.
+ *   error carrying a SQLSTATE or a network error code, or a driver connection
+ *   failure without one — rather than from the application.
  */
 export function isDatabaseError(error: unknown): boolean {
+  if (isCodelessConnectionFailure(error)) return true;
   const code = errorCode(error);
   return code !== undefined && (SQLSTATE.test(code) || NETWORK_ERRORS.has(code));
 }
@@ -108,6 +119,12 @@ const SQLSTATE = /^[0-9A-Z]{5}$/;
 function isConnectionFailure(code: string): boolean {
   // Class 08: connection_exception.
   return NETWORK_ERRORS.has(code) || UNAVAILABLE_STATES.has(code) || code.startsWith('08');
+}
+
+function isCodelessConnectionFailure(error: unknown): boolean {
+  if (errorCode(error) !== undefined) return false;
+  const message = stringField(error, 'message');
+  return message !== undefined && CODELESS_CONNECTION_FAILURES.some((pattern) => pattern.test(message));
 }
 
 // The driver error, and MikroORM's wrapper of it, copy the PostgreSQL error's
