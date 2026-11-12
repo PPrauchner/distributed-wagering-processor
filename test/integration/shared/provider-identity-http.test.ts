@@ -5,7 +5,8 @@
  * provider. A submission or a query by external id declaring a provider other
  * than the authenticated one answers 403 `PROVIDER_IDENTITY_MISMATCH` and
  * records no wager transaction; the wallet routes go through the guard, the
- * health and metrics routes do not.
+ * health and metrics routes do not. The file ends checking the ledger of every
+ * wallet it created.
  *
  * @packageDocumentation
  */
@@ -19,6 +20,7 @@ import type {
   ProviderIdentity,
   ProviderIdentityRequest,
 } from '../../../src/shared/application/provider-identity.ts';
+import { expectLedgerConsistent } from '../ledger-invariant.ts';
 
 /** Authenticates every request as `provider-b`, and counts the requests it saw. */
 class OtherProviderIdentity implements ProviderIdentity {
@@ -34,6 +36,7 @@ const identity = new OtherProviderIdentity();
 let app: INestApplication;
 let baseUrl: string;
 let sql: SQL;
+const touchedWallets: string[] = [];
 
 beforeAll(async () => {
   const config = loadConfig();
@@ -44,6 +47,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  await expectLedgerConsistent(sql, touchedWallets);
   await app?.close();
   await sql?.close();
 });
@@ -59,6 +63,7 @@ async function createWallet(): Promise<{ id: string; playerId: string }> {
   });
   expect(response.status).toBe(201);
   const { id } = (await response.json()) as { id: string };
+  touchedWallets.push(id);
   return { id, playerId };
 }
 
