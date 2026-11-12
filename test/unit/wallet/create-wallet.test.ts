@@ -15,6 +15,7 @@ import {
 import type { UnitOfWork } from '../../../src/shared/application/unit-of-work.ts';
 import { FailureCode } from '../../../src/shared/domain/failure-code.ts';
 import type { WageringRepositories } from '../../../src/wagering/application/wager-transaction-repository.ts';
+import { RecordOpening } from '../../../src/wagering/application/record-opening.ts';
 import { CreateWallet } from '../../../src/wallet/application/create-wallet.ts';
 import type { WalletRepositories } from '../../../src/wallet/application/wallet-repository.ts';
 
@@ -29,7 +30,7 @@ function failingWith(error: Error): UnitOfWork<Repositories> {
 }
 
 function createWallet(unitOfWork: UnitOfWork<Repositories>, conflicts: LockConflictReason[]): CreateWallet {
-  return new CreateWallet(unitOfWork, () => Bun.randomUUIDv7(), {
+  return new CreateWallet(unitOfWork, new RecordOpening(() => Bun.randomUUIDv7()), () => Bun.randomUUIDv7(), {
     lockConflict: (reason) => void conflicts.push(reason),
   });
 }

@@ -20,6 +20,7 @@ import { Money } from '../../../src/shared/domain/money.ts';
 import { InvalidMoneyError } from '../../../src/shared/domain/money.ts';
 import { Wallet } from '../../../src/wallet/domain/wallet.ts';
 import { WalletLedgerEntry } from '../../../src/wallet/domain/wallet-ledger-entry.ts';
+import { RecordOpening } from '../../../src/wagering/application/record-opening.ts';
 import { CreateWallet, type CreateWalletCommand, type CreatedWallet } from '../../../src/wallet/application/create-wallet.ts';
 import { GetWallet } from '../../../src/wallet/application/get-wallet.ts';
 import {
@@ -42,7 +43,7 @@ beforeAll(async () => {
   orm = await MikroORM.init(createOrmConfig(databaseUrl));
   sql = new SQL(databaseUrl);
   unitOfWork = new MikroOrmUnitOfWork(orm.em);
-  createWallet = new CreateWallet(unitOfWork, () => Bun.randomUUIDv7(), { lockConflict: () => undefined });
+  createWallet = new CreateWallet(unitOfWork, new RecordOpening(() => Bun.randomUUIDv7()), () => Bun.randomUUIDv7(), { lockConflict: () => undefined });
   getWallet = new GetWallet(unitOfWork);
 });
 
@@ -89,7 +90,7 @@ function raceAfterKeyLookup(
         }),
       ),
   };
-  const attempt = new CreateWallet(racing, () => Bun.randomUUIDv7(), { lockConflict: () => undefined }).execute(attemptCommand);
+  const attempt = new CreateWallet(racing, new RecordOpening(() => Bun.randomUUIDv7()), () => Bun.randomUUIDv7(), { lockConflict: () => undefined }).execute(attemptCommand);
   return {
     attempt,
     winner: () => {
@@ -242,7 +243,7 @@ describe('CreateWallet', () => {
     };
     const playerId = Bun.randomUUIDv7();
 
-    const attempt = new CreateWallet(failingLedger, () => Bun.randomUUIDv7(), { lockConflict: () => undefined }).execute({
+    const attempt = new CreateWallet(failingLedger, new RecordOpening(() => Bun.randomUUIDv7()), () => Bun.randomUUIDv7(), { lockConflict: () => undefined }).execute({
       playerId,
       initialBalance: { amount: '100.00', currency: 'BRL' },
     });

@@ -35,6 +35,7 @@ import { FaultPoint } from '../../../src/shared/application/fault-injector.ts';
 import { UNIT_OF_WORK, type UnitOfWork } from '../../../src/shared/application/unit-of-work.ts';
 import type { OutboxRepositories } from '../../../src/messaging/application/outbox-repository.ts';
 import type { WageringRepositories } from '../../../src/wagering/application/wager-transaction-repository.ts';
+import { RecordOpening } from '../../../src/wagering/application/record-opening.ts';
 import { CreateWallet } from '../../../src/wallet/application/create-wallet.ts';
 import type { WalletRepositories } from '../../../src/wallet/application/wallet-repository.ts';
 import { expectLedgerConsistent } from '../ledger-invariant.ts';
@@ -167,7 +168,7 @@ async function createWalletWithId(wallet: TestWallet, amount: string): Promise<v
     return wallet.id;
   };
   const unitOfWork = app.get<UnitOfWork<WalletRepositories & WageringRepositories & OutboxRepositories>>(UNIT_OF_WORK);
-  await new CreateWallet(unitOfWork, generateId, { lockConflict: () => undefined }).execute({
+  await new CreateWallet(unitOfWork, new RecordOpening(() => Bun.randomUUIDv7()), generateId, { lockConflict: () => undefined }).execute({
     playerId: wallet.playerId,
     initialBalance: { amount, currency: 'BRL' },
   });

@@ -24,6 +24,7 @@ import {
   createPinoLogger,
 } from './shared/infrastructure/pino-logging.ts';
 import type { Crash } from './shared/infrastructure/crash-fault-injector.ts';
+import { RecordOpening } from './wagering/application/record-opening.ts';
 import { RejectedSubmissionAudit } from './wagering/interface/rejected-submission.audit.ts';
 import { WageringModule } from './wagering/interface/wagering.module.ts';
 import { WalletModule } from './wallet/interface/wallet.module.ts';
@@ -68,7 +69,8 @@ class AppModule {
         LoggingModule.forRoot(contextLog),
         ProviderIdentityModule.forRoot(identity),
         DatabaseModule.forRoot(config),
-        WalletModule,
+        // The wallet's opening is recorded by wagering: the root binds the two ends.
+        WalletModule.forRoot({ openingRecorder: new RecordOpening(() => Bun.randomUUIDv7()) }),
         WageringModule.forRoot(config, crash),
         MessagingModule.forRoot(config),
         HealthModule.forRoot(config),
