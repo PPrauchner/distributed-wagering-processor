@@ -9,6 +9,30 @@
 import { describe, expect, test } from 'bun:test';
 import type { ResolvePendingReferences } from '../../../src/wagering/application/resolve-pending-references.ts';
 import { PendingReferencesWorker } from '../../../src/wagering/interface/pending-references.worker.ts';
+import { captureNestLogs } from '../../support/nest-log-capture.ts';
+
+describe('a failed cycle', () => {
+  test('is logged by the error name, never its message', async () => {
+    let failed: (() => void) | undefined;
+    const cycleFailed = new Promise<void>((resolve) => (failed = resolve));
+    const resolver = {
+      resolveDue: async () => {
+        failed?.();
+        throw new TypeError('select balance 123.45');
+      },
+    } as unknown as ResolvePendingReferences;
+    const worker = new PendingReferencesWorker(resolver, { enabled: true, pollIntervalMs: 10_000 });
+
+    const lines = await captureNestLogs(async () => {
+      worker.onApplicationBootstrap();
+      await cycleFailed;
+      await worker.beforeApplicationShutdown();
+    });
+
+    expect(lines.join(' ')).toContain('TypeError');
+    expect(lines.join(' ')).not.toContain('123.45');
+  });
+});
 
 /** A resolver whose cycle stays in flight until the test finishes it. */
 function cycleInFlight(): {

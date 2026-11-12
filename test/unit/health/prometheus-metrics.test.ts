@@ -37,7 +37,7 @@ describe('PrometheusMetrics', () => {
     metrics.lockConflict('lock_timeout');
 
     read = async () => {
-      throw new Error('connection refused');
+      throw new TypeError('select pending from outbox where amount = 123.45');
     };
     const text = await metrics.registry.metrics();
 
@@ -45,6 +45,8 @@ describe('PrometheusMetrics', () => {
     expect(gauge(text, 'outbox_lag_seconds')).toBe(7);
     expect(text).toContain('lock_conflicts_total{reason="lock_timeout"} 1');
     expect(log.lines.length).toBeGreaterThan(0);
+    expect(log.lines.join(' ')).toContain('TypeError');
+    expect(log.lines.join(' ')).not.toContain('123.45');
   });
 
   test('a scrape reads the backlog once: both gauges come from the same read, a failure is logged once', async () => {

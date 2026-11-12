@@ -15,6 +15,7 @@ import {
   type ArgumentsHost,
   type ExceptionFilter,
 } from '@nestjs/common';
+import { describeError } from '../shared/application/error-summary.ts';
 import { PermanentFailureError, TransientFailureError } from '../shared/application/infrastructure-failures.ts';
 import { ProviderIdentityMismatchError } from '../shared/application/provider-identity.ts';
 import { FailureCode } from '../shared/domain/failure-code.ts';
@@ -122,7 +123,7 @@ export class HttpErrorFilter implements ExceptionFilter {
 
   private toResponse(error: unknown): ErrorResponse {
     if (error instanceof TransientFailureError) {
-      this.logger.warn(`${error.failureCode}: ${String(error.cause)}`);
+      this.logger.warn(`${error.failureCode}: ${describeError(error.cause)}`);
       return {
         status: HttpStatus.SERVICE_UNAVAILABLE,
         body: { failureCode: error.failureCode, message: error.message },

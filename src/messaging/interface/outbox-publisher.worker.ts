@@ -7,6 +7,7 @@
  * @packageDocumentation
  */
 import { Logger, type BeforeApplicationShutdown, type OnApplicationBootstrap } from '@nestjs/common';
+import { describeError } from '../../shared/application/error-summary.ts';
 import { OUTBOX_BATCH_SIZE, type PublishOutbox } from '../application/publish-outbox.ts';
 
 export interface OutboxPublisherWorkerOptions {
@@ -44,7 +45,7 @@ export class OutboxPublisherWorker implements OnApplicationBootstrap, BeforeAppl
       try {
         claimed = await this.publishOutbox.publishDue();
       } catch (error) {
-        this.logger.warn(`outbox publication cycle failed: ${error instanceof Error ? error.message : String(error)}`);
+        this.logger.warn(`outbox publication cycle failed: ${describeError(error)}`);
       }
       // A shutdown asked during the cycle does not wait out the poll interval.
       if (this.running && claimed < OUTBOX_BATCH_SIZE) await this.pause();

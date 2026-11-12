@@ -44,6 +44,7 @@ import type { DeadLetterQueue } from '../../messaging/application/dead-letter-qu
 import { InboxRedeliveryError, MessageIdConflictError } from '../../messaging/application/inbox-repository.ts';
 import type { InputQueue, ReceivedMessage } from '../../messaging/application/input-queue.ts';
 import type { ContextLog } from '../../shared/application/context-log.ts';
+import { describeError } from '../../shared/application/error-summary.ts';
 import { FaultPoint, type FaultInjector } from '../../shared/application/fault-injector.ts';
 import { PermanentFailureError, TransientFailureError } from '../../shared/application/infrastructure-failures.ts';
 import { FailureCode } from '../../shared/domain/failure-code.ts';
@@ -180,7 +181,7 @@ export class WagerTransactionConsumer implements OnApplicationBootstrap, BeforeA
         }
         return await this.settle(message, facts, parsed);
       } catch (error) {
-        this.logger.warn(`queue message left unacknowledged: ${reasonOf(error)}`);
+        this.logger.warn(`queue message left unacknowledged: ${describeError(error)}`);
         return { acknowledged: false };
       }
     });
@@ -295,7 +296,7 @@ export class WagerTransactionConsumer implements OnApplicationBootstrap, BeforeA
       try {
         messages = await this.deps.queue.receive(this.stopping.signal);
       } catch (error) {
-        this.logger.warn(`receive from the input queue failed: ${reasonOf(error)}`);
+        this.logger.warn(`receive from the input queue failed: ${describeError(error)}`);
         await Bun.sleep(RECEIVE_RETRY_MS);
         continue;
       }
@@ -335,7 +336,7 @@ export class WagerTransactionConsumer implements OnApplicationBootstrap, BeforeA
     try {
       await this.deps.queue.changeVisibility(message, seconds);
     } catch (error) {
-      this.logger.warn(`queue message not handed back: ${reasonOf(error)}`);
+      this.logger.warn(`queue message not handed back: ${describeError(error)}`);
     }
   }
 }
@@ -400,8 +401,4 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function text(value: unknown): string | undefined {
   return typeof value === 'string' && value.length > 0 ? value : undefined;
-}
-
-function reasonOf(error: unknown): string {
-  return error instanceof Error ? `${error.name}: ${error.message}` : String(error);
 }
