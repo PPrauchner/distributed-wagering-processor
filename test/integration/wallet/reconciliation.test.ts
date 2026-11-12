@@ -14,6 +14,7 @@ import { MikroORM } from '@mikro-orm/postgresql';
 import { loadConfig } from '../../../src/config.ts';
 import { createOrmConfig } from '../../../src/database/orm.config.ts';
 import { MikroOrmUnitOfWork } from '../../../src/database/mikro-orm-unit-of-work.ts';
+import { RecordOpening } from '../../../src/wagering/application/record-opening.ts';
 import { CreateWallet } from '../../../src/wallet/application/create-wallet.ts';
 import {
   InMemoryReconciliationDivergenceCounter,
@@ -33,7 +34,7 @@ beforeAll(async () => {
   orm = await MikroORM.init(createOrmConfig(databaseUrl));
   sql = new SQL(databaseUrl);
   unitOfWork = new MikroOrmUnitOfWork(orm.em);
-  createWallet = new CreateWallet(unitOfWork, () => Bun.randomUUIDv7(), { lockConflict: () => undefined });
+  createWallet = new CreateWallet(unitOfWork, new RecordOpening(() => Bun.randomUUIDv7()), () => Bun.randomUUIDv7(), { lockConflict: () => undefined });
 });
 
 afterAll(async () => {

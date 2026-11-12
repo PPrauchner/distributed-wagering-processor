@@ -1,9 +1,10 @@
 /**
  * Creates a player's wallet in one currency. A positive initial balance is
  * credited by the opening — an internal `OPENING` transaction, already
- * `PROCESSED`, its `CREDIT` ledger entry, and the `WagerTransactionProcessed`
- * and `WalletBalanceChanged` events in the outbox — in the same unit of work as
- * the wallet: all of it is committed together or not at all.
+ * `PROCESSED`, and its `WagerTransactionProcessed`, recorded through the
+ * `OpeningRecorder` port; its `CREDIT` ledger entry; and the
+ * `WalletBalanceChanged` event in the outbox — in the same unit of work as the
+ * wallet: all of it is committed together or not at all.
  *
  * With an `Idempotency-Key`, the creation is idempotent: the same key and
  * payload replay the wallet the key created, and another payload is a conflict
@@ -20,10 +21,8 @@ import { hashPayload } from '../../shared/application/payload-hash.ts';
 import { TransientFailureError } from '../../shared/application/infrastructure-failures.ts';
 import type { UnitOfWork } from '../../shared/application/unit-of-work.ts';
 import { Money, type MoneyProps } from '../../shared/domain/money.ts';
-import type { WageringRepositories } from '../../wagering/application/wager-transaction-repository.ts';
-import { WagerTransaction, WagerTransactionKind } from '../../wagering/domain/wager-transaction.ts';
-import { WagerTransactionProcessed } from '../../wagering/domain/wager-transaction-events.ts';
 import { WalletBalanceChanged } from '../domain/wallet-balance-changed.ts';
+import type { OpeningRecorder } from './opening-recorder.ts';
 import type { WalletMetrics } from './wallet-metrics.ts';
 import { Wallet } from '../domain/wallet.ts';
 import type { WalletRepositories, WalletRepository } from './wallet-repository.ts';
@@ -75,13 +74,15 @@ async function replayFrom(wallets: WalletRepository, requested: Wallet): Promise
   return { wallet: created, idempotentReplay: true };
 }
 
-/** The opening is internal: it never comes from a provider. */
-const OPENING_PROVIDER_ID = 'internal';
-const OPENING_ROUND_AND_GAME = 'opening';
-
-export class CreateWallet {
+/**
+ * @typeParam TOpeningRepositories - What the opening recorder writes to, besides
+ *   the wallet's own repositories, in the same unit of work.
+ */
+export class CreateWallet<TOpeningRepositories = unknown> {
   constructor(
-    private readonly unitOfWork: UnitOfWork<WalletRepositories & WageringRepositories & OutboxRepositories>,
+    // Inferred from the recorder: the unit of work offers at least what it writes to.
+    private readonly unitOfWork: UnitOfWork<WalletRepositories & OutboxRepositories & NoInfer<TOpeningRepositories>>,
+    private readonly openings: OpeningRecorder<TOpeningRepositories>,
     private readonly generateId: () => string,
     private readonly metrics: WalletMetrics,
   ) {}
@@ -122,7 +123,8 @@ export class CreateWallet {
     const correlationId = command.correlationId ?? this.generateId();
 
     try {
-      return await this.unitOfWork.run(async ({ wallets, ledger, transactions, outbox }) => {
+      return await this.unitOfWork.run(async (repositories) => {
+        const { wallets, ledger, outbox } = repositories;
         const replay = await replayFrom(wallets, wallet);
         if (replay) return replay;
         const existing = await wallets.findByPlayerAndCurrency(wallet.playerId, wallet.currency);
@@ -135,14 +137,12 @@ export class CreateWallet {
         }
         wallets.add(wallet);
         if (!wallet.balance.isZero()) {
-          const opening = this.openingOf(wallet, correlationId);
-          const entry = wallet.openingEntry({ entryId: this.generateId(), transactionId: opening.id });
-          transactions.add(opening);
+          const transactionId = this.generateId();
+          const entry = wallet.openingEntry({ entryId: this.generateId(), transactionId });
+          this.openings.record(repositories, { transactionId, wallet, correlationId });
           ledger.add(entry);
-          const context = { correlationId, causationId: opening.id };
-          const processed = WagerTransactionProcessed.from(opening, context, { eventId: this.generateId() });
+          const context = { correlationId, causationId: transactionId };
           const changed = WalletBalanceChanged.from(wallet, entry, context, { eventId: this.generateId() });
-          outbox.add(OutboxMessage.enqueue(processed));
           outbox.add(OutboxMessage.enqueue(changed));
         }
         return { wallet, idempotentReplay: false };
@@ -156,35 +156,6 @@ export class CreateWallet {
       if (error instanceof DuplicateWalletCreationKeyError) throw new Error('creation key reported taken, but no wallet found');
       throw new WalletAlreadyExistsError(await this.existingWalletId(wallet));
     }
-  }
-
-  /** The `OPENING` that credits the wallet's initial balance, already `PROCESSED`. */
-  private openingOf(wallet: Wallet, correlationId: string): WagerTransaction {
-    const key = `opening:${wallet.id}`;
-    const opening = WagerTransaction.create({
-      id: this.generateId(),
-      providerId: OPENING_PROVIDER_ID,
-      externalTransactionId: key,
-      idempotencyKey: key,
-      payloadHash: hashPayload({
-        walletId: wallet.id,
-        playerId: wallet.playerId,
-        initialBalance: { ...wallet.balance.toJSON() },
-      }),
-      walletId: wallet.id,
-      playerId: wallet.playerId,
-      roundId: OPENING_ROUND_AND_GAME,
-      gameId: OPENING_ROUND_AND_GAME,
-      kind: WagerTransactionKind.Opening,
-      money: wallet.balance,
-      correlationId,
-    });
-    opening.markProcessed({
-      at: wallet.createdAt,
-      balanceAfter: wallet.balance,
-      walletVersionObserved: wallet.version,
-    });
-    return opening;
   }
 
   private existingWalletId(wallet: Wallet): Promise<string> {

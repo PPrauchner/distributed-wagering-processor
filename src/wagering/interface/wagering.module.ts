@@ -6,14 +6,13 @@
  * @packageDocumentation
  */
 import { Module, type DynamicModule } from '@nestjs/common';
-import type { AppConfig } from '../../config.ts';
 import { CONSUMER_METRICS, type ConsumerMetrics } from '../../messaging/application/consumer-metrics.ts';
 import { WAGER_TRANSACTIONS_DLQ, type DeadLetterQueue } from '../../messaging/application/dead-letter-queue.ts';
 import type { InboxRepositories } from '../../messaging/application/inbox-repository.ts';
 import { WAGER_TRANSACTIONS_QUEUE, type InputQueue } from '../../messaging/application/input-queue.ts';
 import type { OutboxRepositories } from '../../messaging/application/outbox-repository.ts';
 import { CONTEXT_LOG, type ContextLog } from '../../shared/application/context-log.ts';
-import type { FaultInjection } from '../../shared/application/fault-injector.ts';
+import type { FaultInjection, FaultPoint } from '../../shared/application/fault-injector.ts';
 import { UNIT_OF_WORK, type UnitOfWork } from '../../shared/application/unit-of-work.ts';
 import { CrashFaultInjector, type Crash } from '../../shared/infrastructure/crash-fault-injector.ts';
 import type { WalletRepositories } from '../../wallet/application/wallet-repository.ts';
@@ -29,21 +28,34 @@ import { RejectedSubmissionAudit } from './rejected-submission.audit.ts';
 import { WagerTransactionConsumer } from './wager-transaction.consumer.ts';
 import { ProviderWagerTransactionController, WagerTransactionController } from './wager-transaction.controller.ts';
 
+/** What the wagering module is configured with; the composition root translates its configuration to it. */
+export interface WageringModuleOptions {
+  /** Whether this instance consumes the input queue, and how it gives up and drains. */
+  wagerTransactionsConsumer: { enabled: boolean; maxReceives: number; retryMaxSeconds: number; drainTimeoutMs: number };
+  /** How a pending reference waits, and whether this instance resolves them. */
+  pendingReferences: {
+    enabled: boolean;
+    ttlMs: number;
+    pollIntervalMs: number;
+    leaseMs: number;
+    retryBaseMs: number;
+    retryMaxMs: number;
+  };
+  /** The fault points enabled; none outside the tests. */
+  faultPoints: readonly FaultPoint[];
+  /** How the consumer dies at an enabled crash point; by default, a `SimulatedCrashError`. */
+  crash?: Crash;
+}
+
 @Module({})
 export class WageringModule {
   /**
-   * @param config - Whether this instance consumes the input queue, how a
-   *   pending reference waits and whether this instance resolves them, and the
-   *   fault points enabled (none outside the tests).
-   * @param crash - How the consumer dies at an enabled crash point; by
-   *   default, a `SimulatedCrashError`.
+   * @param options - The consumer, the pending references, the fault points and the crash.
    * @returns The module, exporting the audit of refused submissions.
    */
-  static forRoot(
-    config: Pick<AppConfig, 'wagerTransactionsConsumer' | 'pendingReferences' | 'faultPoints'>,
-    crash?: Crash,
-  ): DynamicModule {
-    const { ttlMs, retryBaseMs, retryMaxMs } = config.pendingReferences;
+  static forRoot(options: WageringModuleOptions): DynamicModule {
+    const { crash } = options;
+    const { ttlMs, retryBaseMs, retryMaxMs } = options.pendingReferences;
     const referenceWait = { ttlMs, backoff: { baseMs: retryBaseMs, maxMs: retryMaxMs } };
     return {
       module: WageringModule,
@@ -76,7 +88,7 @@ export class WageringModule {
             new ResolvePendingReferences(
               unitOfWork,
               () => Bun.randomUUIDv7(),
-              { leaseMs: config.pendingReferences.leaseMs, referenceWait },
+              { leaseMs: options.pendingReferences.leaseMs, referenceWait },
               log,
               metrics,
             ),
@@ -86,8 +98,8 @@ export class WageringModule {
           inject: [ResolvePendingReferences],
           useFactory: (resolvePendingReferences: ResolvePendingReferences) =>
             new PendingReferencesWorker(resolvePendingReferences, {
-              enabled: config.pendingReferences.enabled,
-              pollIntervalMs: config.pendingReferences.pollIntervalMs,
+              enabled: options.pendingReferences.enabled,
+              pollIntervalMs: options.pendingReferences.pollIntervalMs,
             }),
         },
         {
@@ -108,7 +120,7 @@ export class WageringModule {
             metrics: ConsumerMetrics,
             log: ContextLog,
           ) => {
-            const { enabled, maxReceives, retryMaxSeconds, drainTimeoutMs } = config.wagerTransactionsConsumer;
+            const { enabled, maxReceives, retryMaxSeconds, drainTimeoutMs } = options.wagerTransactionsConsumer;
             return new WagerTransactionConsumer(
               {
                 queue,
@@ -117,7 +129,7 @@ export class WageringModule {
                 recordRejectedSubmission,
                 metrics,
                 log,
-                faults: new CrashFaultInjector(config.faultPoints, crash),
+                faults: new CrashFaultInjector(options.faultPoints, crash),
               },
               { enabled, maxReceives, retryMaxSeconds, drainTimeoutMs },
             );

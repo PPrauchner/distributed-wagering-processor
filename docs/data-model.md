@@ -139,9 +139,9 @@ mensagem indicado. O destino de cada uma está em
 |---|---|---|---|
 | Toda transação pertence a uma carteira | `wager_transactions_wallet_fk` | `wager_transactions (wallet_id)` → `wallets (id)` | 0002 |
 | A referência resolvida aponta para uma transação existente | `wager_transactions_reference_fk` | `wager_transactions (reference_transaction_id)` → `wager_transactions (id)` | 0008 |
-| Todo lançamento pertence a uma transação | `wallet_ledger_entries_transaction_fk` | `wallet_ledger_entries (transaction_id)` → `wager_transactions (id)` | 0003 |
+| Todo lançamento pertence a uma transação | `wallet_ledger_entries_transaction_fk` | `wallet_ledger_entries (transaction_id)` → `wager_transactions (id)`, checada no commit | 0003, 0014 |
 | Lançamento na moeda da carteira | `wallet_ledger_entries_wallet_currency_fk` | `wallet_ledger_entries (wallet_id, currency)` → `wallets (id, currency)` | 0003 |
-| Lançamento com a carteira, o valor e a moeda da sua transação | `wallet_ledger_entries_transaction_terms_fk` | `wallet_ledger_entries (transaction_id, wallet_id, amount, currency)` → `wager_transactions (id, wallet_id, amount, currency)` | 0013 |
+| Lançamento com a carteira, o valor e a moeda da sua transação | `wallet_ledger_entries_transaction_terms_fk` | `wallet_ledger_entries (transaction_id, wallet_id, amount, currency)` → `wager_transactions (id, wallet_id, amount, currency)`, checada no commit | 0013, 0014 |
 
 ### `CHECK`s
 
