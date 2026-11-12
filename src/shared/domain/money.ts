@@ -48,9 +48,17 @@ function fromCents(cents: bigint): string {
   return `${sign}${units}.${fraction}`;
 }
 
-function assertCurrency(currency: string): void {
-  if (!CURRENCY_PATTERN.test(currency)) {
-    throw new InvalidMoneyError(`currency must be 3 uppercase letters, got "${currency}"`);
+// Interpolating a non-string could itself throw (an object without `toString`),
+// so the error message quotes strings and names the type of anything else.
+function describe(value: unknown): string {
+  return typeof value === 'string' ? `"${value}"` : typeof value;
+}
+
+// `RegExp.test` coerces its argument to a string, so a number, an array or an
+// object with `toString` would pass the patterns: the type is checked first.
+function assertCurrency(currency: unknown): void {
+  if (typeof currency !== 'string' || !CURRENCY_PATTERN.test(currency)) {
+    throw new InvalidMoneyError(`currency must be 3 uppercase letters, got ${describe(currency)}`);
   }
 }
 
@@ -71,9 +79,10 @@ export class Money {
    * @throws {@link InvalidMoneyError} If the amount or the currency is malformed.
    */
   static from(props: MoneyProps): Money {
-    if (!AMOUNT_PATTERN.test(props.amount)) {
+    const amount: unknown = props.amount;
+    if (typeof amount !== 'string' || !AMOUNT_PATTERN.test(amount)) {
       throw new InvalidMoneyError(
-        `amount must be a non-negative decimal string with exactly 2 places and at most 15 integer digits, got "${props.amount}"`,
+        `amount must be a non-negative decimal string with exactly 2 places and at most 15 integer digits, got ${describe(amount)}`,
       );
     }
     assertCurrency(props.currency);
