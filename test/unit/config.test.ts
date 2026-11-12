@@ -206,3 +206,17 @@ describe('the pending references worker', () => {
     expect(() => loadConfig({ PENDING_REFERENCES_WORKER_ENABLED: 'maybe' })).toThrow(/PENDING_REFERENCES_WORKER_ENABLED/);
   });
 });
+
+describe('log level', () => {
+  test('is info by default', () => {
+    expect(loadConfig({}).logLevel).toBe('info');
+  });
+
+  test.each(['silent', 'debug', 'warn'])('LOG_LEVEL=%s overrides it', (value) => {
+    expect(loadConfig({ LOG_LEVEL: value }).logLevel).toBe(value);
+  });
+
+  test.each(['', 'loud', 'INFO'])('LOG_LEVEL=%s is refused, naming the accepted levels', (value) => {
+    expect(() => loadConfig({ LOG_LEVEL: value })).toThrow(/LOG_LEVEL must be one of .*silent/);
+  });
+});

@@ -1,5 +1,7 @@
 # Distributed Wagering Processor
 
+[![CI](https://github.com/PPrauchner/distributed-wagering-processor/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/PPrauchner/distributed-wagering-processor/actions/workflows/ci.yml?query=branch%3Amain)
+
 Serviço que processa transações de apostas (`BET`, `WIN`, `LOSS`, `REFUND`,
 `ROLLBACK`) vindas de vários provedores, por HTTP e por SQS. Decisões, trade-offs,
 interpretações do enunciado e limitações estão em
@@ -64,7 +66,8 @@ bun src/main.ts
 
 Os padrões apontam para o Compose: `PORT=3000`,
 `DATABASE_URL=postgresql://wagering:wagering@127.0.0.1:55432/wagering` e
-`SQS_ENDPOINT=http://127.0.0.1:4566`. As demais variáveis estão no
+`SQS_ENDPOINT=http://127.0.0.1:4566`. O nível do log vem de `LOG_LEVEL` (padrão
+`info`; um nível que o pino não conhece recusa a partida). As demais variáveis estão no
 `ARCHITECTURE.md`, cada uma na seção do componente que configura.
 
 ## Usando a API
@@ -94,7 +97,20 @@ curl -s -X POST http://127.0.0.1:3000/wallets/<walletId>/reconciliation
 
 A resposta traz `consistent`, o saldo guardado e o reconstruído, a diferença, os
 buracos na sequência de versões (`versionGaps`) e as versões da carteira e do
-último lançamento. As demais rotas de consulta são as do §9 do enunciado. Os status HTTP e os códigos de falha
+último lançamento.
+
+```bash
+# Consultas
+curl -s http://127.0.0.1:3000/wallets/<walletId>
+curl -s 'http://127.0.0.1:3000/wallets/<walletId>/ledger?limit=50'
+curl -s 'http://127.0.0.1:3000/wallets/<walletId>/ledger?limit=50&cursor=<nextCursor>'
+curl -s http://127.0.0.1:3000/wagering/transactions/<transactionId>
+curl -s http://127.0.0.1:3000/providers/provider-a/wagering/transactions/transaction-123
+```
+
+O livro-razão sai em ordem crescente; cada página traz `items` e `nextCursor`
+(opaco; `null` na última página), que se passa em `cursor` para a próxima. O
+`limit` vai de 1 a 200, com padrão 50. Os status HTTP e os códigos de falha
 estão em [`ARCHITECTURE.md` § Status HTTP](ARCHITECTURE.md#status-http) e
 [§ Códigos de falha](ARCHITECTURE.md#códigos-de-falha).
 
@@ -171,14 +187,25 @@ submissão não admitida vai à DLQ com o atributo `failureCode`. Detalhes em
 | `bun run test` | `test:unit` + `test:integration` (~3 min) | sim |
 | `bun run test:concurrency` | os 8 cenários de concorrência do §13, com processos reais do app | sim |
 
+A CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) roda as quatro
+verificações — `typecheck`, `test:unit`, `test:integration` e `test:concurrency` —
+em todo push e pull request, contra o Compose real; em falha, os logs dos processos
+da concorrência e o `docker compose logs` ficam como artefato da execução.
+
 Para a integração e a concorrência, basta o PostgreSQL e o LocalStack do Compose
 (`docker compose up -d --wait`). O serviço `app` não é usado: a cada execução, o
 banco `wagering_test` é recriado e migrado, e cada teste cria filas próprias com
 sufixo aleatório.
 
+Na integração, o log JSON do app fica em silêncio (`LOG_LEVEL=silent`, posto pelo
+preload só quando a variável não vem definida), para que uma falha e o resumo do
+bun apareçam nas últimas linhas da saída. Para depurar, religue-o:
+`LOG_LEVEL=info bun run test:integration` (aceita os níveis do pino: `fatal`,
+`error`, `warn`, `info`, `debug`, `trace`, `silent`).
+
 ### `bun run test:concurrency`
 
-Roda à mão, antes da entrega, e não entra no `bun run test`. O app real roda em
+Não entra no `bun run test`: roda à mão e na CI. O app real roda em
 processos separados (`Bun.spawn` de `src/main.ts`), com tempos curtos por variável
 de ambiente. Toda espera é por condição com timeout, nunca por `sleep` fixo.
 

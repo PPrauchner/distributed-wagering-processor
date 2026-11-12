@@ -111,7 +111,10 @@ async function startApp(appConfig: AppConfig): Promise<string> {
 }
 
 async function startPublisher(appConfig: AppConfig, logLines: string[] = []): Promise<PublishOutbox> {
-  const app = await createApp(appConfig, { logDestination: { write: (line: string) => void logLines.push(line) } });
+  const app = await createApp(appConfig, {
+    logDestination: { write: (line: string) => void logLines.push(line) },
+    logLevel: 'info',
+  });
   await app.init();
   publishers.push(app);
   return app.get(PublishOutbox);

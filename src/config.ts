@@ -3,13 +3,19 @@
  *
  * @packageDocumentation
  */
+import type { LevelWithSilent } from 'pino';
 import { FaultPoint } from './shared/application/fault-injector.ts';
+
+/** pino's levels, `silent` included: the threshold below which no line is written. */
+const LOG_LEVELS: readonly LevelWithSilent[] = ['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent'];
 
 export interface AppConfig {
   databaseUrl: string;
   port: number;
   /** The `Retry-After` of a transient failure's 503, in seconds. */
   retryAfterSeconds: number;
+  /** The app log's level; `info` unless `LOG_LEVEL` says otherwise. */
+  logLevel: LevelWithSilent;
   /** The enabled fault points; empty — no fault — unless `FAULT_INJECTION` says so. */
   faultPoints: FaultPoint[];
   sqs: SqsConfig;
@@ -91,7 +97,8 @@ const DEFAULT_RETRY_AFTER_SECONDS = 1;
  *   references is not a positive integer, or `OUTBOX_PUBLISHER_ENABLED` or
  *   `PENDING_REFERENCES_WORKER_ENABLED` is neither `true` nor `false`, or a
  *   setting of the consumer is out of its range, or
- *   `FAULT_INJECTION` names an unknown point or is set in production.
+ *   `FAULT_INJECTION` names an unknown point or is set in production, or
+ *   `LOG_LEVEL` is not one of pino's levels.
  */
 export function loadConfig(env: Record<string, string | undefined> = process.env): AppConfig {
   const port = env.PORT === undefined ? DEFAULT_PORT : Number(env.PORT);
@@ -107,6 +114,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     databaseUrl: env.DATABASE_URL ?? DEFAULT_DATABASE_URL,
     port,
     retryAfterSeconds,
+    logLevel: logLevelOf(env),
     faultPoints: faultPointsOf(env),
     // LocalStack's defaults; the endpoint by 127.0.0.1, like the database.
     sqs: {
@@ -175,6 +183,14 @@ function booleanOf(env: Record<string, string | undefined>, name: string, fallba
   if (raw === undefined) return fallback;
   if (raw !== 'true' && raw !== 'false') throw new Error(`${name} must be true or false, got "${raw}"`);
   return raw === 'true';
+}
+
+function logLevelOf(env: Record<string, string | undefined>): LevelWithSilent {
+  const raw = env.LOG_LEVEL;
+  if (raw === undefined) return 'info';
+  const level = LOG_LEVELS.find((candidate) => candidate === raw);
+  if (level === undefined) throw new Error(`LOG_LEVEL must be one of ${LOG_LEVELS.join(', ')}, got "${raw}"`);
+  return level;
 }
 
 const FAULT_POINTS = new Set<string>(Object.values(FaultPoint));

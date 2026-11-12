@@ -317,8 +317,9 @@ Unicidade da reversão: índice único parcial em `reference_transaction_id` com
   Header presente e vazio → 400 `MISSING_IDEMPOTENCY_KEY`, como na submissão. Na
   corrida de duas criações com a mesma chave, qualquer violação de unicidade relê
   pela chave e compara o hash: uma resposta cria e as outras são replay. Sem o
-  header, vale o contrato do §9 sem mudança — obrigatório, um cliente que segue o
-  enunciado receberia 400. Em qualquer caso, carteira já existente para jogador e
+  header, a criação segue o §9 como está escrito: o enunciado não pede chave no
+  `POST /wallets`, e exigi-la faria um cliente que segue o enunciado receber 400 —
+  por isso o header aqui é opcional. Em qualquer caso, carteira já existente para jogador e
   moeda → 409 `WALLET_ALREADY_EXISTS` **com o `walletId`**, para que o provedor que
   perdeu o 201 descubra a carteira. A chave da criação é global, porque a carteira não
   tem provedor (limitação; com autenticação, seria por provedor).
@@ -422,8 +423,18 @@ Com mais de uma violação, prevalece a primeira, na mesma ordem nos dois canais
   o mesmo desfecho HTTP do conflito de idempotência: nada é persistido e não há
   replay do resultado da outra chave. O use case consulta
   `(provider_id, external_transaction_id)` antes de inserir; a corrida entre
-  carteiras diferentes, que não compartilham lock, cai no `23505` dessa constraint
-  e é classificada como o mesmo conflito. Na fila, é erro de negócio terminal.
+  carteiras diferentes, que não compartilham lock, cai no `23505` dessa constraint.
+  Esse `23505` não é a resposta: qual índice o PostgreSQL checa primeiro numa
+  corrida idêntica não é garantido. O use case relê na ordem das validações —
+  chave, depois id externo —: mesma chave e mesmo hash → replay; mesma chave e
+  outro hash → `IDEMPOTENCY_CONFLICT`; outra chave → `EXTERNAL_ID_CONFLICT`. Assim
+  o desfecho da corrida é o mesmo que a validação antes do insert daria, e não
+  depende de qual índice estourou. Na fila, os conflitos são erro de negócio
+  terminal.
+- **A chave é opaca.** O `Idempotency-Key` é a fonte da verdade e não é comparado
+  com o corpo: `"{providerId}:{externalTransactionId}"` é só o formato recomendado
+  pelo §9, não uma exigência. A coerência entre chave e operação vem das duas
+  unicidades acima.
 - **Camadas:** o inbox, por `(consumerName, messageId)`, protege contra a
   redelivery da fila; a chave de idempotência protege contra o reenvio do provedor,
   por qualquer canal.
@@ -435,7 +446,10 @@ Com mais de uma violação, prevalece a primeira, na mesma ordem nos dois canais
   `wallet_version_observed`. Os dois ficam nulos em `PENDING_REFERENCE` e
   `FAILED`. Para transação ainda
   `PENDING_REFERENCE`, devolve o **estado atual** — se o worker já a resolveu, o
-  desfecho final. **Conflito** (mesma chave, hash diferente) → 409.
+  desfecho final: pode ser 200 com saldo, embora a resposta original tenha sido
+  202. É interpretação deliberada da regra 7 do §7, que fala de operação "já
+  processada": a pendente ainda não foi, e repetir o 202 esconderia um desfecho
+  que já existe. **Conflito** (mesma chave, hash diferente) → 409.
 
 ### Hash do payload
 
@@ -449,6 +463,11 @@ replay. O hash é calculado sobre o comando já validado, com o `walletId`
 normalizado em minúsculas (UUID não diferencia caixa); campo desconhecido no corpo
 é 400, para que dois payloads diferentes nunca compartilhem hash. Uma única função,
 comum às duas entradas.
+
+O hash do **inbox** é outro: cobre o `data` inteiro da mensagem, chave de
+idempotência incluída, porque identifica a mensagem, não a operação. O da
+transação cobre só os campos de negócio acima. Por isso a mesma operação
+reenviada com outra chave tem o mesmo hash de transação e outro hash de inbox.
 
 ### Submissões não admitidas
 
@@ -579,7 +598,7 @@ legítimo; se o lock a serializa, o domínio teria visto antes, e é bug.
 | `wallets (player_id, currency)` — `wallets_player_currency_unique` | conflito → 409 `WALLET_ALREADY_EXISTS`, com `walletId` |
 | `wallets (creation_idempotency_key)` — `wallets_creation_idempotency_key_unique` | relê e compara o hash → replay ou conflito |
 | `(provider_id, idempotency_key)` — `wager_transactions_provider_idempotency_key_unique` | relê e compara o hash → replay ou conflito |
-| `(provider_id, external_transaction_id)` — `wager_transactions_provider_external_id_unique` | conflito → `EXTERNAL_ID_CONFLICT` |
+| `(provider_id, external_transaction_id)` — `wager_transactions_provider_external_id_unique` | relê pela chave, depois pelo id externo → replay, `IDEMPOTENCY_CONFLICT` ou `EXTERNAL_ID_CONFLICT` |
 | `inbox (consumer_name, message_id)` — `inbox_messages_pkey` | redelivery → `ack` sem efeito (de um `FAILED`: DLQ de novo, depois `ack`) |
 | reversão única por referência — `wager_transactions_single_reversal_unique` | bug → permanente (`FAILED`, alerta) |
 | lançamento `(transaction_id, wallet_id)` — `wallet_ledger_entries_transaction_wallet_unique` | bug → permanente (`FAILED`, alerta) |
@@ -657,8 +676,13 @@ leva a mensagem à DLQ com `INFRA_UNEXPECTED` do mesmo jeito.
   agrupamento perde essa ordem, sem afetar o saldo.
 - **Inbox:** `consumerName` = `wager-transactions-consumer`; `messageId` do
   envelope (não o `MessageId` do SQS); `payloadHash` pela mesma função do hash do
-  payload, sobre `data`. Gravado na transação SQL de todo desfecho. Mesmo
-  `messageId` com hash diferente → DLQ, `MESSAGE_ID_CONFLICT`. Submissões não
+  payload, sobre o `data` inteiro, chave incluída (ver [Hash do
+  payload](#hash-do-payload)). Gravado na transação SQL de todo desfecho. Mesmo
+  `messageId` com hash diferente → DLQ, `MESSAGE_ID_CONFLICT`. **Precedência:**
+  mesmo `messageId`, mesma chave e payload diferente responde
+  `IDEMPOTENCY_CONFLICT`, não `MESSAGE_ID_CONFLICT` — o conflito de negócio (a
+  chave) vem antes do de transporte (o `messageId`), porque diz ao provedor o que
+  corrigir. Submissões não
   admitidas não gravam inbox: terminam na DLQ, com linha em `rejected_submissions`
   (ver [Submissões não admitidas](#submissões-não-admitidas)).
 - `ack` (`DeleteMessage`) só depois do commit. A mensagem que vem pela fila passa
@@ -747,7 +771,10 @@ leva a mensagem à DLQ com `INFRA_UNEXPECTED` do mesmo jeito.
   recusado —, para que uma fila mal configurada não fique invisível.
 - **Parada:** em `beforeApplicationShutdown` o publicador para de reivindicar e
   espera o ciclo em andamento, antes dos ganchos de `onApplicationShutdown` que
-  fecham o ORM e o cliente SQS.
+  fecham o ORM e o cliente SQS — por até 20 s, dentro dos 30 s de
+  `stop_grace_period` do Compose; passado o prazo, loga `warn` e segue o
+  desligamento, e o lease devolve os itens abandonados. O worker de referências
+  pendentes para do mesmo jeito.
 - **Configuração por ambiente:** `OUTBOX_PUBLISHER_ENABLED` (padrão `true`),
   `OUTBOX_POLL_INTERVAL_MS` (500), `OUTBOX_LEASE_MS` (30000),
   `OUTBOX_RETRY_BASE_MS` (1000), `OUTBOX_RETRY_MAX_MS` (300000),
@@ -904,7 +931,8 @@ uma porta de identidade do provedor. O ponto de extensão no código:
   atributo `correlationId` (ou do `messageId`), e segue até os eventos, com
   `causationId` = `transactionId`. Só identificadores, `kind`, `status` e
   `failureCode` — nunca valores nem payload; o `redact` do pino (dinheiro, saldos,
-  corpos) é a rede.
+  corpos) é a rede. Nível por `LOG_LEVEL` (padrão `info`; os níveis do pino,
+  `silent` incluído; outro valor é recusado na carga da configuração).
 - **Métricas:** prom-client em `GET /metrics`, aberto, num registro próprio por
   aplicação (os testes sobem várias num processo). Todas existem desde a partida,
   e as séries das combinações conhecidas de label — derivadas dos enums, não de
@@ -1039,6 +1067,11 @@ agregação:
   de teste é compartilhado entre os arquivos, um publicador de teste pode entregar
   eventos de outros arquivos: as verificações olham os eventos do próprio teste, e
   "desconhecido" quer dizer fora da outbox.
+- O preload também põe `LOG_LEVEL=silent` quando a variável não vem definida: o
+  log do app (~480 KB por execução) escondia o `(fail)` e o resumo do bun. Vale para
+  os apps em processo e os filhos que herdam o ambiente; `LOG_LEVEL=info` o religa.
+  Os testes que leem as linhas fixam o próprio nível pela opção `logLevel` do
+  `createApp`; os processos da concorrência logam em `info` nos seus arquivos.
 - Todo teste de integração e de concorrência termina verificando que o saldo é igual
   ao saldo reconstruído e que a sequência de versões não tem buracos.
 - Sem `sleep` fixo: espera por condição com timeout, por um helper único
@@ -1073,7 +1106,7 @@ maioria decidida nos grills do PRD (`docs/grills_logs/transversal/prd.md` e
   transação dependente, sem igualdade de valor e sem contar como desfazer; `LOSS`
   não leva referência — [Reembolso e reversão](#reembolso-e-reversão).
 - **Rodada sem máquina de estados:** `WIN` sem `BET`, ou `WIN` e `LOSS` na mesma
-  rodada, são aceitos — [Transições](#transições-da-transação-de-aposta).
+  rodada, são aceitos — [Reembolso e reversão](#reembolso-e-reversão).
 - **Rejeição × submissão não admitida** (§10): só a rejeição de regra de negócio
   cria transação de aposta `REJECTED`; payload inválido, conflito de chave e
   carteira inexistente não criam nada e são auditados à parte —

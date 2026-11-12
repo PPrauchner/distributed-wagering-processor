@@ -229,6 +229,10 @@ original.
 **R:** Os quatro:
 1. O `23505` do id externo também relê por `(providerId, externalTransactionId)`:
    chave e hash iguais → replay; senão `EXTERNAL_ID_CONFLICT`.
+   *Corrigido depois, na triagem da #45 (Agent Brief):* a releitura segue a ordem
+   das validações, chave primeiro — mesma chave e outro hash →
+   `IDEMPOTENCY_CONFLICT`; só outra chave → `EXTERNAL_ID_CONFLICT`. O desfecho fica
+   igual ao da validação antes do insert, independente do índice que estourou.
 2. Precedência mantida e documentada: o conflito de negócio (chave) vem antes do de
    transporte (`messageId`), porque diz ao provedor o que corrigir.
 3. `ARCHITECTURE.md` diz que o hash do inbox cobre o `data` inteiro, chave incluída.

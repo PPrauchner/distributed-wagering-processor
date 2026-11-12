@@ -68,7 +68,9 @@ export class DuplicateIdempotencyKeyError extends Error {
 
 /**
  * Raised by the unit of work when the commit hits the provider's external id: a
- * concurrent submission on another wallet won the race. It is a conflict.
+ * concurrent submission won the race, outside the wallet lock. The use case
+ * reads it back like a duplicate key — replay, idempotency conflict or
+ * external id conflict —, whichever index PostgreSQL checked first.
  */
 export class DuplicateExternalIdError extends Error {
   override readonly name = 'DuplicateExternalIdError';

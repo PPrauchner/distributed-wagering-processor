@@ -57,6 +57,9 @@ export async function startInstance(options: InstanceOptions): Promise<AppInstan
     env: {
       ...process.env,
       PORT: String(port),
+      // Each process logs to a file of its own, kept by the CI on failure: the
+      // log stays on here, whatever level the suite's preload set for its own.
+      LOG_LEVEL: 'info',
       WAGER_TRANSACTIONS_QUEUE: options.inputQueue,
       WAGER_TRANSACTIONS_DLQ: options.dlq,
       WAGERING_EVENTS_QUEUE: options.eventsQueue,

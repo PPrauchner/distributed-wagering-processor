@@ -6,7 +6,9 @@ status: accepted
 
 A concorrência é controlada por **lock pessimista na linha da carteira**
 (`SELECT … FOR UPDATE`, `LockMode.PESSIMISTIC_WRITE`), tomado como primeiro passo de
-cada unidade de trabalho que move saldo. A carteira é a unidade de concorrência do
+cada unidade de trabalho que toca a carteira — move saldo ou insere uma linha com FK
+para ela (ver a emenda ao fim). As unidades do worker que não tocam carteira travam
+só a linha da transação de aposta. A carteira é a unidade de concorrência do
 enunciado (§8); o lock é por linha, nunca global (§5.6). O lançamento precisa de
 `balanceBefore` e `balanceAfter`, e o `Money` faz a conta no domínio — ler e depois
 escrever é inevitável, e o lock é o que torna esse `read → calculate → update`

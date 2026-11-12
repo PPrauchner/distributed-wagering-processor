@@ -259,11 +259,12 @@ export class ProcessWagerTransaction {
     try {
       return await attempt();
     } catch (error) {
-      if (error instanceof DuplicateExternalIdError) {
-        throw new ExternalIdConflictError(props.providerId, props.externalTransactionId, props.payloadHash);
+      // A concurrent submission committed first, outside the lock. Which unique
+      // index PostgreSQL reports is not the answer: read it back in the order
+      // of the validations — key, then external id.
+      if (error instanceof DuplicateIdempotencyKeyError || error instanceof DuplicateExternalIdError) {
+        return this.readBack(props);
       }
-      // A concurrent submission of the same key committed first, outside the lock.
-      if (error instanceof DuplicateIdempotencyKeyError) return this.readBack(props);
       throw error;
     }
   }
@@ -334,7 +335,10 @@ export class ProcessWagerTransaction {
     });
   }
 
-  /** The transaction a concurrent submission recorded under the key: replay or conflict. */
+  /**
+   * The transaction a concurrent submission recorded under the key or the
+   * external id: replay, idempotency conflict or external id conflict.
+   */
   private async readBack(props: CreateWagerTransactionProps): Promise<WagerTransactionOutcome> {
     const earlier = await this.unitOfWork.run(({ transactions }) => findEarlier(transactions, props));
     if (!earlier) throw new Error('unique violation reported, but no transaction found');

@@ -17,7 +17,10 @@ let config: AppConfig;
 let logLines: string[] = [];
 
 async function startApp(appConfig: AppConfig): Promise<string> {
-  const app = await createApp(appConfig, { logDestination: { write: (line: string) => void logLines.push(line) } });
+  const app = await createApp(appConfig, {
+    logDestination: { write: (line: string) => void logLines.push(line) },
+    logLevel: 'info',
+  });
   await app.listen(0, '127.0.0.1');
   apps.push(app);
   return app.getUrl();
