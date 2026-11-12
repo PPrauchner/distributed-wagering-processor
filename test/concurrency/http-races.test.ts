@@ -1,7 +1,9 @@
 /**
- * Concurrency scenarios 1 to 3 of §13, by real parallel HTTP requests to a
- * real app process: the same bet 50 times, the race of §8 for the balance of
- * one wallet — both bets made to wait on the wallet lock before it goes —, and distinct wallets processed in parallel with no global lock.
+ * Concurrency scenarios 2 and 3 of §13, by real parallel HTTP requests to a
+ * real app process: the race of §8 for the balance of one wallet — both bets
+ * made to wait on the wallet lock before it goes —, and distinct wallets
+ * processed in parallel with no global lock. Scenario 1, across instances, is
+ * in `instances.test.ts`.
  * Every scenario ends checking the ledger invariant of every wallet it touched.
  *
  * @packageDocumentation
@@ -18,7 +20,6 @@ import {
   sql,
   submitUntilTerminal,
   transactionOn,
-  transactionsOf,
   walletState,
   type JsonObject,
 } from './support/wagering.ts';
@@ -33,28 +34,6 @@ beforeAll(async () => {
 afterAll(async () => {
   await killAllInstances();
   await deleteScenarioQueues();
-});
-
-describe('1. the same bet sent 50 times in parallel', () => {
-  test('one transaction and one debit; every answer is the original, the repetitions with idempotentReplay', async () => {
-    const wallet = await createWallet(app.url, '100.00');
-    const bet = transactionOn(wallet, 'BET');
-
-    const answers = await Promise.all(Array.from({ length: 50 }, () => submitUntilTerminal(app.url, bet)));
-
-    const originals = answers.filter((answer) => answer.body.idempotentReplay === false);
-    expect(originals).toHaveLength(1);
-    const [original] = originals;
-    expect(original!.status).toBe(200);
-    for (const answer of answers) {
-      expect(answer.status).toBe(original!.status);
-      expect(answer.body).toEqual({ ...original!.body, idempotentReplay: answer !== original });
-    }
-    expect(await transactionsOf(bet)).toHaveLength(1);
-    expect(await walletState(wallet.id)).toEqual({ balance: '75.00', version: 2 });
-    expect((await ledgerEntries(wallet.id)).debits).toBe(1);
-    await expectWalletsConsistent([wallet.id]);
-  }, 60_000);
 });
 
 describe('2. the race of §8: two bets of 80.00 at once on 100.00', () => {

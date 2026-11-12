@@ -1,7 +1,8 @@
 /**
- * Concurrency scenarios 4 and 5 of §13, with real app processes: three
- * instances over the same database and queues under load by HTTP and by the
- * input queue at once, on a few hot wallets; and a worker killed between the
+ * Concurrency scenarios 1, 4 and 5 of §13, with real app processes: the same
+ * bet 50 times across three instances, by HTTP and by the input queue at once;
+ * three instances over the same database and queues under load by HTTP and by
+ * the input queue at once, on a few hot wallets; and a worker killed between the
  * commit and the `ack` — `SIGKILL` to itself, at the `crash-after-commit`
  * point —, whose message another instance gets again. Every
  * scenario ends checking the ledger invariant of every wallet it touched.
@@ -22,6 +23,7 @@ import { waitUntil } from '../support/wait-until.ts';
 import {
   createWallet,
   expectWalletsConsistent,
+  ledgerEntries,
   queued,
   sql,
   submitUntilTerminal,
@@ -59,11 +61,54 @@ async function balanceOfTransactions(walletId: string): Promise<string> {
   return row.balance;
 }
 
+/** @returns How many transactions of the wallets ended `FAILED`. */
+async function failedTransactions(walletIds: readonly string[]): Promise<number> {
+  const [row] = await sql`
+    select count(*)::int as n from wager_transactions
+     where wallet_id in ${sql([...walletIds])} and status = 'FAILED'
+  `;
+  return row.n;
+}
+
 async function inboxDuplicates(url: string): Promise<number> {
   const text = await (await fetch(`${url}/metrics`)).text();
   const line = text.split('\n').find((row) => row.startsWith('inbox_duplicates_total '));
   return Number(line?.split(' ')[1] ?? 0);
 }
+
+describe('1. the same bet sent 50 times, across three instances, by HTTP and by the queue', () => {
+  test('one transaction and one debit; every HTTP answer is the same, at most one of them not an idempotentReplay', async () => {
+    const queues = await createScenarioQueues();
+    const instances = await Promise.all([1, 2, 3].map(() => instanceOn(queues)));
+    const wallet = await createWallet(instances[0]!.url, '100.00');
+    const bet = transactionOn(wallet, 'BET');
+
+    // 50 copies, alternating: even ones by HTTP to the three instances in turn,
+    // odd ones as distinct messages to the queue the three instances consume.
+    const copies = Array.from({ length: 50 }, (_, index) => index);
+    const [answers] = await Promise.all([
+      Promise.all(
+        copies.filter((index) => index % 2 === 0).map((index) => submitUntilTerminal(instances[index % 3]!.url, bet)),
+      ),
+      Promise.all(copies.filter((index) => index % 2 === 1).map(() => sendSubmission(queues.input, queued(bet)))),
+    ]);
+    await waitUntil(() => drained(queues.input), 60_000, 'input queue drained');
+
+    expect(answers).toHaveLength(25);
+    expect(answers.filter((answer) => answer.body.idempotentReplay === false).length).toBeLessThanOrEqual(1);
+    const [first] = answers;
+    expect(first!.status).toBe(200);
+    for (const answer of answers) {
+      expect(answer.status).toBe(200);
+      expect(answer.body).toEqual({ ...first!.body, idempotentReplay: answer.body.idempotentReplay });
+    }
+    expect(await messagesLeft(queues.dlq)).toBe(0);
+    expect(await transactionsOf(bet)).toMatchObject([{ status: 'PROCESSED' }]);
+    expect(await walletState(wallet.id)).toEqual({ balance: '75.00', version: 2 });
+    expect((await ledgerEntries(wallet.id)).debits).toBe(1);
+    await expectWalletsConsistent([wallet.id]);
+  }, 120_000);
+});
 
 describe('4. three instances at once over the same database and queues', () => {
   test('load by HTTP and by the queue on hot wallets: no lost update, no negative balance, one entry per moving transaction', async () => {
@@ -91,8 +136,9 @@ describe('4. three instances at once over the same database and queues', () => {
     for (const data of [...byHttp, ...byQueue]) {
       const rows = await transactionsOf(data);
       expect(rows).toHaveLength(1);
-      expect(['PROCESSED', 'REJECTED', 'FAILED']).toContain(rows[0]!.status);
+      expect(['PROCESSED', 'REJECTED']).toContain(rows[0]!.status);
     }
+    expect(await failedTransactions(wallets.map((wallet) => wallet.id))).toBe(0);
     for (const wallet of wallets) {
       const { balance } = await walletState(wallet.id);
       expect(Number(balance)).toBeGreaterThanOrEqual(0);
