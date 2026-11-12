@@ -422,8 +422,12 @@ Com mais de uma violação, prevalece a primeira, na mesma ordem nos dois canais
   o mesmo desfecho HTTP do conflito de idempotência: nada é persistido e não há
   replay do resultado da outra chave. O use case consulta
   `(provider_id, external_transaction_id)` antes de inserir; a corrida entre
-  carteiras diferentes, que não compartilham lock, cai no `23505` dessa constraint
-  e é classificada como o mesmo conflito. Na fila, é erro de negócio terminal.
+  carteiras diferentes, que não compartilham lock, cai no `23505` dessa constraint.
+  Esse `23505` não é a resposta: qual índice o PostgreSQL checa primeiro numa
+  corrida idêntica não é garantido. O use case relê na ordem das validações —
+  chave, depois id externo —: mesma chave e mesmo hash → replay; mesma chave e
+  outro hash → `IDEMPOTENCY_CONFLICT`; outra chave → `EXTERNAL_ID_CONFLICT`. Na
+  fila, os conflitos são erro de negócio terminal.
 - **Camadas:** o inbox, por `(consumerName, messageId)`, protege contra a
   redelivery da fila; a chave de idempotência protege contra o reenvio do provedor,
   por qualquer canal.
@@ -435,7 +439,10 @@ Com mais de uma violação, prevalece a primeira, na mesma ordem nos dois canais
   `wallet_version_observed`. Os dois ficam nulos em `PENDING_REFERENCE` e
   `FAILED`. Para transação ainda
   `PENDING_REFERENCE`, devolve o **estado atual** — se o worker já a resolveu, o
-  desfecho final. **Conflito** (mesma chave, hash diferente) → 409.
+  desfecho final: pode ser 200 com saldo, embora a resposta original tenha sido
+  202. É interpretação deliberada da regra 7 do §7, que fala de operação "já
+  processada": a pendente ainda não foi, e repetir o 202 esconderia um desfecho
+  que já existe. **Conflito** (mesma chave, hash diferente) → 409.
 
 ### Hash do payload
 
@@ -449,6 +456,11 @@ replay. O hash é calculado sobre o comando já validado, com o `walletId`
 normalizado em minúsculas (UUID não diferencia caixa); campo desconhecido no corpo
 é 400, para que dois payloads diferentes nunca compartilhem hash. Uma única função,
 comum às duas entradas.
+
+O hash do **inbox** é outro: cobre o `data` inteiro da mensagem, chave de
+idempotência incluída, porque identifica a mensagem, não a operação. O da
+transação cobre só os campos de negócio acima. Por isso a mesma operação
+reenviada com outra chave tem o mesmo hash de transação e outro hash de inbox.
 
 ### Submissões não admitidas
 
@@ -579,7 +591,7 @@ legítimo; se o lock a serializa, o domínio teria visto antes, e é bug.
 | `wallets (player_id, currency)` — `wallets_player_currency_unique` | conflito → 409 `WALLET_ALREADY_EXISTS`, com `walletId` |
 | `wallets (creation_idempotency_key)` — `wallets_creation_idempotency_key_unique` | relê e compara o hash → replay ou conflito |
 | `(provider_id, idempotency_key)` — `wager_transactions_provider_idempotency_key_unique` | relê e compara o hash → replay ou conflito |
-| `(provider_id, external_transaction_id)` — `wager_transactions_provider_external_id_unique` | conflito → `EXTERNAL_ID_CONFLICT` |
+| `(provider_id, external_transaction_id)` — `wager_transactions_provider_external_id_unique` | relê pela chave, depois pelo id externo → replay, `IDEMPOTENCY_CONFLICT` ou `EXTERNAL_ID_CONFLICT` |
 | `inbox (consumer_name, message_id)` — `inbox_messages_pkey` | redelivery → `ack` sem efeito (de um `FAILED`: DLQ de novo, depois `ack`) |
 | reversão única por referência — `wager_transactions_single_reversal_unique` | bug → permanente (`FAILED`, alerta) |
 | lançamento `(transaction_id, wallet_id)` — `wallet_ledger_entries_transaction_wallet_unique` | bug → permanente (`FAILED`, alerta) |
@@ -657,8 +669,13 @@ leva a mensagem à DLQ com `INFRA_UNEXPECTED` do mesmo jeito.
   agrupamento perde essa ordem, sem afetar o saldo.
 - **Inbox:** `consumerName` = `wager-transactions-consumer`; `messageId` do
   envelope (não o `MessageId` do SQS); `payloadHash` pela mesma função do hash do
-  payload, sobre `data`. Gravado na transação SQL de todo desfecho. Mesmo
-  `messageId` com hash diferente → DLQ, `MESSAGE_ID_CONFLICT`. Submissões não
+  payload, sobre o `data` inteiro, chave incluída (ver [Hash do
+  payload](#hash-do-payload)). Gravado na transação SQL de todo desfecho. Mesmo
+  `messageId` com hash diferente → DLQ, `MESSAGE_ID_CONFLICT`. **Precedência:**
+  mesmo `messageId`, mesma chave e payload diferente responde
+  `IDEMPOTENCY_CONFLICT`, não `MESSAGE_ID_CONFLICT` — o conflito de negócio (a
+  chave) vem antes do de transporte (o `messageId`), porque diz ao provedor o que
+  corrigir. Submissões não
   admitidas não gravam inbox: terminam na DLQ, com linha em `rejected_submissions`
   (ver [Submissões não admitidas](#submissões-não-admitidas)).
 - `ack` (`DeleteMessage`) só depois do commit. A mensagem que vem pela fila passa
