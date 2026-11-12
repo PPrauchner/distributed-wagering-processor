@@ -8,6 +8,30 @@
 import { describe, expect, test } from 'bun:test';
 import type { PublishOutbox } from '../../../src/messaging/application/publish-outbox.ts';
 import { OutboxPublisherWorker } from '../../../src/messaging/interface/outbox-publisher.worker.ts';
+import { captureNestLogs } from '../../support/nest-log-capture.ts';
+
+describe('a failed cycle', () => {
+  test('is logged by the error name, never its message', async () => {
+    let failed: (() => void) | undefined;
+    const cycleFailed = new Promise<void>((resolve) => (failed = resolve));
+    const publishOutbox = {
+      publishDue: async () => {
+        failed?.();
+        throw new TypeError('insert into outbox values (123.45)');
+      },
+    } as unknown as PublishOutbox;
+    const worker = new OutboxPublisherWorker(publishOutbox, { enabled: true, pollIntervalMs: 10_000 });
+
+    const lines = await captureNestLogs(async () => {
+      worker.onApplicationBootstrap();
+      await cycleFailed;
+      await worker.beforeApplicationShutdown();
+    });
+
+    expect(lines.join(' ')).toContain('TypeError');
+    expect(lines.join(' ')).not.toContain('123.45');
+  });
+});
 
 describe('before the application shuts down', () => {
   test('the worker waits for the cycle in flight', async () => {
