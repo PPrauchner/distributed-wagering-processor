@@ -59,6 +59,7 @@ export class PublishOutbox {
 
     const result = await this.send(claimed);
     const at = this.now();
+    const rescheduled: OutboxMessage[] = [];
     await this.unitOfWork.run(async ({ outbox, faults }) => {
       await faults.inject(FaultPoint.CrashAfterSend, {});
       const published = new Set(result.published);
@@ -69,17 +70,21 @@ export class PublishOutbox {
         } else {
           message.scheduleRetry(at, this.options.backoff);
           await outbox.reschedule(message);
-          this.metrics.publishRetry();
-          if (message.attempts === STUCK_ATTEMPTS) {
-            this.log.warn(`outbox message failed ${STUCK_ATTEMPTS} attempts, still retrying`, {
-              messageId: message.id,
-              eventType: message.eventType,
-              attempts: message.attempts,
-            });
-          }
+          rescheduled.push(message);
         }
       }
     });
+    // Counted and alerted only once committed: a rolled-back attempt comes back when its lease expires.
+    for (const message of rescheduled) {
+      this.metrics.publishRetry();
+      if (message.attempts === STUCK_ATTEMPTS) {
+        this.log.warn(`outbox message failed ${STUCK_ATTEMPTS} attempts, still retrying`, {
+          messageId: message.id,
+          eventType: message.eventType,
+          attempts: message.attempts,
+        });
+      }
+    }
     return claimed.length;
   }
 

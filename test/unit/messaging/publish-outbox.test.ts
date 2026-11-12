@@ -161,4 +161,31 @@ describe('a reschedule', () => {
     expect(fields).toEqual({ messageId: 'm-9', eventType: 'WalletBalanceChanged', attempts: 10 });
     expect(JSON.stringify(log.details)).not.toContain('payload');
   });
+
+  test('whose unit of work fails to commit is neither counted nor alerted', async () => {
+    const log = logSpy();
+    const metrics = metricsSpy();
+    const outbox = outboxOf([message('m-9', 9)]);
+    let runs = 0;
+    const commitFails: UnitOfWork<OutboxRepositories & FaultInjection> = {
+      run: async (work) => {
+        const result = await work({ outbox, faults: { inject: async () => undefined } });
+        if (++runs === 2) throw new Error('commit failed');
+        return result;
+      },
+    };
+    const publish = new PublishOutbox(
+      commitFails,
+      failing,
+      { leaseMs: 30_000, backoff: { baseMs: 1000, maxMs: 5000 } },
+      log,
+      metrics,
+      () => NOW,
+    );
+
+    await expect(publish.publishDue()).rejects.toThrow('commit failed');
+
+    expect(metrics.retries).toBe(0);
+    expect(log.warnings.filter((line) => line.includes('attempts'))).toEqual([]);
+  });
 });
