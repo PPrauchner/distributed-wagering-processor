@@ -3,7 +3,8 @@
  * between the send and `published_at` (`crash-after-send`), then two
  * publishers at once over the same outbox, while new events are written.
  * The events the killed publisher sends are written before any publisher is
- * on, so its one claim holds all of them. Every confirmed event reaches the
+ * on, and after the shared outbox is left with no row never claimed, so its
+ * one claim holds all of them. Every confirmed event reaches the
  * events queue, nothing outside the outbox arrives, and every message carries
  * its `eventId` as the FIFO deduplication id — which is what absorbs the
  * resend of what the killed publisher sent. Ends checking the ledger
@@ -54,11 +55,31 @@ async function outboxOf(wallets: readonly TestWallet[]): Promise<{ id: string; p
   ];
 }
 
+/** Runs a plain publisher until no outbox row is left pending and never claimed. */
+async function drainUnclaimed(queues: ScenarioQueues): Promise<void> {
+  const drainer = await publisherOn(queues);
+  await waitUntil(
+    async () => {
+      const [{ count }] = await sql`
+        select count(*)::int as count from outbox_messages where published_at is null and next_attempt_at is null
+      `;
+      return count === 0 ? true : undefined;
+    },
+    60_000,
+    'no outbox row left unclaimed',
+  );
+  await drainer.kill();
+}
+
 describe('6. publishers over the same outbox', () => {
   test('one killed after the send, then two at once: every confirmed event arrives, only outbox events arrive, each deduplicated by its eventId', async () => {
     const queues = await createScenarioQueues();
     const received: ReceivedEvent[] = [];
     const receivedIds = () => new Set(received.map((event) => event.eventId));
+
+    // The outbox is shared by the whole suite: rows never claimed, left by earlier
+    // scenarios, would go ahead of these in the dying publisher's one claim.
+    await drainUnclaimed(queues);
 
     // The events are written with no publisher on, so none is claimed half-written.
     const writer = await instanceOn(queues, false);
