@@ -31,16 +31,33 @@ const REDACTED_KEYS = [
 const REDACTED = new Set(REDACTED_KEYS);
 const CENSOR = '[redacted]';
 
-/** A copy of the logged object with every redacted key masked, at any depth. */
+/**
+ * A copy of the logged object with every redacted key masked, at any depth. An
+ * object with a `toJSON` — `Money`, an event — is masked in the shape it would
+ * be serialized in; `seen` holds only the current path, so a reference shared
+ * by two branches is not taken for a cycle.
+ */
 function redact(value: unknown, seen = new WeakSet<object>()): unknown {
   if (typeof value !== 'object' || value === null) return value;
   if (seen.has(value)) return '[circular]';
+  const toJSON: unknown = Reflect.get(value, 'toJSON');
+  if (typeof toJSON === 'function') {
+    seen.add(value);
+    const serialized = redact(toJSON.call(value), seen);
+    seen.delete(value);
+    return serialized;
+  }
+  if (!Array.isArray(value) && Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null) {
+    return value;
+  }
   seen.add(value);
-  if (Array.isArray(value)) return value.map((item) => redact(item, seen));
-  if (Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null) return value;
-  return Object.fromEntries(
-    Object.entries(value).map(([key, field]) => [key, REDACTED.has(key) ? CENSOR : redact(field, seen)]),
-  );
+  const copy = Array.isArray(value)
+    ? value.map((item) => redact(item, seen))
+    : Object.fromEntries(
+        Object.entries(value).map(([key, field]) => [key, REDACTED.has(key) ? CENSOR : redact(field, seen)]),
+      );
+  seen.delete(value);
+  return copy;
 }
 
 /** The context of the current request or unit of work, carried across its awaits. */

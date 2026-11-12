@@ -123,6 +123,37 @@ describe('pino logging', () => {
     expect(lines[0]).toMatchObject({ data: { data: { transaction: { money: '[redacted]' } } } });
   });
 
+  test('money inside an object serialized by its toJSON is redacted', () => {
+    const { lines, nest } = capture();
+    class Event {
+      toJSON(): unknown {
+        return { kind: 'BET', payload: { money: { amount: '123.45' }, balanceAfter: '987.65' } };
+      }
+    }
+    class Amount {
+      toJSON(): unknown {
+        return { amount: '555.55', currency: 'BRL' };
+      }
+    }
+
+    nest.log({ event: new Event(), price: new Amount() }, 'Test');
+
+    const raw = JSON.stringify(lines);
+    expect(raw).not.toContain('123.45');
+    expect(raw).not.toContain('987.65');
+    expect(raw).not.toContain('555.55');
+    expect(lines[0]).toMatchObject({ data: { event: { kind: 'BET', payload: '[redacted]' }, price: { currency: 'BRL' } } });
+  });
+
+  test('the same object logged in two places is not taken for a cycle', () => {
+    const { lines, nest } = capture();
+    const wallet = { walletId: 'wallet-1' };
+
+    nest.log({ from: wallet, to: wallet }, 'Test');
+
+    expect(lines[0]).toMatchObject({ data: { from: { walletId: 'wallet-1' }, to: { walletId: 'wallet-1' } } });
+  });
+
   test("Nest's errors are logged by name and failure code, never by message", () => {
     const { lines, nest } = capture();
     const error = Object.assign(new Error('insert into ledger values (123.45)', { cause: new Error('987.65') }), {
