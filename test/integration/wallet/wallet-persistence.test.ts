@@ -3,6 +3,9 @@
  * `defineEntity` mappings of the wallet, the opening and its ledger entry with
  * `Money` as an embeddable, and the wallet's own schema
  * invariants proven by raw SQL — the code path is not trusted to hold them.
+ * The migrations go down and back up in a database of their own, so the wallets
+ * other files left in the shared test database survive to the final ledger
+ * check of the run.
  *
  * @packageDocumentation
  */
@@ -34,11 +37,6 @@ afterAll(async () => {
   await orm?.close(true);
   await sql?.close();
 });
-
-async function tableExists(name: string): Promise<boolean> {
-  const [row] = await sql`select to_regclass(${name}) is not null as exists`;
-  return row.exists;
-}
 
 async function insertWallet(overrides: Record<string, unknown> = {}): Promise<string> {
   const row: Record<string, unknown> = {
@@ -89,8 +87,8 @@ const TABLES = [
 ];
 
 /** Tables and functions of the public schema: what the migrations create. */
-async function schemaObjects(): Promise<string[]> {
-  const rows: { name: string }[] = await sql`
+async function schemaObjects(db: SQL): Promise<string[]> {
+  const rows: { name: string }[] = await db`
     select table_name::text as name from information_schema.tables
      where table_schema = 'public' and table_name <> 'mikro_orm_migrations'
     union all
@@ -99,26 +97,62 @@ async function schemaObjects(): Promise<string[]> {
   return rows.map((row) => row.name).sort();
 }
 
+async function tableExists(db: SQL, name: string): Promise<boolean> {
+  const [row] = await db`select to_regclass(${name}) is not null as exists`;
+  return row.exists;
+}
+
 describe('migrations by script', () => {
+  // Down to zero wipes every row, so it runs apart from the shared test database.
+  const adminUrl = loadConfig().databaseUrl;
+  const migrationsUrl = new URL(adminUrl);
+  const migrationsDatabase = `${migrationsUrl.pathname.slice(1)}_migrations`;
+  migrationsUrl.pathname = `/${migrationsDatabase}`;
+  let migrationsOrm: MikroORM;
+  let migrationsSql: SQL;
+
+  async function recreateMigrationsDatabase(drop: boolean): Promise<void> {
+    const admin = new SQL(adminUrl);
+    try {
+      await admin.unsafe(`drop database if exists "${migrationsDatabase}" with (force)`);
+      if (!drop) await admin.unsafe(`create database "${migrationsDatabase}"`);
+    } finally {
+      await admin.close();
+    }
+  }
+
+  beforeAll(async () => {
+    await recreateMigrationsDatabase(false);
+    migrationsOrm = await MikroORM.init(createOrmConfig(migrationsUrl.toString()));
+    await migrationsOrm.migrator.up();
+    migrationsSql = new SQL(migrationsUrl.toString());
+  });
+
+  afterAll(async () => {
+    await migrationsOrm?.close(true);
+    await migrationsSql?.close();
+    await recreateMigrationsDatabase(true);
+  });
+
   test('down drops everything they created and up recreates it', async () => {
-    const created = await schemaObjects();
+    const created = await schemaObjects(migrationsSql);
     expect(created).toEqual(expect.arrayContaining(TABLES));
 
-    const reverted = await orm.migrator.down({ to: 0 });
+    const reverted = await migrationsOrm.migrator.down({ to: 0 });
 
     expect(reverted.map((migration) => migration.name)).toEqual([...ALL_MIGRATIONS].reverse());
-    expect(await schemaObjects()).toEqual([]);
+    expect(await schemaObjects(migrationsSql)).toEqual([]);
 
-    const applied = await orm.migrator.up();
+    const applied = await migrationsOrm.migrator.up();
 
     expect(applied.map((migration) => migration.name)).toEqual(ALL_MIGRATIONS);
-    expect(await schemaObjects()).toEqual(created);
+    expect(await schemaObjects(migrationsSql)).toEqual(created);
   });
 
   test('the migrate script goes down and back up', async () => {
     const runScript = async (direction: string): Promise<unknown> => {
       const child = Bun.spawn([process.execPath, 'src/database/migrate.ts', direction], {
-        env: { ...process.env, DATABASE_URL: loadConfig().databaseUrl },
+        env: { ...process.env, DATABASE_URL: migrationsUrl.toString() },
         stdout: 'pipe',
         stderr: 'pipe',
       });
@@ -128,9 +162,9 @@ describe('migrations by script', () => {
     };
 
     expect(await runScript('down')).toEqual({ direction: 'down', migrations: [...ALL_MIGRATIONS].reverse() });
-    for (const table of TABLES) expect(await tableExists(table)).toBe(false);
+    for (const table of TABLES) expect(await tableExists(migrationsSql, table)).toBe(false);
     expect(await runScript('up')).toEqual({ direction: 'up', migrations: ALL_MIGRATIONS });
-    for (const table of TABLES) expect(await tableExists(table)).toBe(true);
+    for (const table of TABLES) expect(await tableExists(migrationsSql, table)).toBe(true);
   });
 });
 
