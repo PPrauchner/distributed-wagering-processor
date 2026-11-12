@@ -62,6 +62,14 @@ describe('parseWagerTransactionMessage', () => {
     expect(parseWagerTransactionMessage(envelope({ occurredAt }), {}).messageId).toBe('msg-123');
   });
 
+  test('trims the idempotency key, as the HTTP endpoint does', () => {
+    const padded = { ...data, idempotencyKey: '  provider-a:transaction-123 ' };
+
+    const message = parseWagerTransactionMessage(envelope({ data: padded }), {});
+
+    expect(message.command.idempotencyKey).toBe('provider-a:transaction-123');
+  });
+
   test('keeps the reference of a dependent transaction', () => {
     const withReference = { ...data, kind: 'REFUND', referenceExternalTransactionId: 'bet-1' };
 

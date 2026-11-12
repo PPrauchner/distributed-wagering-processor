@@ -77,6 +77,9 @@ export function parseWagerTransactionMessage(
     payloadHash: hashPayload(data as CanonicalValue),
     command: {
       ...strings,
+      // Trimmed as by HTTP, so one provider key is one key on both channels; a
+      // key of spaces only arrives empty, and the domain refuses it.
+      idempotencyKey: strings.idempotencyKey.trim(),
       correlationId: attributes.correlationId || messageId,
       money: {
         amount: expectString(money.amount, 'message.data.money.amount'),
