@@ -12,7 +12,7 @@ import { PrometheusMetrics, type MetricsSources } from '../../../src/health/infr
 
 function sources(overrides: Partial<MetricsSources> = {}): MetricsSources {
   return {
-    readBacklog: async () => ({ pending: 0, lagSeconds: 0 }),
+    readBacklog: async () => ({ pending: 0, lagSeconds: 0, stuck: 0 }),
     readDlqDepth: async () => 0,
     ...overrides,
   };
@@ -31,7 +31,7 @@ function gauge(text: string, name: string): number | undefined {
 describe('PrometheusMetrics', () => {
   test('a backlog read that fails → the scrape still answers, the gauges keep their last value, the failure is logged', async () => {
     const log = recordingLog();
-    let read: () => Promise<OutboxBacklog> = async () => ({ pending: 3, lagSeconds: 7 });
+    let read: () => Promise<OutboxBacklog> = async () => ({ pending: 3, lagSeconds: 7, stuck: 1 });
     const metrics = new PrometheusMetrics(sources({ readBacklog: () => read() }), { timeoutMs: 50, log });
     await metrics.registry.metrics();
     metrics.lockConflict('lock_timeout');
@@ -50,7 +50,7 @@ describe('PrometheusMetrics', () => {
   test('a scrape reads the backlog once: both gauges come from the same read, a failure is logged once', async () => {
     const log = recordingLog();
     let reads = 0;
-    let read: () => Promise<OutboxBacklog> = async () => ({ pending: ++reads, lagSeconds: reads * 10 });
+    let read: () => Promise<OutboxBacklog> = async () => ({ pending: ++reads, lagSeconds: reads * 10, stuck: reads * 100 });
     const metrics = new PrometheusMetrics(sources({ readBacklog: () => read() }), { timeoutMs: 50, log });
 
     const text = await metrics.registry.metrics();
@@ -58,6 +58,7 @@ describe('PrometheusMetrics', () => {
     expect(reads).toBe(1);
     expect(gauge(text, 'outbox_pending')).toBe(1);
     expect(gauge(text, 'outbox_lag_seconds')).toBe(10);
+    expect(gauge(text, 'outbox_stuck_messages')).toBe(100);
 
     read = async () => {
       throw new Error('connection refused');
