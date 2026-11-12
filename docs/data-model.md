@@ -6,8 +6,7 @@ sozinho, sem depender do código. Escrito a partir do catálogo do PostgreSQL
 `0001`–`0013` num banco limpo pelo runner Bun (`bun run db:migrate up`), e
 conferido na volta (`down` deixa só a tabela de controle do MikroORM).
 
-As migrations ficam em `src/<módulo>/infrastructure/migrations/`. As do spike
-(`spike/`) não fazem parte do serviço e não entram aqui.
+As migrations ficam em `src/<módulo>/infrastructure/migrations/`.
 
 Por que as invariantes moram no schema: [ADR 0001](adr/0001-mikroorm-7-com-invariantes-no-schema.md).
 Versão da carteira como sequência do livro-razão: [ADR 0003](adr/0003-versao-da-carteira-como-sequencia-do-livro-razao.md).
