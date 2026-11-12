@@ -8,7 +8,7 @@
 import { describe, expect, test } from 'bun:test';
 import type { EntityManager } from '@mikro-orm/postgresql';
 import { SqlFaultInjector } from '../../../src/database/sql-fault-injector.ts';
-import { FaultPoint, SimulatedCrashError } from '../../../src/shared/application/fault-injector.ts';
+import { FaultPoint, SimulatedBugError, SimulatedCrashError } from '../../../src/shared/application/fault-injector.ts';
 
 /** An entity manager that fails the test if the injector uses it at all. */
 const untouchable = new Proxy({} as EntityManager, {
@@ -38,5 +38,13 @@ describe('crash-after-send', () => {
     const faults = new SqlFaultInjector(untouchable, new Set([FaultPoint.CrashAfterSend]));
 
     await expect(faults.inject(FaultPoint.CrashAfterSend, {})).rejects.toBeInstanceOf(SimulatedCrashError);
+  });
+});
+
+describe('unexpected-error-before-commit', () => {
+  test('when enabled, an application error no classifier knows, without touching the database', async () => {
+    const faults = new SqlFaultInjector(untouchable, new Set([FaultPoint.UnexpectedErrorBeforeCommit]));
+
+    await expect(faults.inject(FaultPoint.UnexpectedErrorBeforeCommit, {})).rejects.toBeInstanceOf(SimulatedBugError);
   });
 });
