@@ -3,26 +3,35 @@
  * provider's external id: the app runs in process against the real PostgreSQL.
  * A query answers 200 with the outcome of the transaction — the balance it
  * observed, not the wallet's current one — and its identity, whatever its
- * status; an unknown id answers 404 `NOT_FOUND`.
+ * status; an unknown id answers 404 `NOT_FOUND`. The file ends checking the
+ * ledger of every wallet it created.
  *
  * @packageDocumentation
  */
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
+import { SQL } from 'bun';
 import type { INestApplication } from '@nestjs/common';
 import { createApp } from '../../../src/app.ts';
 import { loadConfig } from '../../../src/config.ts';
+import { expectLedgerConsistent } from '../ledger-invariant.ts';
 
 let app: INestApplication;
 let baseUrl: string;
+let sql: SQL;
+const touchedWallets: string[] = [];
 
 beforeAll(async () => {
-  app = await createApp(loadConfig());
+  const config = loadConfig();
+  app = await createApp(config);
   await app.listen(0, '127.0.0.1');
   baseUrl = await app.getUrl();
+  sql = new SQL(config.databaseUrl);
 });
 
 afterAll(async () => {
+  await expectLedgerConsistent(sql, touchedWallets);
   await app?.close();
+  await sql?.close();
 });
 
 type JsonObject = Record<string, unknown>;
@@ -41,6 +50,7 @@ async function createWallet(amount: string): Promise<TestWallet> {
   });
   expect(response.status).toBe(201);
   const { id } = (await response.json()) as { id: string };
+  touchedWallets.push(id);
   return { id, playerId };
 }
 

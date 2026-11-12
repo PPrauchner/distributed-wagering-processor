@@ -2,13 +2,15 @@
  * `wager_transactions` guaranteed by the schema, proven by raw SQL: idempotency
  * key and external id unique per provider, the static coherence `CHECK`s of
  * every kind and status, and the terminal row that never changes. The code path
- * is not trusted to hold any of it.
+ * is not trusted to hold any of it. The file ends checking the ledger of the
+ * wallet its rows point at.
  *
  * @packageDocumentation
  */
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { SQL } from 'bun';
 import { loadConfig } from '../../../src/config.ts';
+import { expectLedgerConsistent } from '../ledger-invariant.ts';
 
 let sql: SQL;
 let walletId: string;
@@ -23,6 +25,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  await expectLedgerConsistent(sql, [walletId]);
   await sql?.close();
 });
 
