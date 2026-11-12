@@ -4,7 +4,8 @@
  * submissions of the test move them — outcomes, replays, conflicts, refusals,
  * lock conflicts, latency, reconciliation divergences — while the outbox
  * gauges, read from the database on each scrape, show the events no publisher
- * took (the test apps run none).
+ * took (the test apps run none), and the DLQ depth, read from SQS, shows what
+ * waits in the DLQ.
  *
  * The test database is shared with the other test files: the checks compare
  * this app's counters before and after, and the outbox gauges only from below.
@@ -13,6 +14,7 @@
  */
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import type { INestApplication } from '@nestjs/common';
+import { CreateQueueCommand, DeleteQueueCommand, SendMessageCommand, SQSClient } from '@aws-sdk/client-sqs';
 import { SQL } from 'bun';
 import { createApp } from '../../../src/app.ts';
 import { loadConfig } from '../../../src/config.ts';
@@ -114,9 +116,16 @@ describe('GET /metrics', () => {
       ['outbox_lag_seconds', 'gauge'],
       ['wager_transaction_processing_seconds', 'histogram'],
       ['reconciliation_divergences_total', 'counter'],
+      ['wager_transactions_consumer_retries_total', 'counter'],
+      ['wager_transactions_dlq_messages_total', 'counter'],
+      ['wager_transactions_dlq_depth', 'gauge'],
     ]) {
       expect(text).toContain(`# TYPE ${name} ${type}`);
     }
+    // The known series exist at the start: a sample line, not only the TYPE.
+    expect(text).toMatch(/^wager_transactions_total\{kind="WIN",status="REJECTED",channel="QUEUE"\} \d+$/m);
+    expect(text).toMatch(/^lock_conflicts_total\{reason="serialization_failure"\} \d+$/m);
+    expect(text).toMatch(/^rejected_submissions_total\{failure_code="MESSAGE_ID_CONFLICT",channel="QUEUE"\} \d+$/m);
     expect(text).toMatch(/^inbox_duplicates_total 0$/m);
     expect(text).toMatch(/^reconciliation_divergences_total \d+$/m);
   });
@@ -212,5 +221,37 @@ describe('GET /metrics', () => {
     expect(sample(text, 'outbox_pending')).toBeGreaterThan(0);
     expect(sample(text, 'outbox_lag_seconds')).toBeGreaterThanOrEqual(row.lag);
     expect(sample(text, 'outbox_lag_seconds')).toBeGreaterThan(0);
+  });
+
+  test('messages waiting in the DLQ: wager_transactions_dlq_depth reads them from SQS on the scrape', async () => {
+    const config = loadConfig();
+    const sqs = new SQSClient({
+      endpoint: config.sqs.endpoint,
+      region: config.sqs.region,
+      credentials: { accessKeyId: config.sqs.accessKeyId, secretAccessKey: config.sqs.secretAccessKey },
+    });
+    const dlqName = `metrics-dlq-${Bun.randomUUIDv7()}.fifo`;
+    const { QueueUrl } = await sqs.send(
+      new CreateQueueCommand({ QueueName: dlqName, Attributes: { FifoQueue: 'true' } }),
+    );
+    const dlqApp = await createApp({ ...config, sqs: { ...config.sqs, wagerTransactionsDlq: dlqName } });
+    try {
+      await dlqApp.listen(0, '127.0.0.1');
+      const url = await dlqApp.getUrl();
+      const depth = async () => sample(await (await fetch(`${url}/metrics`)).text(), 'wager_transactions_dlq_depth');
+      expect(await depth()).toBe(0);
+
+      for (const id of ['a', 'b']) {
+        await sqs.send(
+          new SendMessageCommand({ QueueUrl, MessageBody: '{}', MessageGroupId: 'g', MessageDeduplicationId: id }),
+        );
+      }
+
+      expect(await depth()).toBe(2);
+    } finally {
+      await dlqApp.close();
+      await sqs.send(new DeleteQueueCommand({ QueueUrl })).catch(() => undefined);
+      sqs.destroy();
+    }
   });
 });
