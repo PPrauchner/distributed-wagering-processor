@@ -2,10 +2,8 @@
 
 Decisões, trade-offs e limitações da solução. Este documento é o mapa: cada seção
 resume a decisão e aponta para o ADR que guarda o porquê completo
-(`docs/adr/`). O vocabulário segue o glossário em `CONTEXT.md`.
-
-> **Esqueleto em construção.** Seções marcadas *A definir* ainda não foram
-> decididas; cada decisão nova atualiza a seção correspondente.
+(`docs/adr/`). O vocabulário segue o glossário em `CONTEXT.md`. Setup e comandos
+ficam no [`README.md`](README.md).
 
 ## Visão geral
 
@@ -769,7 +767,39 @@ uma porta de identidade do provedor. O ponto de extensão no código:
   `INVALID_PAYLOAD` de forma vêm antes. As rotas de carteira e a consulta por id
   interno não declaram provedor: o guard só resolve a identidade.
 
-*A definir* — o desenho que seria adotado com Keycloak.
+### Desenho com Keycloak (não implementado)
+
+- **Um client por provedor**, num realm dedicado aos provedores de jogos:
+  *confidential client* com só o fluxo **client credentials** (OAuth 2.0)
+  habilitado — sem usuário, sem navegador. O provedor troca `client_id` e
+  `client_secret` (ou `private_key_jwt`, para não trafegar segredo) por um access
+  token curto (5 min) e o manda em `Authorization: Bearer <token>`.
+- **Claim de identidade:** `providerId` sai de um claim próprio,
+  `provider_id`, posto no token por um *hardcoded claim mapper* do client — não do
+  `azp`/`client_id`, para que o nome técnico do client possa mudar (rotação,
+  ambiente) sem mudar o `providerId` gravado nas transações. Um *audience mapper*
+  põe o serviço em `aud`.
+- **Validação no serviço, sem chamada ao Keycloak por requisição:** uma
+  implementação `JwtProviderIdentity` da porta `ProviderIdentity`, em
+  `shared/infrastructure`, verifica a assinatura pelo JWKS do realm (chaves em
+  cache, recarregadas quando aparece um `kid` desconhecido), `iss`, `aud`, `exp`
+  e a presença de `provider_id`, lendo o token de `headers` do
+  `ProviderIdentityRequest`. Token ausente ou inválido → 401, com um código novo
+  no enum (`UNAUTHENTICATED`) e sem transação de aposta; o 403
+  `PROVIDER_IDENTITY_MISMATCH` segue igual, agora contra uma identidade de fato
+  autenticada.
+- **Troca:** só o provider `PROVIDER_IDENTITY` em `src/app.ts` muda, de
+  `DeclaredProviderIdentity` para `JwtProviderIdentity`; o guard, os controllers e
+  os use cases não mudam. Configuração por `AUTH_ISSUER_URL` e `AUTH_AUDIENCE`.
+- **Fila:** continua sem token. Ela é canal interno; quem pode enviar a ela é
+  decidido por política de IAM da fila (um principal por provedor), e o
+  `providerId` do envelope seria conferido contra o atributo de sistema `SenderId`
+  da mensagem, mapeado para o provedor.
+- **Rotas administrativas** (criação de carteira, reconciliação) passariam a
+  exigir um client de operação com um *role* próprio, verificado por um segundo
+  guard; hoje são abertas, como o resto.
+- **No Compose:** um serviço `keycloak` com o realm importado de um JSON
+  versionado, com um client por provedor dos testes.
 
 ## Observabilidade
 
@@ -885,6 +915,53 @@ uma porta de identidade do provedor. O ponto de extensão no código:
   `test/integration/support/shutdown-on-ipc.ts` o emite no processo, pelos mesmos
   listeners do `enableShutdownHooks`; nos demais sistemas, sinal de verdade.
 
+## Interpretações do enunciado
+
+Onde o enunciado (`docs/Desafio.md`) é ambíguo ou silencia, a leitura adotada — a
+maioria decidida nos grills do PRD (`docs/grills_logs/transversal/prd.md` e
+`lacunas-prd.md`) e detalhada na seção indicada:
+
+- **Submissão HTTP síncrona** (§9, §10): a resposta traz o desfecho e o saldo;
+  `PENDING` nunca é persistido; o único aceite pendente é `PENDING_REFERENCE`
+  (202) — [Visão geral](#visão-geral).
+- **Hidratação sem a factory** (§6.0): desvio declarado — o MikroORM hidrata por
+  `Object.create` — [Persistência e ORM](#persistência-e-orm).
+- **"Arredondamento"** (§13): nada é arredondado; mais de 2 casas decimais é
+  recusado. Teto de 15 dígitos inteiros na entrada; piso por tipo; moeda por
+  `^[A-Z]{3}$`, sem lista ISO — [Mapeamento do `Money`](#mapeamento-do-money).
+- **`REFUND` e `ROLLBACK` da mesma referência** (§7, regra 4): uma referência é
+  desfeita no máximo uma vez, por qualquer dos dois tipos —
+  [Reembolso e reversão](#reembolso-e-reversão).
+- **Referência do `WIN` opcional** (§7): quando citada, resolve como a de uma
+  transação dependente, sem igualdade de valor e sem contar como desfazer; `LOSS`
+  não leva referência — [Reembolso e reversão](#reembolso-e-reversão).
+- **Rodada sem máquina de estados:** `WIN` sem `BET`, ou `WIN` e `LOSS` na mesma
+  rodada, são aceitos — [Transições](#transições-da-transação-de-aposta).
+- **Rejeição × submissão não admitida** (§10): só a rejeição de regra de negócio
+  cria transação de aposta `REJECTED`; payload inválido, conflito de chave e
+  carteira inexistente não criam nada e são auditados à parte —
+  [Submissões não admitidas](#submissões-não-admitidas).
+- **Na fila, toda submissão não admitida termina na DLQ**, com o código no
+  atributo `failureCode`; `WALLET_NOT_FOUND` passa antes pelo retry transitório —
+  [Consumidor](#consumidor).
+- **Replay devolve o saldo observado** na hora do desfecho, não o atual; replay
+  de uma pendente devolve o estado atual —
+  [Idempotência e deduplicação](#idempotência-e-deduplicação).
+- **`FAILED` é terminal para a chave** e publica `WagerTransactionFailed`, além
+  dos quatro eventos mínimos do §11: quem submete pela fila só conhece o desfecho
+  pelos eventos — [Eventos de integração](#eventos-de-integração).
+- **Criação de carteira idempotente por `Idempotency-Key` opcional**; saldo
+  inicial zero é permitido, sem abertura nem lançamento, e saldo positivo grava a
+  `OPENING` — [Carteira e livro-razão](#carteira-e-livro-razão).
+- **`MessageGroupId` = `walletId`** é contrato do produtor da fila de entrada
+  (§8: a carteira é a unidade de concorrência) — [Consumidor](#consumidor).
+- **Eventos pelo menos uma vez e sem ordem garantida** entre publicadores; o
+  consumidor deduplica por `eventId` e ordena por `walletVersion` —
+  [Publicador da outbox](#publicador-da-outbox).
+- **Prazo e leases pelo relógio do banco** (`now()`), nunca pelo da instância.
+- **Autenticação fora do escopo** (§2): guard no-op atrás de uma porta —
+  [Autenticação](#autenticação).
+
 ## Evolução possível
 
 - **Processamento assíncrono da submissão** — ver [Visão geral](#visão-geral).
@@ -950,5 +1027,10 @@ uma porta de identidade do provedor. O ponto de extensão no código:
   processamento. Como as mensagens de um grupo rodam em série, o pior caso de um
   lote é ~10 × `lock_timeout` de 2 s ≈ 20 s, abaixo do timeout. Se ele expirar
   mesmo assim, a mensagem é reentregue e o inbox impede efeito duplicado.
+- O SQS é emulado pelo `localstack/localstack:4.14.0`, fixado: é a última imagem
+  que roda sem conta nem token (as tags posteriores e `latest` exigem). As
+  divergências conhecidas do SQS real estão nos itens acima e em
+  [Consumidor](#consumidor); a alternativa de saída é o MiniStack, no mesmo
+  endpoint `:4566`.
 - A auditoria das submissões não admitidas é de melhor esforço: com o banco fora do
   ar, a resposta sai igual e a linha se perde (o erro é logado).
