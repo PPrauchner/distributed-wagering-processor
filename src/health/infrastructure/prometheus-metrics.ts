@@ -31,6 +31,7 @@ import {
   type WageringMetrics,
 } from '../../wagering/application/wagering-metrics.ts';
 import type { ReconciliationDivergenceCounter } from '../../wallet/application/reconciliation.ts';
+import type { WalletMetrics } from '../../wallet/application/wallet-metrics.ts';
 
 /** Latency buckets, in seconds: a submission takes milliseconds, up to the 2 s lock timeout. */
 const LATENCY_BUCKETS = [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2, 5];
@@ -123,7 +124,7 @@ function zero<L extends string>(counter: Counter<L>, values: Record<L, readonly 
 }
 
 export class PrometheusMetrics
-  implements WageringMetrics, ConsumerMetrics, OutboxMetrics, ReconciliationDivergenceCounter
+  implements WageringMetrics, ConsumerMetrics, OutboxMetrics, WalletMetrics, ReconciliationDivergenceCounter
 {
   readonly registry = new Registry();
   private readonly transactions: Counter<'kind' | 'status' | 'channel'>;
