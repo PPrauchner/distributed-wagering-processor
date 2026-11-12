@@ -768,7 +768,10 @@ leva a mensagem à DLQ com `INFRA_UNEXPECTED` do mesmo jeito.
   recusado —, para que uma fila mal configurada não fique invisível.
 - **Parada:** em `beforeApplicationShutdown` o publicador para de reivindicar e
   espera o ciclo em andamento, antes dos ganchos de `onApplicationShutdown` que
-  fecham o ORM e o cliente SQS.
+  fecham o ORM e o cliente SQS — por até 20 s, dentro dos 30 s de
+  `stop_grace_period` do Compose; passado o prazo, loga `warn` e segue o
+  desligamento, e o lease devolve os itens abandonados. O worker de referências
+  pendentes para do mesmo jeito.
 - **Configuração por ambiente:** `OUTBOX_PUBLISHER_ENABLED` (padrão `true`),
   `OUTBOX_POLL_INTERVAL_MS` (500), `OUTBOX_LEASE_MS` (30000),
   `OUTBOX_RETRY_BASE_MS` (1000), `OUTBOX_RETRY_MAX_MS` (300000),
