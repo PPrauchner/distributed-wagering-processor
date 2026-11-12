@@ -155,13 +155,32 @@ Em resumo, o banco garante sozinho:
   coerência tipo × referência × status e `status <> 'PENDING'`.
 - **FKs:** transação → carteira, referência → transação, lançamento →
   transação e a FK composta `(wallet_id, currency)` → `wallets (id, currency)`,
-  que amarra a moeda do lançamento à da carteira. Inbox, outbox e
-  `rejected_submissions` não têm FK.
+  que amarra a moeda do lançamento à da carteira. A FK composta
+  `wallet_ledger_entries_transaction_terms_fk`, `(transaction_id, wallet_id,
+  amount, currency)` → `wager_transactions`, amarra carteira, valor e moeda do
+  lançamento aos da transação. Inbox, outbox e `rejected_submissions` não têm
+  FK.
 - **Triggers:** livro-razão imutável; saldo ↔ livro-razão (*constraint trigger*
   deferido, ver
   [ADR 0003](docs/adr/0003-versao-da-carteira-como-sequencia-do-livro-razao.md));
   transação terminal imutável; identidade da carteira imutável; auditoria
-  append-only.
+  append-only. E dois *constraint triggers* deferidos no lançamento (0013):
+  `wallet_ledger_entries_transaction_coherence` — a transação do lançamento
+  está `PROCESSED` e não é `LOSS`, e a direção é a do tipo (`BET` ⇒ `DEBIT`;
+  `OPENING`, `WIN`, `REFUND` ⇒ `CREDIT`; `ROLLBACK` ⇒ inverso do lançamento da
+  referência, que precisa existir) —, deferido porque o worker de pendentes
+  pode atualizar a transação para `PROCESSED` depois de inserir o lançamento; e
+  `wallet_ledger_entries_balance_applied` — nenhum lançamento sem a mudança de
+  saldo: no commit, a carteira está numa versão ≥ à do lançamento e o de maior
+  versão termina no saldo dela, a volta do `wallets_balance_ledger`.
+
+**`UNIQUE` redundante:** a FK de termos do lançamento precisa de um alvo único
+com as quatro colunas, e `wager_transactions_ledger_terms_unique` `(id,
+wallet_id, amount, currency)` existe só para isso — a PK já garante a
+unicidade. O custo é um índice a mais em todo insert de transação; o ganho é o
+schema recusar sozinho um lançamento de valor, moeda ou carteira diferente dos
+da transação. A FK pode ser imediata porque essas colunas da transação nunca
+mudam (`wager_transactions_identity_immutable`).
 
 **Saldo máximo:** `99999999999999999.99`, o limite de `numeric(19,2)`. Não há
 `CHECK` próprio: o tipo da coluna já recusa o valor acima dele (`22003`) antes de

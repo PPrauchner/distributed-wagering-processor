@@ -3,7 +3,7 @@
 O schema que as migrations do serviço produzem, e as invariantes que ele garante
 sozinho, sem depender do código. Escrito a partir do catálogo do PostgreSQL
 (`pg_constraint`, `pg_indexes`, `pg_trigger`) depois de aplicar as migrations
-`0001`–`0012` num banco limpo pelo runner Bun (`bun run db:migrate up`), e
+`0001`–`0013` num banco limpo pelo runner Bun (`bun run db:migrate up`), e
 conferido na volta (`down` deixa só a tabela de controle do MikroORM).
 
 As migrations ficam em `src/<módulo>/infrastructure/migrations/`. As do spike
@@ -22,7 +22,7 @@ uma unicidade; o nome dela está na [tabela de invariantes](#invariantes).
 erDiagram
     wallets ||--o{ wager_transactions : "wallet_id"
     wallets ||--o{ wallet_ledger_entries : "(wallet_id, currency) -> (id, currency)"
-    wager_transactions ||--o{ wallet_ledger_entries : "transaction_id"
+    wager_transactions ||--o{ wallet_ledger_entries : "(transaction_id, wallet_id, amount, currency)"
     wager_transactions |o--o{ wager_transactions : "reference_transaction_id"
 
     wallets {
@@ -65,7 +65,7 @@ erDiagram
         uuid id PK
         uuid wallet_id FK,UK "com currency; com transaction_id; com wallet_version"
         char currency FK "com wallet_id"
-        uuid transaction_id FK,UK
+        uuid transaction_id FK,UK "com wallet_id, amount e currency"
         text direction "DEBIT CREDIT"
         numeric amount "maior que 0"
         numeric balance_before_amount
@@ -123,6 +123,7 @@ mensagem indicado. O destino de cada uma está em
 |---|---|---|---|---|---|
 | Uma carteira por jogador e moeda | `wallets_player_currency_unique` | `UNIQUE (player_id, currency)` | `wallets` | 0001 | conflito `WALLET_ALREADY_EXISTS` |
 | `(id, currency)` como alvo da FK de moeda do livro-razão | `wallets_id_currency_unique` | `UNIQUE (id, currency)` | `wallets` | 0001 | não mapeado (`INFRA_UNEXPECTED`) — só colidiria junto com a PK |
+| `(id, wallet_id, amount, currency)` como alvo da FK de termos do livro-razão | `wager_transactions_ledger_terms_unique` | `UNIQUE (id, wallet_id, amount, currency)` | `wager_transactions` | 0013 | não mapeado (`INFRA_UNEXPECTED`) — só colidiria junto com a PK |
 | Chave de criação idempotente da carteira | `wallets_creation_idempotency_key_unique` | `UNIQUE (creation_idempotency_key)`, anulável | `wallets` | 0012 | releitura da chave de criação |
 | Uma transação por chave de idempotência do provedor | `wager_transactions_provider_idempotency_key_unique` | `UNIQUE (provider_id, idempotency_key)` | `wager_transactions` | 0005 | releitura da chave da transação |
 | Um id externo por provedor | `wager_transactions_provider_external_id_unique` | `UNIQUE (provider_id, external_transaction_id)` | `wager_transactions` | 0005 | conflito `EXTERNAL_ID_CONFLICT` |
@@ -140,6 +141,7 @@ mensagem indicado. O destino de cada uma está em
 | A referência resolvida aponta para uma transação existente | `wager_transactions_reference_fk` | `wager_transactions (reference_transaction_id)` → `wager_transactions (id)` | 0008 |
 | Todo lançamento pertence a uma transação | `wallet_ledger_entries_transaction_fk` | `wallet_ledger_entries (transaction_id)` → `wager_transactions (id)` | 0003 |
 | Lançamento na moeda da carteira | `wallet_ledger_entries_wallet_currency_fk` | `wallet_ledger_entries (wallet_id, currency)` → `wallets (id, currency)` | 0003 |
+| Lançamento com a carteira, o valor e a moeda da sua transação | `wallet_ledger_entries_transaction_terms_fk` | `wallet_ledger_entries (transaction_id, wallet_id, amount, currency)` → `wager_transactions (id, wallet_id, amount, currency)` | 0013 |
 
 ### `CHECK`s
 
@@ -201,6 +203,8 @@ qual regra caiu.
 | Saldo ↔ livro-razão: toda mudança de saldo tem o lançamento do saldo antigo ao novo na versão nova; a versão sobe exatamente 1 quando o saldo muda e não muda sem ele; carteira nasce na versão 1 | `wallets_balance_ledger` (`wallets_check_balance_ledger`) | *constraint trigger* `AFTER INSERT OR UPDATE`, `DEFERRABLE INITIALLY DEFERRED` — roda no commit | `wallets_balance_ledger_mismatch` | 0003 |
 | Identidade da carteira imutável: `id`, `player_id`, `currency`, saldo inicial e chave e hash da criação | `wallets_identity_immutable` (`wallets_reject_identity_change`) | `BEFORE UPDATE` | `wallets_identity_immutable` | 0004, função ampliada em 0012 |
 | Transação terminal imutável: só linha em `PENDING_REFERENCE` aceita `UPDATE`; a identidade (chave, hash, valor, tipo, carteira, `correlation_id`…) não muda; nada é apagado | `wager_transactions_guard` e `wager_transactions_guard_truncate` (`wager_transactions_guard_change`) | `BEFORE UPDATE OR DELETE` por linha; `BEFORE TRUNCATE` por comando | `wager_transactions_terminal_immutable`, `wager_transactions_identity_immutable`, `wager_transactions_immutable` (apagar) | 0005 |
+| Lançamento só de transação aplicada e na direção do tipo: transação `PROCESSED` e não `LOSS`; `BET` ⇒ `DEBIT`; `OPENING`, `WIN`, `REFUND` ⇒ `CREDIT`; `ROLLBACK` ⇒ inverso do lançamento da referência, que precisa existir | `wallet_ledger_entries_transaction_coherence` (`wallet_ledger_entries_check_transaction`) | *constraint trigger* `AFTER INSERT`, `DEFERRABLE INITIALLY DEFERRED` — roda no commit (o worker de pendentes pode atualizar a transação depois do lançamento) | `wallet_ledger_entries_transaction_coherence` | 0013 |
+| Nenhum lançamento sem a mudança de saldo: no commit, a carteira está numa versão ≥ à do lançamento e o lançamento de maior versão termina no saldo dela (a volta do `wallets_balance_ledger`) | `wallet_ledger_entries_balance_applied` (`wallet_ledger_entries_check_balance_applied`) | *constraint trigger* `AFTER INSERT`, `DEFERRABLE INITIALLY DEFERRED` — roda no commit | `wallet_ledger_entries_balance_applied` | 0013 |
 | Auditoria append-only | `rejected_submissions_append_only` e `rejected_submissions_append_only_truncate` (`rejected_submissions_reject_change`) | `BEFORE UPDATE OR DELETE` por linha; `BEFORE TRUNCATE` por comando | `rejected_submissions_append_only` | 0006 |
 
 ## Conferência com o `ARCHITECTURE.md` e o classificador
