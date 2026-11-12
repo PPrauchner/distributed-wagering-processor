@@ -63,7 +63,7 @@ export class HealthModule implements OnApplicationShutdown {
             return new PrometheusMetrics(
               {
                 readBacklog: () => unitOfWork.run(({ outboxBacklog }) => outboxBacklog.read()),
-                readDlqDepth: () => dlq.read(),
+                readDlqDepth: () => dlq.read(AbortSignal.timeout(PROBE_TIMEOUT_MS)),
               },
               { timeoutMs: PROBE_TIMEOUT_MS, log: new Logger('Metrics') },
             );
