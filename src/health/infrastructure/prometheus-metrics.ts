@@ -1,36 +1,131 @@
 /**
  * The service's metrics over prom-client, in a registry of their own per
  * application — the tests run several in one process. Implements the metrics
- * ports of the other modules; the outbox gauges are read from the database on
- * each scrape, bounded in time: a read that fails or hangs keeps the gauges at
- * their last value and is logged, so the rest of the registry is still scraped
- * while the database is down (`ARCHITECTURE.md` § Observabilidade).
+ * ports of the other modules. Every series of a known label combination —
+ * derived from the enums, never listed by hand — exists from the start, at 0.
+ *
+ * The outbox gauges, read from the database, and the DLQ depth, read from SQS,
+ * are read on each scrape, bounded in time: a read that fails or hangs keeps
+ * its gauges at their last value and is logged, so the rest of the registry is
+ * still scraped while a dependency is down (`ARCHITECTURE.md` §
+ * Observabilidade).
  *
  * @packageDocumentation
  */
 import { Counter, Gauge, Histogram, Registry } from 'prom-client';
 import type { ConsumerMetrics } from '../../messaging/application/consumer-metrics.ts';
 import type { OutboxBacklog } from '../../messaging/application/outbox-backlog.ts';
-import type { LockConflictReason } from '../../shared/application/infrastructure-failures.ts';
-import type { SubmissionChannel } from '../../wagering/domain/rejected-submission.ts';
-import type { WagerTransactionObservation, WageringMetrics } from '../../wagering/application/wagering-metrics.ts';
+import type { OutboxMetrics } from '../../messaging/application/outbox-metrics.ts';
+import {
+  LOCK_CONFLICT_REASONS,
+  TRANSIENT_FAILURE_CODES,
+  type LockConflictReason,
+} from '../../shared/application/infrastructure-failures.ts';
+import { FailureCode } from '../../shared/domain/failure-code.ts';
+import { SubmissionChannel } from '../../wagering/domain/rejected-submission.ts';
+import { WagerTransactionKind, WagerTransactionStatus } from '../../wagering/domain/wager-transaction.ts';
+import {
+  WORKER_CHANNEL,
+  type ProcessingFailureObservation,
+  type WagerTransactionObservation,
+  type WageringMetrics,
+} from '../../wagering/application/wagering-metrics.ts';
 import type { ReconciliationDivergenceCounter } from '../../wallet/application/reconciliation.ts';
+import type { WalletMetrics } from '../../wallet/application/wallet-metrics.ts';
 
 /** Latency buckets, in seconds: a submission takes milliseconds, up to the 2 s lock timeout. */
 const LATENCY_BUCKETS = [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2, 5];
 
-/** Where a failed backlog read is reported. */
+/** The kinds a provider sends: the opening credit is not a submission. */
+const PROVIDER_KINDS = Object.values(WagerTransactionKind).filter((kind) => kind !== WagerTransactionKind.Opening);
+/** The statuses a new transaction is counted with: `PENDING` never outlives its unit of work. */
+const COUNTED_STATUSES = Object.values(WagerTransactionStatus).filter(
+  (status) => status !== WagerTransactionStatus.Pending,
+);
+const CHANNELS = Object.values(SubmissionChannel);
+/** Where a new transaction's outcome is recorded: the submission channels and the worker. */
+const OUTCOME_CHANNELS = [...CHANNELS, WORKER_CHANNEL];
+const FAILURE_CODES = Object.values(FailureCode);
+
+/** Where a failed read is reported. */
 export interface MetricsLog {
   warn(message: string): void;
 }
 
 export interface BacklogReadOptions {
-  /** How long a scrape waits for the backlog before keeping the last value. */
+  /** How long a scrape waits for a read before keeping the last value. */
   timeoutMs: number;
   log: MetricsLog;
 }
 
-export class PrometheusMetrics implements WageringMetrics, ConsumerMetrics, ReconciliationDivergenceCounter {
+/** What the metrics read on each scrape. */
+export interface MetricsSources {
+  /** The outbox backlog, from the database. */
+  readBacklog(): Promise<OutboxBacklog>;
+  /** How many messages wait in the DLQ of the wager transactions. */
+  readDlqDepth(): Promise<number>;
+}
+
+/**
+ * A read made on each scrape, bounded in time, keeping its last value when it
+ * fails: one read in flight at a time, shared by every gauge of the scrape.
+ */
+class BoundedRead<T> {
+  private inFlight: Promise<T> | undefined;
+
+  constructor(
+    private readonly what: string,
+    private readonly read: () => Promise<T>,
+    private last: T,
+    private readonly options: BacklogReadOptions,
+  ) {}
+
+  /** The read in flight, or a new one. */
+  current(): Promise<T> {
+    this.inFlight ??= this.bounded().finally(() => {
+      this.inFlight = undefined;
+    });
+    return this.inFlight;
+  }
+
+  private async bounded(): Promise<T> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(
+        () => reject(new Error(`timed out after ${this.options.timeoutMs} ms`)),
+        this.options.timeoutMs,
+      );
+    });
+    try {
+      this.last = await Promise.race([this.read(), timeout]);
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      this.options.log.warn(`${this.what} read failed, keeping the last value: ${reason}`);
+    } finally {
+      clearTimeout(timer);
+    }
+    return this.last;
+  }
+}
+
+/** Every combination of the given label values, as label sets. */
+function combinations<L extends string>(values: Record<L, readonly string[]>): Record<L, string>[] {
+  const entries = Object.entries(values) as [L, readonly string[]][];
+  let sets: Partial<Record<L, string>>[] = [{}];
+  for (const [label, options] of entries) {
+    sets = sets.flatMap((set) => options.map((option) => ({ ...set, [label]: option })));
+  }
+  return sets as Record<L, string>[];
+}
+
+/** Creates every given series of the counter at 0. */
+function zero<L extends string>(counter: Counter<L>, values: Record<L, readonly string[]>): void {
+  for (const labels of combinations(values)) counter.inc(labels, 0);
+}
+
+export class PrometheusMetrics
+  implements WageringMetrics, ConsumerMetrics, OutboxMetrics, WalletMetrics, ReconciliationDivergenceCounter
+{
   readonly registry = new Registry();
   private readonly transactions: Counter<'kind' | 'status' | 'channel'>;
   private readonly replays: Counter<'channel'>;
@@ -40,20 +135,16 @@ export class PrometheusMetrics implements WageringMetrics, ConsumerMetrics, Reco
   private readonly consumerRetries: Counter<'failure_code'>;
   private readonly deadLetters: Counter<'failure_code'>;
   private readonly lockConflicts: Counter<'reason'>;
-  private readonly latency: Histogram<'channel' | 'kind'>;
+  private readonly latency: Histogram<'channel' | 'kind' | 'outcome'>;
+  private readonly pendingReferenceRetries: Counter;
   private readonly divergences: Counter;
-  private lastBacklog: OutboxBacklog = { pending: 0, lagSeconds: 0 };
-  /** The read in flight, shared by both gauges of one scrape. */
-  private backlogInFlight: Promise<OutboxBacklog> | undefined;
+  private readonly outboxRetries: Counter;
 
   /**
-   * @param readBacklog - Reads the outbox backlog; called on each scrape.
-   * @param options - The read's time limit and where its failures are logged.
+   * @param sources - What is read on each scrape: the outbox backlog, the DLQ depth.
+   * @param options - The reads' time limit and where their failures are logged.
    */
-  constructor(
-    private readonly readBacklog: () => Promise<OutboxBacklog>,
-    private readonly options: BacklogReadOptions,
-  ) {
+  constructor(sources: MetricsSources, options: BacklogReadOptions) {
     const registers = [this.registry];
     this.transactions = new Counter({
       name: 'wager_transactions_total',
@@ -104,8 +195,10 @@ export class PrometheusMetrics implements WageringMetrics, ConsumerMetrics, Reco
     });
     this.latency = new Histogram({
       name: 'wager_transaction_processing_seconds',
-      help: 'Processing time of a submission that ended in a transaction, by channel and kind.',
-      labelNames: ['channel', 'kind'],
+      help:
+        'Processing time of a submission, by channel, kind (UNKNOWN when it named none) and outcome: ' +
+        'settled, not_admitted, transient or permanent.',
+      labelNames: ['channel', 'kind', 'outcome'],
       buckets: LATENCY_BUCKETS,
       registers,
     });
@@ -114,8 +207,27 @@ export class PrometheusMetrics implements WageringMetrics, ConsumerMetrics, Reco
       help: 'Reconciliations that found the stored balance or the ledger sequence divergent.',
       registers,
     });
+    this.pendingReferenceRetries = new Counter({
+      name: 'pending_reference_retries_total',
+      help: 'Pending references the worker rescheduled: still waiting for the reference, or a transient failure.',
+      registers,
+    });
+    this.outboxRetries = new Counter({
+      name: 'outbox_publish_retries_total',
+      help: 'Outbox messages rescheduled after a failed send.',
+      registers,
+    });
+    zero(this.transactions, { kind: PROVIDER_KINDS, status: COUNTED_STATUSES, channel: OUTCOME_CHANNELS });
+    zero(this.replays, { channel: CHANNELS });
+    zero(this.idempotencyConflicts, { channel: CHANNELS });
+    zero(this.notAdmitted, { failure_code: FAILURE_CODES, channel: CHANNELS });
+    zero(this.consumerRetries, { failure_code: TRANSIENT_FAILURE_CODES });
+    zero(this.deadLetters, { failure_code: FAILURE_CODES });
+    zero(this.lockConflicts, { reason: LOCK_CONFLICT_REASONS });
+
     // Both gauges are collected in the same scrape: they share one read.
-    const backlog = () => this.sharedBacklog();
+    const backlogRead = new BoundedRead('outbox backlog', sources.readBacklog, { pending: 0, lagSeconds: 0, stuck: 0 }, options);
+    const backlog = () => backlogRead.current();
     new Gauge({
       name: 'outbox_pending',
       help: 'Outbox messages not published yet.',
@@ -132,41 +244,43 @@ export class PrometheusMetrics implements WageringMetrics, ConsumerMetrics, Reco
         this.set((await backlog()).lagSeconds);
       },
     });
-  }
-
-  /** The read in flight, or a new one: one read per scrape, one snapshot for both gauges. */
-  private sharedBacklog(): Promise<OutboxBacklog> {
-    this.backlogInFlight ??= this.boundedBacklog().finally(() => {
-      this.backlogInFlight = undefined;
+    new Gauge({
+      name: 'outbox_stuck_messages',
+      help: 'Outbox messages not published yet after 10 failed attempts or more.',
+      registers,
+      async collect() {
+        this.set((await backlog()).stuck);
+      },
     });
-    return this.backlogInFlight;
-  }
-
-  /** The backlog read within the time limit, or the last one read when it fails. */
-  private async boundedBacklog(): Promise<OutboxBacklog> {
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const timeout = new Promise<never>((_, reject) => {
-      timer = setTimeout(
-        () => reject(new Error(`timed out after ${this.options.timeoutMs} ms`)),
-        this.options.timeoutMs,
-      );
+    const dlqDepth = new BoundedRead('DLQ depth', sources.readDlqDepth, 0, options);
+    new Gauge({
+      name: 'wager_transactions_dlq_depth',
+      help: 'Messages waiting in the DLQ of the wager transactions (ApproximateNumberOfMessages), redrives included.',
+      registers,
+      async collect() {
+        this.set(await dlqDepth.current());
+      },
     });
-    try {
-      this.lastBacklog = await Promise.race([this.readBacklog(), timeout]);
-    } catch (error) {
-      const reason = error instanceof Error ? error.message : String(error);
-      this.options.log.warn(`outbox backlog read failed, keeping the last value: ${reason}`);
-    } finally {
-      clearTimeout(timer);
-    }
-    return this.lastBacklog;
   }
 
   transactionSettled(observation: WagerTransactionObservation): void {
     const { channel, kind, status, idempotentReplay, durationSeconds } = observation;
     if (idempotentReplay) this.replays.inc({ channel });
     else this.transactions.inc({ kind, status, channel });
-    this.latency.observe({ channel, kind }, durationSeconds);
+    this.latency.observe({ channel, kind, outcome: 'settled' }, durationSeconds);
+  }
+
+  processingFailed(observation: ProcessingFailureObservation): void {
+    const { channel, kind, outcome, durationSeconds } = observation;
+    this.latency.observe({ channel, kind, outcome }, durationSeconds);
+  }
+
+  pendingReferenceResolved(kind: WagerTransactionKind, status: WagerTransactionStatus): void {
+    this.transactions.inc({ kind, status, channel: WORKER_CHANNEL });
+  }
+
+  pendingReferenceRetried(): void {
+    this.pendingReferenceRetries.inc();
   }
 
   idempotencyConflict(channel: SubmissionChannel): void {
@@ -191,6 +305,10 @@ export class PrometheusMetrics implements WageringMetrics, ConsumerMetrics, Reco
 
   deadLettered(failureCode: string): void {
     this.deadLetters.inc({ failure_code: failureCode });
+  }
+
+  publishRetry(): void {
+    this.outboxRetries.inc();
   }
 
   increment(): void {

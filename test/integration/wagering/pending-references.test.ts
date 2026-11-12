@@ -7,7 +7,9 @@
  * `REFERENCE_NOT_PROCESSED` at once when the reference failed. Short TTL and
  * intervals by configuration; waits are conditions with a timeout, never a
  * fixed sleep. The loop of an instance resolves on its own and stops with the
- * application. Ends checking the ledger invariant of every wallet it touched.
+ * application. The worker counts what it does on the `WORKER` channel: each
+ * outcome, each reschedule, each lock conflict. Ends checking the ledger
+ * invariant of every wallet it touched.
  *
  * @packageDocumentation
  */
@@ -16,6 +18,7 @@ import type { INestApplication } from '@nestjs/common';
 import { SQL } from 'bun';
 import { createApp } from '../../../src/app.ts';
 import { loadConfig, type AppConfig } from '../../../src/config.ts';
+import { PrometheusMetrics } from '../../../src/health/infrastructure/prometheus-metrics.ts';
 import { FaultPoint } from '../../../src/shared/application/fault-injector.ts';
 import { ResolvePendingReferences } from '../../../src/wagering/application/resolve-pending-references.ts';
 import { expectLedgerConsistent } from '../ledger-invariant.ts';
@@ -347,7 +350,7 @@ describe('the worker under failure', () => {
     expect(resolved).toMatchObject({ status: 'PROCESSED', balance_after: '100.00' });
   });
 
-  test('a permanent error in the resolution records FAILED, with no event of the outcome', async () => {
+  test('a permanent error in the resolution records FAILED, with WagerTransactionFailed and no event of the settlement', async () => {
     const faultyApp = await startApp({ ...config, faultPoints: [FaultPoint.InvariantViolationBeforeCommit] });
     const faulty = faultyApp.get(ResolvePendingReferences);
     const wallet = await createWallet('100.00');
@@ -360,10 +363,17 @@ describe('the worker under failure', () => {
 
     expect(resolved).toMatchObject({ status: 'FAILED', failure_code: 'INFRA_INVARIANT_VIOLATION', balance_after: null });
     expect(await walletRow(wallet.id)).toEqual({ balance: '75.00', version: 2 });
-    expect((await eventsOf(pending.body.transactionId)).map((event) => event.event_type)).toEqual([
+    const events = await eventsOf(pending.body.transactionId);
+    expect(events.map((event) => event.event_type)).toEqual([
+      'WagerTransactionFailed',
       'WagerTransactionPendingReference',
     ]);
+    expect(events[0]!.payload).toMatchObject({
+      correlationId: (events[1]!.payload as JsonObject).correlationId,
+      data: { failureCode: 'INFRA_INVARIANT_VIOLATION' },
+    });
     expect((await submit(refund)).status).toBe(500);
+    expect(await eventsOf(pending.body.transactionId)).toHaveLength(2);
   });
 
   test('two workers over the same pending references: each resolved once', async () => {
@@ -414,4 +424,62 @@ describe('the worker loop of an instance', () => {
       await running.close();
     }
   });
+});
+
+describe('the worker metrics', () => {
+  /** One sample of the first app's metrics — the worker's —, by name and exact labels; 0 when absent. */
+  async function sample(name: string, labels: Record<string, string> = {}): Promise<number> {
+    const text = await apps[0]!.get(PrometheusMetrics).registry.metrics();
+    const wanted = Object.entries(labels);
+    for (const line of text.split('\n')) {
+      const match = /^([a-zA-Z_:][\w:]*)(?:\{(.*)\})? (\S+)$/.exec(line);
+      if (!match || match[1] !== name) continue;
+      const found = Object.fromEntries([...(match[2] ?? '').matchAll(/(\w+)="([^"]*)"/g)].map((m) => [m[1], m[2]]));
+      if (Object.keys(found).length !== wanted.length) continue;
+      if (wanted.every(([key, value]) => found[key] === value)) return Number(match[3]);
+    }
+    return 0;
+  }
+
+  test('a reschedule and then the outcome: counted, the outcome on the WORKER channel', async () => {
+    const wallet = await createWallet('100.00');
+    const bet = transactionOn(wallet, 'BET');
+    const refund = await submit(citing(wallet, 'REFUND', bet));
+    const resolvedLabels = { kind: 'REFUND', status: 'PROCESSED', channel: 'WORKER' };
+    const retriesBefore = await sample('pending_reference_retries_total');
+    const resolvedBefore = await sample('wager_transactions_total', resolvedLabels);
+
+    await waitUntil(async () => {
+      await worker.resolveDue();
+      return ((await row(refund.body.transactionId)).attempts as number) >= 1 ? true : undefined;
+    });
+    expect((await sample('pending_reference_retries_total')) - retriesBefore).toBeGreaterThanOrEqual(1);
+
+    await submit(bet);
+    await resolvedBy(worker, refund.body.transactionId);
+
+    expect((await sample('wager_transactions_total', resolvedLabels)) - resolvedBefore).toBeGreaterThanOrEqual(1);
+  });
+
+  test('its wallet locked past the lock_timeout: a lock conflict, and the item rescheduled', async () => {
+    const wallet = await createWallet('100.00');
+    const refund = await submit(citing(wallet, 'REFUND', transactionOn(wallet, 'BET')));
+    const lockBefore = await sample('lock_conflicts_total', { reason: 'lock_timeout' });
+    const retriesBefore = await sample('pending_reference_retries_total');
+    const holder = await sql.reserve();
+    try {
+      await holder`begin`;
+      await holder`select id from wallets where id = ${wallet.id} for update`;
+      await waitUntil(async () => {
+        await worker.resolveDue();
+        return (await sample('lock_conflicts_total', { reason: 'lock_timeout' })) > lockBefore ? true : undefined;
+      });
+    } finally {
+      await holder`rollback`;
+      holder.release();
+    }
+
+    expect((await sample('pending_reference_retries_total')) - retriesBefore).toBeGreaterThanOrEqual(1);
+    expect(await row(refund.body.transactionId)).toMatchObject({ status: 'PENDING_REFERENCE' });
+  }, 15_000);
 });

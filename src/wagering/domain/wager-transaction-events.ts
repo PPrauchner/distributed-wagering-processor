@@ -39,6 +39,12 @@ export interface WagerTransactionRejectedData extends WagerTransactionEventData 
   rejectedAt: string;
 }
 
+/** A permanent error observed nothing of the wallet: no balance, no wallet version. */
+export interface WagerTransactionFailedData extends WagerTransactionEventData {
+  failureCode: FailureCode;
+  failedAt: string;
+}
+
 export interface WagerTransactionPendingReferenceData extends WagerTransactionEventData {
   /** When the wait ends without its reference: creation + TTL. */
   expiresAt: string;
@@ -123,6 +129,41 @@ export class WagerTransactionRejected extends IntegrationEvent<WagerTransactionR
         walletVersion: walletVersionObserved,
         rejectedAt: ids.at.toISOString(),
       },
+    });
+  }
+}
+
+/**
+ * A transaction recorded `FAILED`: the provider that submitted by the queue,
+ * with no synchronous answer, learns it must resend with a new key. Beyond the
+ * four minimum events of §11.
+ */
+export class WagerTransactionFailed extends IntegrationEvent<WagerTransactionFailedData> {
+  readonly eventType = 'WagerTransactionFailed';
+  readonly version = 1;
+
+  /**
+   * @param transaction - A `FAILED` transaction.
+   * @param context - Correlation and causation of the outcome.
+   * @param ids - The new event's id, and when the transaction failed.
+   * @returns The event, aggregated by the transaction id.
+   * @throws {@link EventOutcomeMismatchError} If the transaction is not `FAILED`.
+   */
+  static from(
+    transaction: WagerTransaction,
+    context: EventContext,
+    ids: { eventId: string; at: Date },
+  ): WagerTransactionFailed {
+    const { failureCode } = transaction;
+    if (transaction.status !== WagerTransactionStatus.Failed || failureCode === undefined) {
+      throw new EventOutcomeMismatchError(`transaction ${transaction.id} is ${transaction.status}, not FAILED`);
+    }
+    return new WagerTransactionFailed({
+      eventId: ids.eventId,
+      aggregateId: transaction.id,
+      ...context,
+      occurredAt: ids.at,
+      data: { ...identityOf(transaction), failureCode, failedAt: ids.at.toISOString() },
     });
   }
 }

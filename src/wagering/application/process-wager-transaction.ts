@@ -14,7 +14,8 @@
  * Error path (`ARCHITECTURE.md` § Classificação de falhas): a transient failure
  * records nothing and reaches the caller; a permanent one rolls the SQL
  * transaction back, and a second unit of work records the transaction as
- * `FAILED` — with its inbox row, when it came by the queue —, so the key keeps
+ * `FAILED` — with `WagerTransactionFailed` in the outbox and its inbox row,
+ * when it came by the queue —, so the key keeps
  * answering the same outcome. A transient failure never becomes `FAILED`: a
  * queue consumer out of receives sends the message to the DLQ with no outcome.
  *
@@ -38,7 +39,7 @@ import { PermanentFailureError, TransientFailureError } from '../../shared/appli
 import type { UnitOfWork } from '../../shared/application/unit-of-work.ts';
 import { isUuid } from '../../shared/application/uuid.ts';
 import { FailureCode } from '../../shared/domain/failure-code.ts';
-import { Money, type MoneyProps } from '../../shared/domain/money.ts';
+import { CurrencyMismatchError, InvalidMoneyError, Money, type MoneyProps } from '../../shared/domain/money.ts';
 import type { WalletRepositories } from '../../wallet/application/wallet-repository.ts';
 import { SubmissionChannel } from '../domain/rejected-submission.ts';
 import {
@@ -48,10 +49,10 @@ import {
   WagerTransactionStatus,
   type CreateWagerTransactionProps,
 } from '../domain/wager-transaction.ts';
-import { enqueueOutcomeEvents, settleOnWallet, type ReferenceWaitPolicy } from './settle-wager-transaction.ts';
+import { enqueueFailureEvent, enqueueOutcomeEvents, settleOnWallet, type ReferenceWaitPolicy } from './settle-wager-transaction.ts';
 import { hashWagerPayload, type WagerPayload } from './wager-payload.ts';
 import type { WagerTransactionRepository, WageringRepositories } from './wager-transaction-repository.ts';
-import type { WageringMetrics } from './wagering-metrics.ts';
+import { UNKNOWN_KIND, type ProcessingFailure, type WageringMetrics } from './wagering-metrics.ts';
 import {
   DuplicateExternalIdError,
   DuplicateIdempotencyKeyError,
@@ -85,6 +86,30 @@ export interface WagerTransactionOutcome {
 }
 
 const KINDS = new Set<string>(Object.values(WagerTransactionKind));
+
+/** The refusals of a submission before it became a transaction. */
+const NOT_ADMITTED_ERRORS = [
+  InvalidMoneyError,
+  CurrencyMismatchError,
+  InvalidWagerTransactionError,
+  InternalKindNotAllowedError,
+  IdempotencyConflictError,
+  ExternalIdConflictError,
+  SubmissionWalletNotFoundError,
+  MessageIdConflictError,
+];
+
+/**
+ * How a submission that did not end in a transaction ended; `undefined` for a
+ * redelivery the inbox already held — not a processing, counted as a duplicate.
+ * An error nobody translated — a bug — is `permanent`, never a refusal.
+ */
+function processingFailureOf(error: unknown): ProcessingFailure | undefined {
+  if (error instanceof InboxRedeliveryError) return undefined;
+  if (error instanceof TransientFailureError) return 'transient';
+  if (NOT_ADMITTED_ERRORS.some((type) => error instanceof type)) return 'not_admitted';
+  return 'permanent';
+}
 
 export class ProcessWagerTransaction {
   constructor(
@@ -132,7 +157,9 @@ export class ProcessWagerTransaction {
     channel: SubmissionChannel,
     inbox?: InboxEntry,
   ): Promise<WagerTransactionOutcome> {
-    return this.observed(channel, () => this.redeliveryChecked(command, inbox, () => this.process(command, inbox)));
+    return this.observed(channel, command.kind, () =>
+      this.redeliveryChecked(command, inbox, () => this.process(command, inbox)),
+    );
   }
 
   /**
@@ -165,9 +192,13 @@ export class ProcessWagerTransaction {
     }
   }
 
-  /** Logs, counts and times the submission once it ended in a transaction. */
+  /**
+   * Logs, counts and times the submission once it ended in a transaction;
+   * times it too, by how it ended, when it did not.
+   */
   private async observed(
     channel: SubmissionChannel,
+    submittedKind: string,
     work: () => Promise<WagerTransactionOutcome>,
   ): Promise<WagerTransactionOutcome> {
     const started = performance.now();
@@ -184,6 +215,12 @@ export class ProcessWagerTransaction {
     } catch (error) {
       if (error instanceof IdempotencyConflictError) this.metrics.idempotencyConflict(channel);
       if (error instanceof TransientFailureError && error.lockConflict) this.metrics.lockConflict(error.lockConflict);
+      const outcome = processingFailureOf(error);
+      if (outcome) {
+        const kind = KINDS.has(submittedKind) ? (submittedKind as WagerTransactionKind) : UNKNOWN_KIND;
+        const durationSeconds = (performance.now() - started) / 1000;
+        this.metrics.processingFailed({ channel, kind, outcome, durationSeconds });
+      }
       throw error;
     }
   }
@@ -261,7 +298,8 @@ export class ProcessWagerTransaction {
 
   /**
    * The second unit of work: `FAILED`, with nothing observed and no ledger
-   * entry, and the inbox row when it came by the queue — a replay's too. It
+   * entry, its `WagerTransactionFailed` — none on a replay —, and the inbox
+   * row when it came by the queue — a replay's too. It
    * starts with the wallet lock, like every unit of work that touches the
    * wallet: inserting a row with a foreign key to it touches it (ADR 0002).
    */
@@ -270,7 +308,7 @@ export class ProcessWagerTransaction {
     code: FailureCode,
     received?: InboxEntry,
   ): Promise<WagerTransactionOutcome> {
-    return this.unitOfWork.run(async ({ wallets, transactions, inbox }) => {
+    return this.unitOfWork.run(async ({ wallets, transactions, outbox, inbox }) => {
       const wallet = await wallets.findByIdForUpdate(props.walletId);
       if (!wallet) throw new SubmissionWalletNotFoundError(props.walletId, props.payloadHash);
       if (received) inbox.add(processedInboxMessage(received));
@@ -279,6 +317,7 @@ export class ProcessWagerTransaction {
       if (earlier) return earlier;
       failed.fail(code);
       transactions.add(failed);
+      enqueueFailureEvent(outbox, failed, this.generateId);
       return { transaction: failed, idempotentReplay: false };
     });
   }

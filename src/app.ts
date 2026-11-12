@@ -8,12 +8,16 @@ import 'reflect-metadata';
 import { Module, type DynamicModule, type INestApplication } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import type { DestinationStream } from 'pino';
-import type { AppConfig } from './config.ts';
+import type { AppConfig, SqsConfig } from './config.ts';
 import { DatabaseModule } from './database/database.module.ts';
 import { HealthModule } from './health/interface/health.module.ts';
 import { HttpErrorFilter } from './http/http-error.filter.ts';
 import { logContextMiddleware } from './http/log-context.middleware.ts';
-import { MessagingModule } from './messaging/interface/messaging.module.ts';
+import {
+  MessagingModule,
+  type MessagingModuleOptions,
+  type SqsConnectionOptions,
+} from './messaging/interface/messaging.module.ts';
 import { CONTEXT_LOG, type ContextLog } from './shared/application/context-log.ts';
 import { PROVIDER_IDENTITY, type ProviderIdentity } from './shared/application/provider-identity.ts';
 import { DeclaredProviderIdentity } from './shared/infrastructure/declared-provider-identity.ts';
@@ -24,6 +28,7 @@ import {
   createPinoLogger,
 } from './shared/infrastructure/pino-logging.ts';
 import type { Crash } from './shared/infrastructure/crash-fault-injector.ts';
+import { RecordOpening } from './wagering/application/record-opening.ts';
 import { RejectedSubmissionAudit } from './wagering/interface/rejected-submission.audit.ts';
 import { WageringModule } from './wagering/interface/wagering.module.ts';
 import { WalletModule } from './wallet/interface/wallet.module.ts';
@@ -54,6 +59,19 @@ class ProviderIdentityModule {
   }
 }
 
+function sqsConnectionOf({ endpoint, region, accessKeyId, secretAccessKey }: SqsConfig): SqsConnectionOptions {
+  return { endpoint, region, accessKeyId, secretAccessKey };
+}
+
+function queuesOf(sqs: SqsConfig): MessagingModuleOptions['queues'] {
+  return {
+    wagerTransactions: sqs.wagerTransactionsQueue,
+    wagerTransactionsDlq: sqs.wagerTransactionsDlq,
+    wageringEvents: sqs.wageringEventsQueue,
+  };
+}
+
+/** Translates the configuration to each module's options: no module imports it. */
 @Module({})
 class AppModule {
   static forConfig(
@@ -68,10 +86,25 @@ class AppModule {
         LoggingModule.forRoot(contextLog),
         ProviderIdentityModule.forRoot(identity),
         DatabaseModule.forRoot(config),
-        WalletModule,
-        WageringModule.forRoot(config, crash),
-        MessagingModule.forRoot(config),
-        HealthModule.forRoot(config),
+        // The wallet's opening is recorded by wagering: the root binds the two ends.
+        WalletModule.forRoot({ openingRecorder: new RecordOpening(() => Bun.randomUUIDv7()) }),
+        WageringModule.forRoot({
+          wagerTransactionsConsumer: config.wagerTransactionsConsumer,
+          pendingReferences: config.pendingReferences,
+          faultPoints: config.faultPoints,
+          crash,
+        }),
+        MessagingModule.forRoot({
+          sqs: sqsConnectionOf(config.sqs),
+          queues: queuesOf(config.sqs),
+          inputQueue: {
+            waitTimeSeconds: config.wagerTransactionsConsumer.waitTimeSeconds,
+            batchSize: config.wagerTransactionsConsumer.batchSize,
+            visibilityTimeoutSeconds: config.wagerTransactionsConsumer.visibilityTimeoutSeconds,
+          },
+          outboxPublisher: config.outboxPublisher,
+        }),
+        HealthModule.forRoot({ sqs: sqsConnectionOf(config.sqs), queues: queuesOf(config.sqs) }),
       ],
     };
   }

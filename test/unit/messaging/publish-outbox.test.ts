@@ -1,6 +1,8 @@
 /**
  * Unit tests for `PublishOutbox`: a send that fails — the whole batch, or some
- * of its entries — is rescheduled and logged with its reason, never silently.
+ * of its entries — is rescheduled and logged with its reason, never silently;
+ * every reschedule is counted, and the 10th failed attempt of a message raises
+ * an alert with its id, without its payload.
  *
  * @packageDocumentation
  */
@@ -8,22 +10,24 @@ import { describe, expect, test } from 'bun:test';
 import type { EventPublisher, PublishResult } from '../../../src/messaging/application/event-publisher.ts';
 import type { OutboxRepositories, OutboxRepository } from '../../../src/messaging/application/outbox-repository.ts';
 import { PublishOutbox, type PublicationLog } from '../../../src/messaging/application/publish-outbox.ts';
+import type { OutboxMetrics } from '../../../src/messaging/application/outbox-metrics.ts';
 import { OutboxMessage } from '../../../src/messaging/domain/outbox-message.ts';
+import type { LogDetails } from '../../../src/shared/application/context-log.ts';
 import type { FaultInjection } from '../../../src/shared/application/fault-injector.ts';
 import type { UnitOfWork } from '../../../src/shared/application/unit-of-work.ts';
 
 const WALLET_ID = '0192f291-27dd-7d3f-8071-5f8685deef37';
 const NOW = new Date('2026-11-10T12:00:00.000Z');
 
-const message = (id: string): OutboxMessage =>
+const message = (id: string, attempts = 0): OutboxMessage =>
   OutboxMessage.rehydrate({
     id,
     aggregateId: WALLET_ID,
     eventType: 'WalletBalanceChanged',
     walletId: WALLET_ID,
-    payload: {},
+    payload: { secret: 'payload' },
     occurredAt: NOW,
-    attempts: 0,
+    attempts,
   });
 
 /** An outbox holding `messages`, all due; records what was marked and rescheduled. */
@@ -44,17 +48,46 @@ function unitOfWorkOver(outbox: OutboxRepository): UnitOfWork<OutboxRepositories
   return { run: (work) => work({ outbox, faults: { inject: async () => undefined } }) };
 }
 
-function logSpy(): PublicationLog & { warnings: string[] } {
+function logSpy(): PublicationLog & { warnings: string[]; details: (LogDetails | undefined)[] } {
   const warnings: string[] = [];
-  return { warnings, warn: (line) => void warnings.push(line) };
+  const details: (LogDetails | undefined)[] = [];
+  return {
+    warnings,
+    details,
+    warn: (line, fields) => {
+      warnings.push(line);
+      details.push(fields);
+    },
+  };
 }
 
-function publishOutbox(outbox: OutboxRepository, publisher: EventPublisher, log: PublicationLog): PublishOutbox {
+function metricsSpy(): OutboxMetrics & { retries: number } {
+  return {
+    retries: 0,
+    publishRetry() {
+      this.retries++;
+    },
+  };
+}
+
+const failing: EventPublisher = {
+  publish: async () => {
+    throw new Error('AWS.SimpleQueueService.NonExistentQueue');
+  },
+};
+
+function publishOutbox(
+  outbox: OutboxRepository,
+  publisher: EventPublisher,
+  log: PublicationLog,
+  metrics: OutboxMetrics = metricsSpy(),
+): PublishOutbox {
   return new PublishOutbox(
     unitOfWorkOver(outbox),
     publisher,
     { leaseMs: 30_000, backoff: { baseMs: 1000, maxMs: 5000 } },
     log,
+    metrics,
     () => NOW,
   );
 }
@@ -63,11 +96,6 @@ describe('a batch that could not be sent at all', () => {
   test('reschedules every message and logs the error with the batch size', async () => {
     const outbox = outboxOf([message('m-1'), message('m-2')]);
     const log = logSpy();
-    const failing: EventPublisher = {
-      publish: async () => {
-        throw new Error('AWS.SimpleQueueService.NonExistentQueue');
-      },
-    };
 
     await publishOutbox(outbox, failing, log).publishDue();
 
@@ -109,5 +137,55 @@ describe('a batch sent whole', () => {
 
     expect(outbox.published).toEqual(['m-1']);
     expect(log.warnings).toEqual([]);
+  });
+});
+
+describe('a reschedule', () => {
+  test('is counted once per message rescheduled', async () => {
+    const metrics = metricsSpy();
+
+    await publishOutbox(outboxOf([message('m-1'), message('m-2')]), failing, logSpy(), metrics).publishDue();
+
+    expect(metrics.retries).toBe(2);
+  });
+
+  test('the 10th failed attempt of a message raises an alert with its id and no payload; the 9th and 11th do not', async () => {
+    const log = logSpy();
+    const outbox = outboxOf([message('m-8', 8), message('m-9', 9), message('m-10', 10)]);
+
+    await publishOutbox(outbox, failing, log).publishDue();
+
+    const alerts = log.warnings.filter((line) => line.includes('attempts'));
+    expect(alerts).toHaveLength(1);
+    const fields = log.details[log.warnings.indexOf(alerts[0]!)];
+    expect(fields).toEqual({ messageId: 'm-9', eventType: 'WalletBalanceChanged', attempts: 10 });
+    expect(JSON.stringify(log.details)).not.toContain('payload');
+  });
+
+  test('whose unit of work fails to commit is neither counted nor alerted', async () => {
+    const log = logSpy();
+    const metrics = metricsSpy();
+    const outbox = outboxOf([message('m-9', 9)]);
+    let runs = 0;
+    const commitFails: UnitOfWork<OutboxRepositories & FaultInjection> = {
+      run: async (work) => {
+        const result = await work({ outbox, faults: { inject: async () => undefined } });
+        if (++runs === 2) throw new Error('commit failed');
+        return result;
+      },
+    };
+    const publish = new PublishOutbox(
+      commitFails,
+      failing,
+      { leaseMs: 30_000, backoff: { baseMs: 1000, maxMs: 5000 } },
+      log,
+      metrics,
+      () => NOW,
+    );
+
+    await expect(publish.publishDue()).rejects.toThrow('commit failed');
+
+    expect(metrics.retries).toBe(0);
+    expect(log.warnings.filter((line) => line.includes('attempts'))).toEqual([]);
   });
 });

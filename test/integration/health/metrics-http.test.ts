@@ -4,7 +4,8 @@
  * submissions of the test move them — outcomes, replays, conflicts, refusals,
  * lock conflicts, latency, reconciliation divergences — while the outbox
  * gauges, read from the database on each scrape, show the events no publisher
- * took (the test apps run none).
+ * took (the test apps run none), and the DLQ depth, read from SQS, shows what
+ * waits in the DLQ.
  *
  * The test database is shared with the other test files: the checks compare
  * this app's counters before and after, and the outbox gauges only from below.
@@ -13,6 +14,7 @@
  */
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import type { INestApplication } from '@nestjs/common';
+import { CreateQueueCommand, DeleteQueueCommand, SendMessageCommand, SQSClient } from '@aws-sdk/client-sqs';
 import { SQL } from 'bun';
 import { createApp } from '../../../src/app.ts';
 import { loadConfig } from '../../../src/config.ts';
@@ -29,10 +31,12 @@ let app: INestApplication;
 let baseUrl: string;
 let sql: SQL;
 const touchedWallets: string[] = [];
+/** The app's JSON log lines. */
+const logLines: string[] = [];
 
 beforeAll(async () => {
   const config = loadConfig();
-  app = await createApp(config);
+  app = await createApp(config, { logDestination: { write: (line: string) => void logLines.push(line) } });
   await app.listen(0, '127.0.0.1');
   baseUrl = await app.getUrl();
   sql = new SQL(config.databaseUrl);
@@ -114,9 +118,20 @@ describe('GET /metrics', () => {
       ['outbox_lag_seconds', 'gauge'],
       ['wager_transaction_processing_seconds', 'histogram'],
       ['reconciliation_divergences_total', 'counter'],
+      ['wager_transactions_consumer_retries_total', 'counter'],
+      ['wager_transactions_dlq_messages_total', 'counter'],
+      ['wager_transactions_dlq_depth', 'gauge'],
+      ['outbox_publish_retries_total', 'counter'],
+      ['outbox_stuck_messages', 'gauge'],
+      ['pending_reference_retries_total', 'counter'],
     ]) {
       expect(text).toContain(`# TYPE ${name} ${type}`);
     }
+    // The known series exist at the start: a sample line, not only the TYPE.
+    expect(text).toMatch(/^wager_transactions_total\{kind="WIN",status="REJECTED",channel="QUEUE"\} \d+$/m);
+    expect(text).toMatch(/^wager_transactions_total\{kind="REFUND",status="PROCESSED",channel="WORKER"\} \d+$/m);
+    expect(text).toMatch(/^lock_conflicts_total\{reason="serialization_failure"\} \d+$/m);
+    expect(text).toMatch(/^rejected_submissions_total\{failure_code="MESSAGE_ID_CONFLICT",channel="QUEUE"\} \d+$/m);
     expect(text).toMatch(/^inbox_duplicates_total 0$/m);
     expect(text).toMatch(/^reconciliation_divergences_total \d+$/m);
   });
@@ -137,7 +152,7 @@ describe('GET /metrics', () => {
     expect(delta('wager_transactions_total', { ...HTTP_BET, status: 'PROCESSED' })).toBe(1);
     expect(delta('wager_transactions_total', { ...HTTP_BET, status: 'REJECTED' })).toBe(1);
     expect(delta('wager_transaction_idempotent_replays_total', { channel: 'HTTP' })).toBe(1);
-    expect(delta('wager_transaction_processing_seconds_count', HTTP_BET)).toBe(3);
+    expect(delta('wager_transaction_processing_seconds_count', { ...HTTP_BET, outcome: 'settled' })).toBe(3);
   });
 
   test('an idempotency conflict and a submission not admitted: counted, the second by code', async () => {
@@ -156,6 +171,8 @@ describe('GET /metrics', () => {
     expect(delta('wager_transaction_idempotency_conflicts_total', { channel: 'HTTP' })).toBe(1);
     expect(delta('rejected_submissions_total', { failure_code: 'IDEMPOTENCY_CONFLICT', channel: 'HTTP' })).toBe(1);
     expect(delta('rejected_submissions_total', { failure_code: 'WALLET_NOT_FOUND', channel: 'HTTP' })).toBe(1);
+    // Timed too, by how they ended.
+    expect(delta('wager_transaction_processing_seconds_count', { ...HTTP_BET, outcome: 'not_admitted' })).toBe(2);
   });
 
   test('the wallet locked by another session beyond the lock_timeout: a lock conflict by reason', async () => {
@@ -177,9 +194,19 @@ describe('GET /metrics', () => {
       sample(after, 'lock_conflicts_total', { reason: 'lock_timeout' }) -
         sample(before, 'lock_conflicts_total', { reason: 'lock_timeout' }),
     ).toBe(1);
+    // The error path is timed, with its outcome: past the 2 s lock timeout.
+    const transient = { ...HTTP_BET, outcome: 'transient' };
+    expect(
+      sample(after, 'wager_transaction_processing_seconds_count', transient) -
+        sample(before, 'wager_transaction_processing_seconds_count', transient),
+    ).toBe(1);
+    expect(
+      sample(after, 'wager_transaction_processing_seconds_bucket', { ...transient, le: '1' }) -
+        sample(before, 'wager_transaction_processing_seconds_bucket', { ...transient, le: '1' }),
+    ).toBe(0);
   }, 10_000);
 
-  test('a reconciliation divergence: counted', async () => {
+  test('a reconciliation divergence: counted, and logged with the wallet as a field', async () => {
     const before = await scrape();
     const wallet = await createWallet('100.00');
     // Divergent on purpose: out of the final invariant check of the run.
@@ -194,6 +221,11 @@ describe('GET /metrics', () => {
     expect(response.status).toBe(200);
     const after = await scrape();
     expect(sample(after, 'reconciliation_divergences_total') - sample(before, 'reconciliation_divergences_total')).toBe(1);
+    // Logged with the wallet's id as a field, and no value.
+    const divergences = logLines.filter((line) => line.includes('"reconciliation divergence"'));
+    expect(divergences).toHaveLength(1);
+    expect(JSON.parse(divergences[0]!)).toMatchObject({ level: 40, msg: 'reconciliation divergence', walletId: wallet.id });
+    expect(divergences[0]).not.toContain('90.00');
   });
 
   test('events no publisher took: outbox_pending and outbox_lag_seconds read them from the database', async () => {
@@ -212,5 +244,37 @@ describe('GET /metrics', () => {
     expect(sample(text, 'outbox_pending')).toBeGreaterThan(0);
     expect(sample(text, 'outbox_lag_seconds')).toBeGreaterThanOrEqual(row.lag);
     expect(sample(text, 'outbox_lag_seconds')).toBeGreaterThan(0);
+  });
+
+  test('messages waiting in the DLQ: wager_transactions_dlq_depth reads them from SQS on the scrape', async () => {
+    const config = loadConfig();
+    const sqs = new SQSClient({
+      endpoint: config.sqs.endpoint,
+      region: config.sqs.region,
+      credentials: { accessKeyId: config.sqs.accessKeyId, secretAccessKey: config.sqs.secretAccessKey },
+    });
+    const dlqName = `metrics-dlq-${Bun.randomUUIDv7()}.fifo`;
+    const { QueueUrl } = await sqs.send(
+      new CreateQueueCommand({ QueueName: dlqName, Attributes: { FifoQueue: 'true' } }),
+    );
+    const dlqApp = await createApp({ ...config, sqs: { ...config.sqs, wagerTransactionsDlq: dlqName } });
+    try {
+      await dlqApp.listen(0, '127.0.0.1');
+      const url = await dlqApp.getUrl();
+      const depth = async () => sample(await (await fetch(`${url}/metrics`)).text(), 'wager_transactions_dlq_depth');
+      expect(await depth()).toBe(0);
+
+      for (const id of ['a', 'b']) {
+        await sqs.send(
+          new SendMessageCommand({ QueueUrl, MessageBody: '{}', MessageGroupId: 'g', MessageDeduplicationId: id }),
+        );
+      }
+
+      expect(await depth()).toBe(2);
+    } finally {
+      await dlqApp.close();
+      await sqs.send(new DeleteQueueCommand({ QueueUrl })).catch(() => undefined);
+      sqs.destroy();
+    }
   });
 });

@@ -6,8 +6,7 @@ sozinho, sem depender do código. Escrito a partir do catálogo do PostgreSQL
 `0001`–`0013` num banco limpo pelo runner Bun (`bun run db:migrate up`), e
 conferido na volta (`down` deixa só a tabela de controle do MikroORM).
 
-As migrations ficam em `src/<módulo>/infrastructure/migrations/`. As do spike
-(`spike/`) não fazem parte do serviço e não entram aqui.
+As migrations ficam em `src/<módulo>/infrastructure/migrations/`.
 
 Por que as invariantes moram no schema: [ADR 0001](adr/0001-mikroorm-7-com-invariantes-no-schema.md).
 Versão da carteira como sequência do livro-razão: [ADR 0003](adr/0003-versao-da-carteira-como-sequencia-do-livro-razao.md).
@@ -139,9 +138,9 @@ mensagem indicado. O destino de cada uma está em
 |---|---|---|---|
 | Toda transação pertence a uma carteira | `wager_transactions_wallet_fk` | `wager_transactions (wallet_id)` → `wallets (id)` | 0002 |
 | A referência resolvida aponta para uma transação existente | `wager_transactions_reference_fk` | `wager_transactions (reference_transaction_id)` → `wager_transactions (id)` | 0008 |
-| Todo lançamento pertence a uma transação | `wallet_ledger_entries_transaction_fk` | `wallet_ledger_entries (transaction_id)` → `wager_transactions (id)` | 0003 |
+| Todo lançamento pertence a uma transação | `wallet_ledger_entries_transaction_fk` | `wallet_ledger_entries (transaction_id)` → `wager_transactions (id)`, checada no commit | 0003, 0014 |
 | Lançamento na moeda da carteira | `wallet_ledger_entries_wallet_currency_fk` | `wallet_ledger_entries (wallet_id, currency)` → `wallets (id, currency)` | 0003 |
-| Lançamento com a carteira, o valor e a moeda da sua transação | `wallet_ledger_entries_transaction_terms_fk` | `wallet_ledger_entries (transaction_id, wallet_id, amount, currency)` → `wager_transactions (id, wallet_id, amount, currency)` | 0013 |
+| Lançamento com a carteira, o valor e a moeda da sua transação | `wallet_ledger_entries_transaction_terms_fk` | `wallet_ledger_entries (transaction_id, wallet_id, amount, currency)` → `wager_transactions (id, wallet_id, amount, currency)`, checada no commit | 0013, 0014 |
 
 ### `CHECK`s
 

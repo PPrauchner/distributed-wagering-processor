@@ -65,6 +65,33 @@ Colocá-los em `shared/` faria `shared` depender de `wallet` (e, depois, de
 que os módulos importam, nunca o contrário. A raiz de composição pode importar
 qualquer módulo; nenhum módulo a importa.
 
+Entre os módulos, a direção é **`health` → `wagering` → `wallet` → `messaging` →
+`shared`**: cada um importa só os que estão à sua direita. O teste
+`test/unit/module-dependencies.test.ts` confere isso nos imports de cada arquivo.
+
+- **`health` é o módulo mais externo.** Além das sondas e dos endpoints de
+  saúde e de métricas, ele adapta as portas de métricas que os outros módulos
+  declaram (`WAGERING_METRICS`, `WALLET_METRICS`, `OUTBOX_METRICS`…) à
+  implementação Prometheus: é global e as liga por token. Por isso conhece todos
+  os módulos, e nenhum o conhece.
+- **Porta da abertura.** `wagering → wallet` é inevitável — a transação de aposta
+  liquida na carteira. A volta fecharia um ciclo: criar uma carteira com saldo
+  inicial grava a `OPENING`, que é uma transação de aposta. Por isso `wallet`
+  declara a porta `OpeningRecorder` (token `OPENING_RECORDER`), que recebe os
+  repositórios da unidade de trabalho da criação; `wagering` a implementa
+  (`RecordOpening`: cria a `OPENING` já `PROCESSED`, adiciona ao repositório e
+  enfileira o `WagerTransactionProcessed`), e a raiz a entrega ao
+  `WalletModule.forRoot`. A criação de carteira e o `POST /wallets` continuam em
+  `wallet`, que grava o lançamento `CREDIT` e enfileira o `WalletBalanceChanged`
+  na mesma unidade de trabalho. No mapeamento do lançamento, `transaction_id` é
+  coluna escalar, não relação do ORM: a FK continua no banco, checada no commit
+  (ver Invariantes no schema).
+- **Opções por módulo.** Cada módulo configurável declara seu tipo de opções e o
+  recebe em `forRoot(options)` — `WageringModuleOptions`,
+  `MessagingModuleOptions`, `HealthModuleOptions`, `WalletModuleOptions` — e só o
+  que usa. A raiz (`app.ts`) traduz o `AppConfig` lido do ambiente para cada um;
+  nenhum módulo importa `config.ts`.
+
 ## Persistência e ORM
 
 **MikroORM 7**, com as classes de domínio mapeadas por `defineEntity` na
@@ -158,8 +185,11 @@ Em resumo, o banco garante sozinho:
   que amarra a moeda do lançamento à da carteira. A FK composta
   `wallet_ledger_entries_transaction_terms_fk`, `(transaction_id, wallet_id,
   amount, currency)` → `wager_transactions`, amarra carteira, valor e moeda do
-  lançamento aos da transação. Inbox, outbox e `rejected_submissions` não têm
-  FK.
+  lançamento aos da transação. As duas FKs do lançamento para a transação são
+  checadas no commit (`DEFERRABLE INITIALLY DEFERRED`, 0014): o mapeamento do
+  lançamento tem `transaction_id` como coluna escalar (ver Organização do
+  código), e o flush do ORM não ordena mais o insert da transação antes do dele.
+  Inbox, outbox e `rejected_submissions` não têm FK.
 - **Triggers:** livro-razão imutável; saldo ↔ livro-razão (*constraint trigger*
   deferido, ver
   [ADR 0003](docs/adr/0003-versao-da-carteira-como-sequencia-do-livro-razao.md));
@@ -234,8 +264,8 @@ Unicidade da reversão: índice único parcial em `reference_transaction_id` com
   lock, numa única consulta (snapshot consistente) — saldo, soma com sinal dos
   lançamentos, contagem, buracos na sequência e maior versão lançada. A resposta
   do §9 ganha `versionGaps`, `walletVersion` e `lastEntryVersion`. Divergência de
-  valor, buraco ou lançamento acima da versão da carteira → `consistent: false`, log `error`
-  e métrica; nada é corrigido; HTTP 200, porque o achado é o relatório.
+  valor, buraco ou lançamento acima da versão da carteira → `consistent: false`, log
+  `warn` com `walletId` como campo (sem valores) e métrica; nada é corrigido; HTTP 200, porque o achado é o relatório.
 
 ## Reembolso e reversão
 
@@ -494,8 +524,9 @@ Disparar o `22003` é bug.
 erro permanente já sofreu rollback, uma **segunda unidade de trabalho** grava a
 transação de aposta como `FAILED`, com o código de falha (e o inbox, quando a
 entrada é a fila), pela chave de idempotência, começando pelo lock da carteira (ver
-[Concorrência](#concorrência)) — sem saldo observado, sem lançamento
-e sem evento. No HTTP, a resposta é 500 com `transactionId`, `status: FAILED` e
+[Concorrência](#concorrência)) — sem saldo observado e sem lançamento, com
+`WagerTransactionFailed` na outbox (ver [Eventos de
+integração](#eventos-de-integração)). No HTTP, a resposta é 500 com `transactionId`, `status: FAILED` e
 `failureCode`, e o replay (mesma chave e hash) devolve o mesmo 500 com
 `idempotentReplay: true`; hash diferente → 409 `IDEMPOTENCY_CONFLICT`. A segunda
 unidade de trabalho relê a chave antes de gravar: se um concorrente já a gravou, ou
@@ -618,8 +649,10 @@ a falha transitória nunca vira `FAILED`, nem esgotada.
   mostra o mesmo `eventId` e o mesmo corpo nas duas publicações.
 - Polling a cada 500 ms, lotes de até 10, lease de 30 s. Falha → `scheduleRetry`
   com `min(1 s × 2^attempts, 5 min)` e jitter. **Sem limite de tentativas** —
-  desistir perderia evento confirmado; a partir de 10 tentativas, métrica e log de
-  alerta. Um lote cheio dispara o ciclo seguinte na hora, sem esperar o polling.
+  desistir perderia evento confirmado. Cada reagendamento conta em
+  `outbox_publish_retries_total`; a 10ª tentativa falha gera um log de alerta com
+  o id e o tipo da mensagem (sem payload), e a partir dela a mensagem conta em
+  `outbox_stuck_messages`. Um lote cheio dispara o ciclo seguinte na hora, sem esperar o polling.
 - **Três passos, duas transações SQL curtas, nenhuma na carteira:** reivindicação
   (`PublishOutbox`, um único `UPDATE … WHERE id IN (SELECT … FOR UPDATE SKIP LOCKED
   LIMIT 10) RETURNING id`), envio fora de transação, e gravação do desfecho de cada
@@ -656,12 +689,18 @@ ao worker, minutos depois, emitir a pendente resolvida com o contexto original;
 | `WagerTransactionProcessed` | `referenceTransactionId` (se houver), `balanceAfter`, `walletVersion`, `processedAt` |
 | `WagerTransactionRejected` | `failureCode`, `balanceAfter`, `walletVersion`, `rejectedAt` |
 | `WagerTransactionPendingReference` | `expiresAt` (criação + TTL) |
+| `WagerTransactionFailed` | `failureCode`, `failedAt` — sem `balanceAfter` nem `walletVersion`: o `FAILED` não observa a carteira |
 | `WalletBalanceChanged` | o `data` do §11 (só `walletId`, `transactionId`, `direction`, `money`, `balanceBefore`, `balanceAfter`, `walletVersion`) |
 
 O `WalletBalanceChanged` sai com o `Processed` só quando o saldo muda; a `LOSS`
-emite só o `Processed`. `FAILED` não emite evento: não está nos mínimos e é falha
-nossa, não fato de negócio — o sinal é o log de alerta e a métrica. A rejeição de
-uma pendente (TTL ou referência inválida) emite `Rejected`.
+emite só o `Processed`. `FAILED` emite `WagerTransactionFailed`, além dos quatro
+mínimos do §11: quem submete pela fila não tem resposta síncrona e só conhece o
+desfecho pelos eventos — sem ele, o provedor não saberia que precisa reenviar com
+chave nova. Vai na outbox pela unidade de trabalho que grava o `FAILED` (a do use
+case, por HTTP ou fila, e a do worker de referências pendentes), na mesma
+transação SQL, sozinho; quando a chave já tem desfecho (replay ou corrida), nada é
+enfileirado. O log de alerta e a métrica continuam sendo o sinal operacional. A
+rejeição de uma pendente (TTL ou referência inválida) emite `Rejected`.
 
 ## Referências fora de ordem
 
@@ -688,7 +727,7 @@ latência da pendente é limitada pelo intervalo do worker.
 - **Erros:** transitório reagenda com o mesmo backoff e conta nos retries do
   worker, sem limite de tentativas — o TTL já limita a vida da pendente; permanente
   grava `FAILED` (`INFRA_INVARIANT_VIOLATION` ou `INFRA_UNEXPECTED`) numa segunda
-  unidade de trabalho, com alerta. O desfecho é gravado na transação SQL que trava a
+  unidade de trabalho, com `WagerTransactionFailed` e alerta. O desfecho é gravado na transação SQL que trava a
   carteira, e o item é relido sob lock: se outro worker já o resolveu, sai sem
   efeito.
 - **Agendamento:** `attempts` e `next_attempt_at` em `wager_transactions`; a
@@ -745,34 +784,53 @@ uma porta de identidade do provedor. O ponto de extensão no código:
   `failureCode` — nunca valores nem payload; o `redact` do pino (dinheiro, saldos,
   corpos) é a rede.
 - **Métricas:** prom-client em `GET /metrics`, aberto, num registro próprio por
-  aplicação (os testes sobem várias num processo). Todas existem desde a partida:
-  - `wager_transactions_total{kind,status,channel}` — transações novas;
+  aplicação (os testes sobem várias num processo). Todas existem desde a partida,
+  e as séries das combinações conhecidas de label — derivadas dos enums, não de
+  lista à mão — começam em 0: `kind` (sem `OPENING`) × `status` (sem `PENDING`) ×
+  `channel` (`HTTP`, `QUEUE`, `WORKER`), `channel`, `reason`, `failure_code`
+  (todos os códigos; nos retries do consumidor, só os transitórios). O
+  histograma não é pré-registrado.
+  - `wager_transactions_total{kind,status,channel}` — transações novas, pelo
+    status com que foram gravadas; `channel="WORKER"` é o desfecho que o worker
+    de referências pendentes gravou;
   - `wager_transaction_idempotent_replays_total{channel}`;
   - `wager_transaction_idempotency_conflicts_total{channel}`;
   - `rejected_submissions_total{failure_code,channel}` — submissões não admitidas;
-  - `inbox_duplicates_total` — registrada em zero, incrementada pelo consumidor;
-  - `lock_conflicts_total{reason}` — `lock_timeout`, `deadlock` ou
-    `serialization_failure`, que o classificador distingue pelo SQLSTATE;
-  - `outbox_pending` e `outbox_lag_seconds` (`now() − min(occurred_at)` das não
-    publicadas), lidos do banco numa única leitura por scrape, compartilhada
-    pelos dois gauges, com limite de 1 s — se a leitura
-    falha ou estoura o prazo, os gauges ficam no último valor lido e a falha vai
-    para o log, e o resto do `/metrics` continua sendo coletado;
-  - `wager_transaction_processing_seconds{channel,kind}` — histograma da latência
-    das submissões que terminaram numa transação;
-  - `reconciliation_divergences_total`.
-
+  - `inbox_duplicates_total` — mensagens que o inbox já tinha;
   - `wager_transactions_consumer_retries_total{failure_code}` — entregas da fila
     de entrada devolvidas para retry;
   - `wager_transactions_dlq_messages_total{failure_code}` — envios à DLQ feitos
-    pela aplicação.
+    por este processo;
+  - `wager_transactions_dlq_depth` — `ApproximateNumberOfMessages` da DLQ, lido
+    do SQS no scrape: cobre o redrive nativo e sobrevive a restart;
+  - `lock_conflicts_total{reason}` — `lock_timeout`, `deadlock` ou
+    `serialization_failure`, que o classificador distingue pelo SQLSTATE; vêm do
+    processamento, do worker de pendentes e da criação de carteira (que não
+    define `lock_timeout`: ali só os outros dois);
+  - `pending_reference_retries_total` — pendentes que o worker reagendou, ainda
+    esperando a referência ou após uma falha transitória;
+  - `outbox_publish_retries_total` — mensagens da outbox reagendadas após um
+    envio que falhou;
+  - `outbox_pending`, `outbox_lag_seconds` (`now() − min(occurred_at)` das não
+    publicadas) e `outbox_stuck_messages` (não publicadas com 10 tentativas ou
+    mais), lidos do banco numa única consulta por scrape, compartilhada pelos
+    três gauges;
+  - `wager_transaction_processing_seconds{channel,kind,outcome}` — histograma da
+    latência de cada submissão: `outcome` é `settled` (terminou numa transação,
+    replay incluído), `not_admitted` (recusada antes de virar transação),
+    `transient` ou `permanent` (inclusive um erro inesperado); `kind` fora do
+    enum vira `UNKNOWN`. Uma reentrega que o inbox já tinha não é observada;
+  - `reconciliation_divergences_total`.
 
-  A profundidade da DLQ (`ApproximateNumberOfMessages` no scrape, que cobriria o
-  redrive) ainda não entra.
+  As leituras do scrape (backlog da outbox e profundidade da DLQ) têm limite de
+  1 s cada; se uma falha ou estoura o prazo, seus gauges ficam no último valor
+  lido, a falha vai para o log, e o resto do `/metrics` continua sendo coletado.
 - **Health:** `/health/live` responde 200 enquanto o processo vive, sem tocar no
   banco nem na fila; `/health/ready` roda `SELECT 1` e `GetQueueAttributes` nas
-  filas de entrada e de eventos, cada um com timeout de 1 s, e responde 200 ou 503
-  com o estado de cada sonda. As sondas de fila têm um cliente SQS próprio, sem
+  filas de entrada, de eventos e na DLQ, cada um com timeout de 1 s, e responde
+  200 ou 503 com o estado de cada sonda (`checks`) e, para as que caíram, o
+  motivo (`reasons`: o nome do erro, ou `TimeoutError`; nunca a stack). Cada
+  sonda que falha gera um log `warn` com o nome da sonda e o do erro. As sondas de fila têm um cliente SQS próprio, sem
   retry, para falhar dentro do prazo. Nenhum dos dois é autenticado.
 
 ## Testes
@@ -884,5 +942,13 @@ uma porta de identidade do provedor. O ponto de extensão no código:
   o grupo assim que uma mensagem dele fica visível, outra instância pode recebê-las
   antes, e a ordem do grupo se inverte. No SQS real, o grupo fica bloqueado
   enquanto a anterior está em voo.
+- Devolver uma mensagem com visibilidade 0 no `SIGTERM` conta como recebimento:
+  com reinícios seguidos, ela pode esgotar o `maxReceiveCount` e chegar à DLQ pelo
+  redrive nativo sem ter falhado — sem desfecho gravado, portanto reprocessável.
+- Não há heartbeat de visibilidade: o visibility timeout é de 30 s
+  (`WAGER_TRANSACTIONS_VISIBILITY_SECONDS`) e não é estendido durante o
+  processamento. Como as mensagens de um grupo rodam em série, o pior caso de um
+  lote é ~10 × `lock_timeout` de 2 s ≈ 20 s, abaixo do timeout. Se ele expirar
+  mesmo assim, a mensagem é reentregue e o inbox impede efeito duplicado.
 - A auditoria das submissões não admitidas é de melhor esforço: com o banco fora do
   ar, a resposta sai igual e a linha se perde (o erro é logado).

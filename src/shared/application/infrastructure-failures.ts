@@ -8,11 +8,14 @@
  */
 import { FailureCode } from '../domain/failure-code.ts';
 
-export type TransientFailureCode = FailureCode.TransientLockTimeout | FailureCode.TransientUnavailable;
+/** The failure codes of a transient failure: the ones a consumer retries on. */
+export const TRANSIENT_FAILURE_CODES = [FailureCode.TransientLockTimeout, FailureCode.TransientUnavailable] as const;
+export type TransientFailureCode = (typeof TRANSIENT_FAILURE_CODES)[number];
 export type PermanentFailureCode = FailureCode.InfraInvariantViolation | FailureCode.InfraUnexpected;
 
 /** Why the database refused the lock: its own timeout, a deadlock or a serialization failure. */
-export type LockConflictReason = 'lock_timeout' | 'deadlock' | 'serialization_failure';
+export const LOCK_CONFLICT_REASONS = ['lock_timeout', 'deadlock', 'serialization_failure'] as const;
+export type LockConflictReason = (typeof LOCK_CONFLICT_REASONS)[number];
 
 /** Lock conflict or database unavailable: resend with the same key. */
 export class TransientFailureError extends Error {

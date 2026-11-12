@@ -18,6 +18,7 @@ import { applyLoss } from '../domain/loss.ts';
 import type { ReferenceRetryBackoff } from '../domain/reference-wait.ts';
 import { applyWin } from '../domain/win.ts';
 import {
+  WagerTransactionFailed,
   WagerTransactionPendingReference,
   WagerTransactionProcessed,
   WagerTransactionRejected,
@@ -114,6 +115,26 @@ export function enqueueOutcomeEvents(
   if (entry === undefined) return;
   const changed = WalletBalanceChanged.from(wallet, entry, context, { eventId: generateId() });
   outbox.add(OutboxMessage.enqueue(changed));
+}
+
+/**
+ * The event of a `FAILED` outcome — and no other: nothing was observed of the
+ * wallet, so no balance change goes with it. Enqueued by the unit of work that
+ * records the `FAILED`, so it commits or rolls back with it.
+ *
+ * @param outbox - The outbox of the unit of work recording the `FAILED`.
+ * @param transaction - The transaction, just recorded `FAILED`.
+ * @param generateId - Generates the event id.
+ * @throws {@link EventOutcomeMismatchError} If the transaction is not `FAILED`.
+ */
+export function enqueueFailureEvent(
+  outbox: OutboxRepository,
+  transaction: WagerTransaction,
+  generateId: () => string,
+): void {
+  const context = { correlationId: transaction.correlationId, causationId: transaction.id };
+  const failed = WagerTransactionFailed.from(transaction, context, { eventId: generateId(), at: new Date() });
+  outbox.add(OutboxMessage.enqueue(failed));
 }
 
 /**

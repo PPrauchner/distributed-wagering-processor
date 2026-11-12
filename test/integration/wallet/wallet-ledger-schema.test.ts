@@ -472,6 +472,37 @@ describe('the entry is tied to its transaction', () => {
 
     await expect(attempt).rejects.toThrow(new RegExp(`${COHERENCE}: .* no entry`));
   });
+
+  test('an entry inserted before its transaction commits: the foreign keys are checked at commit', async () => {
+    // The ORM maps the entry's transaction as a plain column: its flush may
+    // insert the entry first, and the foreign keys must wait for the commit.
+    const committed = await sql.begin(async (tx) => {
+      const id = await insertWallet(tx, '100.00');
+      const transactionId = Bun.randomUUIDv7();
+      await insertEntry(tx, { walletId: id, transactionId, amount: '100.00', before: '0.00', after: '100.00', version: 1 });
+      await insertTransaction(tx, id, '100.00', 'OPENING', { id: transactionId });
+      touchedWallets.push(id);
+      return id;
+    });
+    const [row] = await sql`select count(*)::int as entries from wallet_ledger_entries where wallet_id = ${committed}`;
+    expect(row).toEqual({ entries: 1 });
+  });
+
+  test('an entry whose transaction never comes fails on commit', async () => {
+    const attempt = sql.begin(async (tx) => {
+      const walletId = await insertWallet(tx, '100.00');
+      await insertEntry(tx, {
+        walletId,
+        transactionId: Bun.randomUUIDv7(),
+        amount: '100.00',
+        before: '0.00',
+        after: '100.00',
+        version: 1,
+      });
+    });
+
+    await expect(attempt).rejects.toThrow(/wallet_ledger_entries_transaction_(terms_)?fk/);
+  });
 });
 
 describe('no entry without its balance change', () => {

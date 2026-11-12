@@ -1,20 +1,24 @@
 /**
  * Unit tests for `ResolvePendingReferences`: with no caller to tell, an error
  * the classifier left unclassified — or one in recording the item's failure —
- * is isolated to its item, and the rest of the batch goes on.
+ * is isolated to its item, recorded `FAILED` with its `WagerTransactionFailed`,
+ * and the rest of the batch goes on.
  *
  * @packageDocumentation
  */
 import { describe, expect, test } from 'bun:test';
 import type { OutboxRepositories } from '../../../src/messaging/application/outbox-repository.ts';
+import type { OutboxMessage } from '../../../src/messaging/domain/outbox-message.ts';
 import type { ContextLog } from '../../../src/shared/application/context-log.ts';
 import type { FaultInjection } from '../../../src/shared/application/fault-injector.ts';
 import type { UnitOfWork } from '../../../src/shared/application/unit-of-work.ts';
 import { FailureCode } from '../../../src/shared/domain/failure-code.ts';
+import { Money } from '../../../src/shared/domain/money.ts';
 import type { WalletRepositories } from '../../../src/wallet/application/wallet-repository.ts';
+import type { WageringMetrics } from '../../../src/wagering/application/wagering-metrics.ts';
 import { ResolvePendingReferences } from '../../../src/wagering/application/resolve-pending-references.ts';
 import type { WageringRepositories } from '../../../src/wagering/application/wager-transaction-repository.ts';
-import { WagerTransactionStatus, type WagerTransaction } from '../../../src/wagering/domain/wager-transaction.ts';
+import { WagerTransaction, WagerTransactionKind } from '../../../src/wagering/domain/wager-transaction.ts';
 
 type Repositories = WalletRepositories & WageringRepositories & OutboxRepositories & FaultInjection;
 
@@ -30,15 +34,35 @@ function database(options: { failureRecordingFails?: boolean } = {}): {
   unitOfWork: UnitOfWork<Repositories>;
   locked: string[];
   failed: { id: string; code: FailureCode }[];
+  enqueued: { eventType: string; aggregateId: string; failureCode: unknown }[];
 } {
   const locked: string[] = [];
   const failed: { id: string; code: FailureCode }[] = [];
-  const pending = (id: string): WagerTransaction =>
-    ({
+  const enqueued: { eventType: string; aggregateId: string; failureCode: unknown }[] = [];
+  const pending = (id: string): WagerTransaction => {
+    const transaction = WagerTransaction.create({
       id,
-      status: WagerTransactionStatus.PendingReference,
-      fail: (code: FailureCode) => void failed.push({ id, code }),
-    }) as unknown as WagerTransaction;
+      providerId: 'provider-a',
+      externalTransactionId: `refund-${id}`,
+      idempotencyKey: `key-${id}`,
+      payloadHash: 'a'.repeat(64),
+      walletId: `w-${id}`,
+      playerId: 'player-1',
+      roundId: 'round-1',
+      gameId: 'game-1',
+      kind: WagerTransactionKind.Refund,
+      money: Money.from({ amount: '25.00', currency: 'BRL' }),
+      referenceExternalTransactionId: `bet-${id}`,
+      correlationId: `corr-${id}`,
+    });
+    transaction.markPendingReference();
+    const fail = transaction.fail.bind(transaction);
+    transaction.fail = (code: FailureCode) => {
+      failed.push({ id, code });
+      fail(code);
+    };
+    return transaction;
+  };
   const repositories = {
     wallets: {
       findByIdForUpdate: async (walletId: string) => {
@@ -57,9 +81,19 @@ function database(options: { failureRecordingFails?: boolean } = {}): {
         return pending(id);
       },
     },
+    outbox: {
+      add: (message: OutboxMessage) => {
+        const { eventType, aggregateId, data } = message.payload as {
+          eventType: string;
+          aggregateId: string;
+          data: { failureCode?: unknown };
+        };
+        enqueued.push({ eventType, aggregateId, failureCode: data.failureCode });
+      },
+    },
     faults: { inject: async () => undefined },
   } as unknown as Repositories;
-  return { unitOfWork: { run: (work) => work(repositories) }, locked, failed };
+  return { unitOfWork: { run: (work) => work(repositories) }, locked, failed, enqueued };
 }
 
 function logSpy(): ContextLog & { warnings: string[] } {
@@ -73,22 +107,35 @@ function logSpy(): ContextLog & { warnings: string[] } {
   };
 }
 
+const noMetrics: WageringMetrics = {
+  transactionSettled: () => undefined,
+  processingFailed: () => undefined,
+  idempotencyConflict: () => undefined,
+  lockConflict: () => undefined,
+  submissionNotAdmitted: () => undefined,
+  pendingReferenceResolved: () => undefined,
+  pendingReferenceRetried: () => undefined,
+};
+
 function resolver(unitOfWork: UnitOfWork<Repositories>, log: ContextLog): ResolvePendingReferences {
   return new ResolvePendingReferences(unitOfWork, () => 'generated-id', {
     leaseMs: 30_000,
     referenceWait: { ttlMs: 300_000, backoff: { baseMs: 1000, maxMs: 60_000 } },
-  }, log);
+  }, log, noMetrics);
 }
 
 describe('an unexpected error in resolving a pending reference', () => {
-  test('records it FAILED INFRA_UNEXPECTED, with an alert, and the batch goes on', async () => {
-    const { unitOfWork, locked, failed } = database();
+  test('records it FAILED INFRA_UNEXPECTED, with its event and an alert, and the batch goes on', async () => {
+    const { unitOfWork, locked, failed, enqueued } = database();
     const log = logSpy();
 
     const claimed = await resolver(unitOfWork, log).resolveDue();
 
     expect(claimed).toBe(2);
     expect(failed).toEqual([{ id: POISON, code: FailureCode.InfraUnexpected }]);
+    expect(enqueued).toEqual([
+      { eventType: 'WagerTransactionFailed', aggregateId: POISON, failureCode: FailureCode.InfraUnexpected },
+    ]);
     expect(locked).toEqual([`w-${POISON}`, `w-${HEALTHY}`]);
     expect(log.warnings).toHaveLength(1);
   });

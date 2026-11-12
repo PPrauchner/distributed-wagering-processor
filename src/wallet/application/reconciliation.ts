@@ -6,6 +6,7 @@
  *
  * @packageDocumentation
  */
+import type { ContextLog } from '../../shared/application/context-log.ts';
 import type { UnitOfWork } from '../../shared/application/unit-of-work.ts';
 import { Money } from '../../shared/domain/money.ts';
 import type { LedgerSnapshot, VersionGap, WalletRepositories } from './wallet-repository.ts';
@@ -36,10 +37,8 @@ export interface ReconciliationDivergenceCounter {
   increment(): void;
 }
 
-/** Where divergences are reported. */
-export interface ReconciliationLog {
-  error(message: string): void;
-}
+/** Where divergences are reported, as an alert with the wallet's id as a field. */
+export type ReconciliationLog = Pick<ContextLog, 'warn'>;
 
 /** A counter kept in the process, for the tests that run the use case alone. */
 export class InMemoryReconciliationDivergenceCounter implements ReconciliationDivergenceCounter {
@@ -74,7 +73,7 @@ export class Reconciliation {
     const report = toReport(snapshot);
     if (!report.consistent) {
       // Values stay out of the log: the report carries them.
-      this.log.error(`reconciliation divergence on wallet ${report.walletId}`);
+      this.log.warn('reconciliation divergence', { walletId: report.walletId });
       this.divergences.increment();
     }
     return report;
