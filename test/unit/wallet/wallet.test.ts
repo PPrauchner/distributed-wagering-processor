@@ -167,13 +167,15 @@ describe('Wallet.debit', () => {
     expect(wallet.version).toBe(1);
   });
 
-  test('refuses another currency', () => {
+  test('refuses another currency and leaves the wallet untouched', () => {
     const wallet = Wallet.open({ id: WALLET_ID, playerId: PLAYER_ID, initialBalance: brl('100.00') });
     const usd = Money.from({ amount: '30.00', currency: 'USD' });
 
     expect(() => wallet.debit({ money: usd, entryId: ENTRY_ID, transactionId: TRANSACTION_ID })).toThrow(
       CurrencyMismatchError,
     );
+    expect(wallet.balance.equals(brl('100.00'))).toBe(true);
+    expect(wallet.version).toBe(1);
   });
 });
 

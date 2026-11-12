@@ -39,8 +39,6 @@ bun run test:concurrency        # os 8 cenários do §13, com processos reais do
                                 # à mão, fora do `test` (exige o Compose de pé)
 bun run db:migrate up|down      # migrations por script Bun, sem o CLI do MikroORM
 bun src/main.ts                 # app local, fora do Compose (PORT, DATABASE_URL)
-bun run spike                   # testes do spike do ADR 0001, contra o banco real
-bun run spike:migrate up|down   # migrations do spike, sem o CLI do MikroORM
 ```
 
 A conexão com o banco usa `127.0.0.1`, nunca `localhost` (ver ADR 0001). Os demais
