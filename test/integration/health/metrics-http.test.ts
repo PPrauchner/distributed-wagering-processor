@@ -31,10 +31,12 @@ let app: INestApplication;
 let baseUrl: string;
 let sql: SQL;
 const touchedWallets: string[] = [];
+/** The app's JSON log lines. */
+const logLines: string[] = [];
 
 beforeAll(async () => {
   const config = loadConfig();
-  app = await createApp(config);
+  app = await createApp(config, { logDestination: { write: (line: string) => void logLines.push(line) } });
   await app.listen(0, '127.0.0.1');
   baseUrl = await app.getUrl();
   sql = new SQL(config.databaseUrl);
@@ -204,7 +206,7 @@ describe('GET /metrics', () => {
     ).toBe(0);
   }, 10_000);
 
-  test('a reconciliation divergence: counted', async () => {
+  test('a reconciliation divergence: counted, and logged with the wallet as a field', async () => {
     const before = await scrape();
     const wallet = await createWallet('100.00');
     // Divergent on purpose: out of the final invariant check of the run.
@@ -219,6 +221,11 @@ describe('GET /metrics', () => {
     expect(response.status).toBe(200);
     const after = await scrape();
     expect(sample(after, 'reconciliation_divergences_total') - sample(before, 'reconciliation_divergences_total')).toBe(1);
+    // Logged with the wallet's id as a field, and no value.
+    const divergences = logLines.filter((line) => line.includes('"reconciliation divergence"'));
+    expect(divergences).toHaveLength(1);
+    expect(JSON.parse(divergences[0]!)).toMatchObject({ level: 40, msg: 'reconciliation divergence', walletId: wallet.id });
+    expect(divergences[0]).not.toContain('90.00');
   });
 
   test('events no publisher took: outbox_pending and outbox_lag_seconds read them from the database', async () => {

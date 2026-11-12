@@ -167,7 +167,7 @@ async function createWalletWithId(wallet: TestWallet, amount: string): Promise<v
     return wallet.id;
   };
   const unitOfWork = app.get<UnitOfWork<WalletRepositories & WageringRepositories & OutboxRepositories>>(UNIT_OF_WORK);
-  await new CreateWallet(unitOfWork, generateId).execute({
+  await new CreateWallet(unitOfWork, generateId, { lockConflict: () => undefined }).execute({
     playerId: wallet.playerId,
     initialBalance: { amount, currency: 'BRL' },
   });
