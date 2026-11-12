@@ -11,10 +11,10 @@
 import { Global, Inject, Logger, Module, type DynamicModule, type OnApplicationShutdown } from '@nestjs/common';
 import { SQSClient } from '@aws-sdk/client-sqs';
 import { MikroORM } from '@mikro-orm/postgresql';
-import type { AppConfig } from '../../config.ts';
 import { CONTEXT_LOG, type ContextLog } from '../../shared/application/context-log.ts';
 import { CONSUMER_METRICS } from '../../messaging/application/consumer-metrics.ts';
 import { INBOX_METRICS } from '../../messaging/application/inbox-metrics.ts';
+import type { SqsConnectionOptions } from '../../messaging/interface/messaging.module.ts';
 import { OUTBOX_METRICS } from '../../messaging/application/outbox-metrics.ts';
 import type { OutboxBacklogRepositories } from '../../messaging/application/outbox-backlog.ts';
 import { UNIT_OF_WORK, type UnitOfWork } from '../../shared/application/unit-of-work.ts';
@@ -29,6 +29,13 @@ import { SqsQueueReadiness } from '../infrastructure/sqs-queue-readiness.ts';
 import { HealthController } from './health.controller.ts';
 import { MetricsController } from './metrics.controller.ts';
 
+/** What the health module is configured with; the composition root translates its configuration to it. */
+export interface HealthModuleOptions {
+  sqs: SqsConnectionOptions;
+  /** The queues the readiness probes look up; the DLQ's depth is also a metric. */
+  queues: { wagerTransactions: string; wagerTransactionsDlq: string; wageringEvents: string };
+}
+
 const PROBE_SQS_CLIENT = Symbol('ProbeSQSClient');
 /** Each probe's time limit, and the outbox gauges' read limit (`ARCHITECTURE.md` § Observabilidade). */
 const PROBE_TIMEOUT_MS = 1000;
@@ -39,11 +46,11 @@ export class HealthModule implements OnApplicationShutdown {
   constructor(@Inject(PROBE_SQS_CLIENT) private readonly sqs: SQSClient) {}
 
   /**
-   * @param config - The SQS connection and the queues to probe.
+   * @param options - The SQS connection and the queues to probe.
    * @returns The module, with its controllers, exporting the metrics ports.
    */
-  static forRoot(config: Pick<AppConfig, 'sqs'>): DynamicModule {
-    const { sqs } = config;
+  static forRoot(options: HealthModuleOptions): DynamicModule {
+    const { sqs, queues } = options;
     return {
       module: HealthModule,
       controllers: [HealthController, MetricsController],
@@ -52,7 +59,7 @@ export class HealthModule implements OnApplicationShutdown {
           provide: PrometheusMetrics,
           inject: [UNIT_OF_WORK, PROBE_SQS_CLIENT],
           useFactory: (unitOfWork: UnitOfWork<OutboxBacklogRepositories>, client: SQSClient) => {
-            const dlq = new SqsQueueDepth(client, sqs.wagerTransactionsDlq);
+            const dlq = new SqsQueueDepth(client, queues.wagerTransactionsDlq);
             return new PrometheusMetrics(
               {
                 readBacklog: () => unitOfWork.run(({ outboxBacklog }) => outboxBacklog.read()),
@@ -85,9 +92,9 @@ export class HealthModule implements OnApplicationShutdown {
             new CheckReadiness(
               [
                 new DatabaseReadiness(orm.em),
-                new SqsQueueReadiness(client, sqs.wagerTransactionsQueue),
-                new SqsQueueReadiness(client, sqs.wageringEventsQueue),
-                new SqsQueueReadiness(client, sqs.wagerTransactionsDlq),
+                new SqsQueueReadiness(client, queues.wagerTransactions),
+                new SqsQueueReadiness(client, queues.wageringEvents),
+                new SqsQueueReadiness(client, queues.wagerTransactionsDlq),
               ],
               PROBE_TIMEOUT_MS,
               log,
