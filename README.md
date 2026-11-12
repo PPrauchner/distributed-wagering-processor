@@ -97,7 +97,20 @@ curl -s -X POST http://127.0.0.1:3000/wallets/<walletId>/reconciliation
 
 A resposta traz `consistent`, o saldo guardado e o reconstruído, a diferença, os
 buracos na sequência de versões (`versionGaps`) e as versões da carteira e do
-último lançamento. As demais rotas de consulta são as do §9 do enunciado. Os status HTTP e os códigos de falha
+último lançamento.
+
+```bash
+# Consultas
+curl -s http://127.0.0.1:3000/wallets/<walletId>
+curl -s 'http://127.0.0.1:3000/wallets/<walletId>/ledger?limit=50'
+curl -s 'http://127.0.0.1:3000/wallets/<walletId>/ledger?limit=50&cursor=<nextCursor>'
+curl -s http://127.0.0.1:3000/wagering/transactions/<transactionId>
+curl -s http://127.0.0.1:3000/providers/provider-a/wagering/transactions/transaction-123
+```
+
+O livro-razão sai em ordem crescente; cada página traz `items` e `nextCursor`
+(opaco; `null` na última página), que se passa em `cursor` para a próxima. O
+`limit` vai de 1 a 200, com padrão 50. Os status HTTP e os códigos de falha
 estão em [`ARCHITECTURE.md` § Status HTTP](ARCHITECTURE.md#status-http) e
 [§ Códigos de falha](ARCHITECTURE.md#códigos-de-falha).
 
