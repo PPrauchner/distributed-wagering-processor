@@ -221,6 +221,7 @@ describe('refused submissions', () => {
   test.each([
     ['absent', {}],
     ['empty', { 'idempotency-key': '' }],
+    ['only spaces', { 'idempotency-key': '   ' }],
   ])('Idempotency-Key %s → 400 MISSING_IDEMPOTENCY_KEY', async (_case, headers) => {
     const body = betOn(someWallet());
     const response = await fetch(`${baseUrl}/wagering/transactions`, {
