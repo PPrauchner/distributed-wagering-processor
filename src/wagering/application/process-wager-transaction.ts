@@ -12,7 +12,9 @@
  * `WagerTransactionPendingReference`; only the worker resolves it.
  *
  * Error path (`ARCHITECTURE.md` § Classificação de falhas): a transient failure
- * records nothing and reaches the caller; a permanent one rolls the SQL
+ * records nothing and reaches the caller; a permanent one — or one nobody
+ * classified, a bug or a domain error that escaped, recorded `INFRA_UNEXPECTED`
+ * like the worker of pending references does — rolls the SQL
  * transaction back, and a second unit of work records the transaction as
  * `FAILED` — with `WagerTransactionFailed` in the outbox and its inbox row,
  * when it came by the queue —, so the key keeps
@@ -102,7 +104,9 @@ const NOT_ADMITTED_ERRORS = [
 /**
  * How a submission that did not end in a transaction ended; `undefined` for a
  * redelivery the inbox already held — not a processing, counted as a duplicate.
- * An error nobody translated — a bug — is `permanent`, never a refusal.
+ * A permanent error that escapes did not even record its `FAILED`; an error
+ * nobody translated before the transaction existed — a bug in the validation —
+ * is `permanent` too, never a refusal.
  */
 function processingFailureOf(error: unknown): ProcessingFailure | undefined {
   if (error instanceof InboxRedeliveryError) return undefined;
@@ -143,7 +147,7 @@ export class ProcessWagerTransaction {
    * @throws {@link TransientFailureError} If the wallet stayed locked too long
    *   or the database is unavailable: nothing was recorded.
    * @throws {@link PermanentFailureError} If even the `FAILED` could not be
-   *   recorded for a permanent reason.
+   *   recorded for a permanent reason — an unclassified one as `INFRA_UNEXPECTED`.
    * @throws {@link FailedRedeliveryError} If the inbox already holds the
    *   message and its submission was recorded `FAILED`: nothing was recorded
    *   this time; it still belongs in the DLQ.
@@ -231,12 +235,19 @@ export class ProcessWagerTransaction {
     const { correlationId, id: transactionId, walletId, providerId } = props;
     this.log.enrich({ correlationId, transactionId, walletId, providerId });
 
+    let failure: PermanentFailureError;
     try {
       return await this.settled(props, () => this.record(submitted, inbox));
     } catch (error) {
-      if (!(error instanceof PermanentFailureError)) throw error;
-      // The SQL transaction rolled back: record the failure in a unit of work of its own.
-      return this.settled(props, () => this.recordFailure(props, error.failureCode, inbox));
+      const permanent = asPermanentFailure(error);
+      if (!permanent) throw error;
+      failure = permanent;
+    }
+    // The SQL transaction rolled back: record the failure in a unit of work of its own.
+    try {
+      return await this.settled(props, () => this.recordFailure(props, failure.failureCode, inbox));
+    } catch (error) {
+      throw asPermanentFailure(error) ?? error;
     }
   }
 
@@ -292,6 +303,7 @@ export class ProcessWagerTransaction {
       );
       const outcome = recorded({ transaction: submitted, idempotentReplay: false });
       await faults.inject(FaultPoint.InvariantViolationBeforeCommit, { transactionId: submitted.id });
+      await faults.inject(FaultPoint.UnexpectedErrorBeforeCommit, { transactionId: submitted.id });
       return outcome;
     });
   }
@@ -369,6 +381,32 @@ export class ProcessWagerTransaction {
     if (props.kind === WagerTransactionKind.Opening) throw new InternalKindNotAllowedError(props.kind, props.payloadHash);
     return { props, submitted };
   }
+}
+
+/**
+ * The errors of recording a submission that are already an answer: a
+ * transient failure, a redelivery, a refusal of the submission. Anything else
+ * that escapes the recording is permanent.
+ */
+const CLASSIFIED_RECORDING_ERRORS = [
+  TransientFailureError,
+  InboxRedeliveryError,
+  MessageIdConflictError,
+  SubmissionWalletNotFoundError,
+  IdempotencyConflictError,
+  ExternalIdConflictError,
+];
+
+/**
+ * @returns The permanent failure the error is: itself, or — for an error
+ *   nobody classified, a bug or a domain error that escaped — `INFRA_UNEXPECTED`
+ *   with it as the cause, since another attempt would fail the same way;
+ *   `undefined` for an error that is already an answer.
+ */
+function asPermanentFailure(error: unknown): PermanentFailureError | undefined {
+  if (error instanceof PermanentFailureError) return error;
+  if (CLASSIFIED_RECORDING_ERRORS.some((type) => error instanceof type)) return undefined;
+  return new PermanentFailureError(FailureCode.InfraUnexpected, { cause: error });
 }
 
 function processedInboxMessage(entry: InboxEntry): InboxMessage {

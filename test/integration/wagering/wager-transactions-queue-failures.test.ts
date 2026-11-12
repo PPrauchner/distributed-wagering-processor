@@ -5,7 +5,8 @@
  * receives of it end with no outcome in the DLQ, as `INFRA_RETRIES_EXHAUSTED`,
  * and the key stays free for the DLQ redrive or an HTTP resend; a
  * permanent error ends `FAILED` in the DLQ, with `WagerTransactionFailed` in
- * the outbox, and its redelivery has no effect;
+ * the outbox, and its redelivery has no effect; so does an error nobody
+ * classified, as `INFRA_UNEXPECTED`, with no wait for the native redrive;
  * submissions not admitted go to the DLQ with their `failureCode` and a
  * `rejected_submissions` row — a `BET` sent before its wallet exists only once
  * its receives run out —; a batch keeps the order of its FIFO groups, a retry
@@ -464,6 +465,27 @@ describe('a permanent error', () => {
     await waitUntil(() => drained(queues.url));
     expect(await transactionsOf(data)).toHaveLength(1);
     expect(await eventTypesOf(failed!.id)).toEqual(['WagerTransactionFailed']);
+    expect(await walletState(wallet.id)).toEqual({ balance_amount: '100.00', version: 1 });
+  }, 60_000);
+
+  test('an error nobody classified — a bug — ends FAILED INFRA_UNEXPECTED, in the DLQ with the code and acknowledged, not by the redrive', async () => {
+    const queues = await createQueuePair();
+    const faulty = await startApp(instanceConfig(queues, [FaultPoint.UnexpectedErrorBeforeCommit]));
+    await faulty.init();
+    const wallet = await createWallet('100.00');
+    const data = betData(wallet);
+
+    const messageId = await send(queues.url, data);
+    const letter = await deadLetter(queues.dlqUrl, withMessageId(messageId));
+    await waitUntil(() => drained(queues.url));
+
+    // The redrive would have brought it with no failureCode, after six receives.
+    expect(letter.failureCode).toBe('INFRA_UNEXPECTED');
+    const [failed] = await transactionsOf(data);
+    expect(failed).toMatchObject({ status: 'FAILED', failure_code: 'INFRA_UNEXPECTED' });
+    expect(await eventTypesOf(failed!.id)).toEqual(['WagerTransactionFailed']);
+    expect(await inboxRowsOf(messageId)).toEqual([{ processed: true }]);
+    expect(await rejectedRows(messageId)).toEqual([]);
     expect(await walletState(wallet.id)).toEqual({ balance_amount: '100.00', version: 1 });
   }, 60_000);
 });
