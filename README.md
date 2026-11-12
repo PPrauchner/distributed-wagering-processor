@@ -66,7 +66,8 @@ bun src/main.ts
 
 Os padrões apontam para o Compose: `PORT=3000`,
 `DATABASE_URL=postgresql://wagering:wagering@127.0.0.1:55432/wagering` e
-`SQS_ENDPOINT=http://127.0.0.1:4566`. As demais variáveis estão no
+`SQS_ENDPOINT=http://127.0.0.1:4566`. O nível do log vem de `LOG_LEVEL` (padrão
+`info`; um nível que o pino não conhece recusa a partida). As demais variáveis estão no
 `ARCHITECTURE.md`, cada uma na seção do componente que configura.
 
 ## Usando a API
@@ -182,6 +183,12 @@ Para a integração e a concorrência, basta o PostgreSQL e o LocalStack do Comp
 (`docker compose up -d --wait`). O serviço `app` não é usado: a cada execução, o
 banco `wagering_test` é recriado e migrado, e cada teste cria filas próprias com
 sufixo aleatório.
+
+Na integração, o log JSON do app fica em silêncio (`LOG_LEVEL=silent`, posto pelo
+preload só quando a variável não vem definida), para que uma falha e o resumo do
+bun apareçam nas últimas linhas da saída. Para depurar, religue-o:
+`LOG_LEVEL=info bun run test:integration` (aceita os níveis do pino: `fatal`,
+`error`, `warn`, `info`, `debug`, `trace`, `silent`).
 
 ### `bun run test:concurrency`
 
