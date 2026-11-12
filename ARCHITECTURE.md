@@ -566,7 +566,7 @@ intactos. `REJECTED` vem só do domínio, nunca do classificador. Ver
 | Erro | Categoria |
 |---|---|
 | `55P03` (`lock_timeout`; o MikroORM não o mapeia, é reconhecido pelo código), `40P01`, `40001` | transitório → 503 `TRANSIENT_LOCK_TIMEOUT` |
-| queda ou recusa de conexão (`ECONNREFUSED` e afins, classe `08`, `53300`, `57P01`–`57P03`) | transitório → 503 `TRANSIENT_UNAVAILABLE` |
+| queda ou recusa de conexão (`ECONNREFUSED` e afins, classe `08`, `53300`, `57P01`–`57P03`, e as falhas de conexão que o `pg` lança sem código, como `Connection terminated unexpectedly` e o timeout do pool) | transitório → 503 `TRANSIENT_UNAVAILABLE` |
 | `23505` | pela constraint, tabela abaixo |
 | `23514` (`CHECK`), `23503` (FK de moeda), `23502`, `23000` (os triggers do schema) e `22003` | permanente → `FAILED`, `INFRA_INVARIANT_VIOLATION` |
 | qualquer outro | permanente → `FAILED`, `INFRA_UNEXPECTED` |
@@ -608,6 +608,19 @@ mensagem é enviada explicitamente à DLQ e apagada da fila principal (se a remo
 falhar, a redelivery é reconhecida pelo inbox). Só o erro permanente grava `FAILED`:
 a falha transitória nunca vira `FAILED`, nem esgotada.
 
+**Erro não classificado** — nem transitório, nem permanente, nem recusa da
+submissão: um bug, ou um erro de domínio que escapa da gravação — é tratado como
+permanente `INFRA_UNEXPECTED`, pela mesma regra no use case e no worker de
+referências pendentes: outra tentativa falharia do mesmo jeito. O use case grava
+`FAILED` `INFRA_UNEXPECTED` na segunda unidade de trabalho (com o inbox, quando a
+entrada é a fila); no HTTP, responde 500 como qualquer `FAILED`; na fila, a
+mensagem vai à DLQ com `failureCode` `INFRA_UNEXPECTED` e recebe `ack` — sem
+esperar o redrive nativo, que a levaria à DLQ sem código e sem auditoria depois de
+~6 × 30 s, segurando o grupo FIFO (a carteira) nesse tempo. Se nem o `FAILED` puder
+ser gravado, o erro sai como permanente `INFRA_UNEXPECTED`; e um erro que escapa
+do use case sem classificação (um bug na validação, antes de existir a transação)
+leva a mensagem à DLQ com `INFRA_UNEXPECTED` do mesmo jeito.
+
 - **Transitório na fila:** sem `ack`; backoff por `ChangeMessageVisibility`
   (`min(2^receiveCount s, 60 s)`). Esgotados **5 recebimentos**, a mensagem termina
   **sem desfecho**: vai à DLQ com `failureCode` `INFRA_RETRIES_EXHAUSTED`, com linha
@@ -631,7 +644,7 @@ a falha transitória nunca vira `FAILED`, nem esgotada.
   da sua `BET` encontra a referência e não cai em `PENDING_REFERENCE`. A correção
   do saldo continua vindo do lock; o grupo garante a ordem.
 - **Mensagem do grupo sem `ack`** (retry transitório, carteira ainda inexistente,
-  ou erro inesperado que a deixa pendente): as seguintes do mesmo grupo no lote
+  ou envio à DLQ que falha e a deixa pendente): as seguintes do mesmo grupo no lote
   não são iniciadas e voltam à fila junto com ela — com o mesmo atraso do retry,
   ou, quando ela fica como está, com a visibilidade do lote. Não com visibilidade
   0: o LocalStack 4.14 libera o grupo assim que qualquer mensagem dele fica
@@ -668,8 +681,8 @@ a falha transitória nunca vira `FAILED`, nem esgotada.
   para o redrive da DLQ ou um reenvio por HTTP. Se o envio à DLQ ou a gravação da
   recusa falhar (banco fora), a mensagem fica para o redrive nativo
   (`maxReceiveCount` 6) e chega à DLQ sem o atributo `failureCode` e sem linha de
-  auditoria — limitação aceita. `FAILED` (erro permanente, ou o replay de um)
-  → DLQ com o código do classificador. Submissão não admitida → DLQ direto.
+  auditoria — limitação aceita. `FAILED` (erro permanente ou não classificado,
+  ou o replay de um) → DLQ com o código do classificador, ou `INFRA_UNEXPECTED`. Submissão não admitida → DLQ direto.
 - **Envio à DLQ:** feito pela aplicação (`SendMessage` em
   `wager-transactions-dlq.fifo`, porta `DeadLetterQueue`), com o corpo e os
   atributos originais mais o atributo `failureCode`; `MessageGroupId` = `walletId`
@@ -922,7 +935,9 @@ uma porta de identidade do provedor. O ponto de extensão no código:
   - `wager_transaction_processing_seconds{channel,kind,outcome}` — histograma da
     latência de cada submissão: `outcome` é `settled` (terminou numa transação,
     replay incluído), `not_admitted` (recusada antes de virar transação),
-    `transient` ou `permanent` (inclusive um erro inesperado); `kind` fora do
+    `transient` ou `permanent` (o `FAILED` nem pôde ser gravado, ou um erro não
+    classificado antes de existir a transação — o não classificado que grava
+    `FAILED` termina numa transação, `settled`); `kind` fora do
     enum vira `UNKNOWN`. Uma reentrega que o inbox já tinha não é observada;
   - `reconciliation_divergences_total`.
 
@@ -993,7 +1008,10 @@ agregação:
   desconhecido e `NODE_ENV=production` são recusados na partida). Pontos:
   `invariant-violation-before-commit` — dentro da unidade de trabalho, antes do
   commit, altera a transação de aposta terminal recém-gravada, que o trigger
-  recusa, para o erro verdadeiro passar pelo classificador —; `crash-after-send` —
+  recusa, para o erro verdadeiro passar pelo classificador —;
+  `unexpected-error-before-commit` — no mesmo lugar, na submissão, lança um erro
+  da aplicação (`SimulatedBugError`), que nenhum classificador conhece: o
+  caminho do erro não classificado —; `crash-after-send` —
   o publicador "morre" entre o envio e o `published_at`: lança
   `SimulatedCrashError` antes de gravar, e a transação SQL da gravação desfaz —;
   `crash-after-commit` — o consumidor morre depois do commit do desfecho e antes

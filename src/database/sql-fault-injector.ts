@@ -8,6 +8,7 @@
 import type { EntityManager } from '@mikro-orm/postgresql';
 import {
   FaultPoint,
+  SimulatedBugError,
   SimulatedCrashError,
   type FaultContext,
   type FaultInjector,
@@ -23,6 +24,7 @@ export class SqlFaultInjector implements FaultInjector {
     if (!this.enabled.has(point)) return;
     if (point === FaultPoint.InvariantViolationBeforeCommit) await this.violateInvariant(context);
     if (point === FaultPoint.TransientFailureInResolution) await this.refuseLock();
+    if (point === FaultPoint.UnexpectedErrorBeforeCommit) throw new SimulatedBugError(point);
     // The process dies there: whatever the caller would do next never happens,
     // and the SQL transaction it runs in rolls back.
     if (point === FaultPoint.CrashAfterSend) throw new SimulatedCrashError(point);
