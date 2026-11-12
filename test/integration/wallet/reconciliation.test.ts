@@ -7,6 +7,7 @@
  *
  * @packageDocumentation
  */
+import type { LogDetails } from '../../../src/shared/application/context-log.ts';
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { SQL } from 'bun';
 import { MikroORM } from '@mikro-orm/postgresql';
@@ -32,7 +33,7 @@ beforeAll(async () => {
   orm = await MikroORM.init(createOrmConfig(databaseUrl));
   sql = new SQL(databaseUrl);
   unitOfWork = new MikroOrmUnitOfWork(orm.em);
-  createWallet = new CreateWallet(unitOfWork, () => Bun.randomUUIDv7());
+  createWallet = new CreateWallet(unitOfWork, () => Bun.randomUUIDv7(), { lockConflict: () => undefined });
 });
 
 afterAll(async () => {
@@ -44,11 +45,11 @@ afterAll(async () => {
 function reconciliationWithSpies(): {
   reconciliation: Reconciliation;
   divergences: InMemoryReconciliationDivergenceCounter;
-  errors: string[];
+  errors: { message: string; details?: LogDetails }[];
 } {
   const divergences = new InMemoryReconciliationDivergenceCounter();
-  const errors: string[] = [];
-  const log: ReconciliationLog = { error: (message) => errors.push(message) };
+  const errors: { message: string; details?: LogDetails }[] = [];
+  const log: ReconciliationLog = { warn: (message, details) => void errors.push({ message, details }) };
   return { reconciliation: new Reconciliation(unitOfWork, divergences, log), divergences, errors };
 }
 
@@ -103,9 +104,8 @@ describe('Reconciliation', () => {
     expect(report.difference.toJSON()).toEqual({ amount: '-10.00', currency: 'BRL' });
     expect(report.versionGaps).toEqual([]);
     expect(report.checkedEntries).toBe(1);
-    expect(errors).toHaveLength(1);
-    expect(errors[0]).toContain(walletId);
-    expect(errors[0]).not.toContain('90.00');
+    expect(errors).toEqual([{ message: 'reconciliation divergence', details: { walletId } }]);
+    expect(JSON.stringify(errors)).not.toContain('90.00');
     expect(divergences.count).toBe(1);
     expect(await stateOf(walletId)).toEqual(before);
   });

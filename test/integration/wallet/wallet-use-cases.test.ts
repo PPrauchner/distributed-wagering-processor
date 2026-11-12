@@ -42,7 +42,7 @@ beforeAll(async () => {
   orm = await MikroORM.init(createOrmConfig(databaseUrl));
   sql = new SQL(databaseUrl);
   unitOfWork = new MikroOrmUnitOfWork(orm.em);
-  createWallet = new CreateWallet(unitOfWork, () => Bun.randomUUIDv7());
+  createWallet = new CreateWallet(unitOfWork, () => Bun.randomUUIDv7(), { lockConflict: () => undefined });
   getWallet = new GetWallet(unitOfWork);
 });
 
@@ -89,7 +89,7 @@ function raceAfterKeyLookup(
         }),
       ),
   };
-  const attempt = new CreateWallet(racing, () => Bun.randomUUIDv7()).execute(attemptCommand);
+  const attempt = new CreateWallet(racing, () => Bun.randomUUIDv7(), { lockConflict: () => undefined }).execute(attemptCommand);
   return {
     attempt,
     winner: () => {
@@ -242,7 +242,7 @@ describe('CreateWallet', () => {
     };
     const playerId = Bun.randomUUIDv7();
 
-    const attempt = new CreateWallet(failingLedger, () => Bun.randomUUIDv7()).execute({
+    const attempt = new CreateWallet(failingLedger, () => Bun.randomUUIDv7(), { lockConflict: () => undefined }).execute({
       playerId,
       initialBalance: { amount: '100.00', currency: 'BRL' },
     });

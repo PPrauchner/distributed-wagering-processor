@@ -31,6 +31,12 @@ export interface RetryBackoff {
 
 export const DEFAULT_RETRY_BACKOFF: RetryBackoff = { baseMs: 1000, maxMs: 5 * 60_000 };
 
+/**
+ * From this many failed attempts on, a message is stuck: its 10th failure
+ * raises an alert and it counts in `outbox_stuck_messages`. It is still retried.
+ */
+export const STUCK_ATTEMPTS = 10;
+
 const JITTER = 0.2;
 
 export class OutboxMessage {

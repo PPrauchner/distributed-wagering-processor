@@ -1,6 +1,7 @@
 /**
  * Nest module of health: the liveness and readiness endpoints, with probes of
- * the database and of the input and event queues, and the metrics endpoint.
+ * the database and of the input, event and dead-letter queues, and the metrics
+ * endpoint, whose DLQ depth is read with the probes' client.
  * The queue probes have an SQS client of their own, with no retry, so a probe
  * fails within its timeout. Global: it binds the metrics ports the other
  * modules inject by token.
@@ -11,15 +12,19 @@ import { Global, Inject, Logger, Module, type DynamicModule, type OnApplicationS
 import { SQSClient } from '@aws-sdk/client-sqs';
 import { MikroORM } from '@mikro-orm/postgresql';
 import type { AppConfig } from '../../config.ts';
+import { CONTEXT_LOG, type ContextLog } from '../../shared/application/context-log.ts';
 import { CONSUMER_METRICS } from '../../messaging/application/consumer-metrics.ts';
 import { INBOX_METRICS } from '../../messaging/application/inbox-metrics.ts';
+import { OUTBOX_METRICS } from '../../messaging/application/outbox-metrics.ts';
 import type { OutboxBacklogRepositories } from '../../messaging/application/outbox-backlog.ts';
 import { UNIT_OF_WORK, type UnitOfWork } from '../../shared/application/unit-of-work.ts';
 import { WAGERING_METRICS } from '../../wagering/application/wagering-metrics.ts';
 import { RECONCILIATION_DIVERGENCE_COUNTER } from '../../wallet/application/reconciliation.ts';
+import { WALLET_METRICS } from '../../wallet/application/wallet-metrics.ts';
 import { CheckReadiness } from '../application/check-readiness.ts';
 import { DatabaseReadiness } from '../infrastructure/database-readiness.ts';
 import { PrometheusMetrics } from '../infrastructure/prometheus-metrics.ts';
+import { SqsQueueDepth } from '../infrastructure/sqs-queue-depth.ts';
 import { SqsQueueReadiness } from '../infrastructure/sqs-queue-readiness.ts';
 import { HealthController } from './health.controller.ts';
 import { MetricsController } from './metrics.controller.ts';
@@ -45,17 +50,24 @@ export class HealthModule implements OnApplicationShutdown {
       providers: [
         {
           provide: PrometheusMetrics,
-          inject: [UNIT_OF_WORK],
-          useFactory: (unitOfWork: UnitOfWork<OutboxBacklogRepositories>) =>
-            new PrometheusMetrics(() => unitOfWork.run(({ outboxBacklog }) => outboxBacklog.read()), {
-              timeoutMs: PROBE_TIMEOUT_MS,
-              log: new Logger('Metrics'),
-            }),
+          inject: [UNIT_OF_WORK, PROBE_SQS_CLIENT],
+          useFactory: (unitOfWork: UnitOfWork<OutboxBacklogRepositories>, client: SQSClient) => {
+            const dlq = new SqsQueueDepth(client, sqs.wagerTransactionsDlq);
+            return new PrometheusMetrics(
+              {
+                readBacklog: () => unitOfWork.run(({ outboxBacklog }) => outboxBacklog.read()),
+                readDlqDepth: () => dlq.read(),
+              },
+              { timeoutMs: PROBE_TIMEOUT_MS, log: new Logger('Metrics') },
+            );
+          },
         },
         { provide: WAGERING_METRICS, useExisting: PrometheusMetrics },
         { provide: INBOX_METRICS, useExisting: PrometheusMetrics },
         { provide: CONSUMER_METRICS, useExisting: PrometheusMetrics },
+        { provide: OUTBOX_METRICS, useExisting: PrometheusMetrics },
         { provide: RECONCILIATION_DIVERGENCE_COUNTER, useExisting: PrometheusMetrics },
+        { provide: WALLET_METRICS, useExisting: PrometheusMetrics },
         {
           provide: PROBE_SQS_CLIENT,
           useFactory: () =>
@@ -68,19 +80,28 @@ export class HealthModule implements OnApplicationShutdown {
         },
         {
           provide: CheckReadiness,
-          inject: [MikroORM, PROBE_SQS_CLIENT],
-          useFactory: (orm: MikroORM, client: SQSClient) =>
+          inject: [MikroORM, PROBE_SQS_CLIENT, CONTEXT_LOG],
+          useFactory: (orm: MikroORM, client: SQSClient, log: ContextLog) =>
             new CheckReadiness(
               [
                 new DatabaseReadiness(orm.em),
                 new SqsQueueReadiness(client, sqs.wagerTransactionsQueue),
                 new SqsQueueReadiness(client, sqs.wageringEventsQueue),
+                new SqsQueueReadiness(client, sqs.wagerTransactionsDlq),
               ],
               PROBE_TIMEOUT_MS,
+              log,
             ),
         },
       ],
-      exports: [WAGERING_METRICS, INBOX_METRICS, CONSUMER_METRICS, RECONCILIATION_DIVERGENCE_COUNTER],
+      exports: [
+        WAGERING_METRICS,
+        INBOX_METRICS,
+        CONSUMER_METRICS,
+        OUTBOX_METRICS,
+        WALLET_METRICS,
+        RECONCILIATION_DIVERGENCE_COUNTER,
+      ],
     };
   }
 

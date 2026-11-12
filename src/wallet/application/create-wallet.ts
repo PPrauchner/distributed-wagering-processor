@@ -17,12 +17,14 @@
 import type { OutboxRepositories } from '../../messaging/application/outbox-repository.ts';
 import { OutboxMessage } from '../../messaging/domain/outbox-message.ts';
 import { hashPayload } from '../../shared/application/payload-hash.ts';
+import { TransientFailureError } from '../../shared/application/infrastructure-failures.ts';
 import type { UnitOfWork } from '../../shared/application/unit-of-work.ts';
 import { Money, type MoneyProps } from '../../shared/domain/money.ts';
 import type { WageringRepositories } from '../../wagering/application/wager-transaction-repository.ts';
 import { WagerTransaction, WagerTransactionKind } from '../../wagering/domain/wager-transaction.ts';
 import { WagerTransactionProcessed } from '../../wagering/domain/wager-transaction-events.ts';
 import { WalletBalanceChanged } from '../domain/wallet-balance-changed.ts';
+import type { WalletMetrics } from './wallet-metrics.ts';
 import { Wallet } from '../domain/wallet.ts';
 import type { WalletRepositories, WalletRepository } from './wallet-repository.ts';
 import {
@@ -81,6 +83,7 @@ export class CreateWallet {
   constructor(
     private readonly unitOfWork: UnitOfWork<WalletRepositories & WageringRepositories & OutboxRepositories>,
     private readonly generateId: () => string,
+    private readonly metrics: WalletMetrics,
   ) {}
 
   /**
@@ -93,8 +96,19 @@ export class CreateWallet {
    * @throws {@link WalletAlreadyExistsError} If the player already has a wallet in
    *   that currency that the key did not create — also when a simultaneous
    *   creation without that key wins the race.
+   * @throws {@link TransientFailureError} If the creation waited on a lock
+   *   past the lock timeout — counted — or the database was unavailable.
    */
   async execute(command: CreateWalletCommand): Promise<CreatedWallet> {
+    try {
+      return await this.create(command);
+    } catch (error) {
+      if (error instanceof TransientFailureError && error.lockConflict) this.metrics.lockConflict(error.lockConflict);
+      throw error;
+    }
+  }
+
+  private async create(command: CreateWalletCommand): Promise<CreatedWallet> {
     const initialBalance = Money.from(command.initialBalance);
     const wallet = Wallet.open({
       id: this.generateId(),

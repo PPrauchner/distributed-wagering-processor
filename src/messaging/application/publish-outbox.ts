@@ -7,6 +7,8 @@
  *
  * A failed send is never silent: it is logged with its reason, so a
  * misconfigured queue shows up while the committed events wait in the outbox.
+ * Each reschedule is counted, and the failed attempt that makes a message
+ * stuck — the 10th — raises an alert with its id, never its payload.
  *
  * At-least-once: a publisher that dies after the send and before recording it
  * leaves the messages leased; when the lease expires, another publisher sends
@@ -16,8 +18,10 @@
  */
 import { FaultPoint, type FaultInjection } from '../../shared/application/fault-injector.ts';
 import type { UnitOfWork } from '../../shared/application/unit-of-work.ts';
-import type { OutboxMessage, RetryBackoff } from '../domain/outbox-message.ts';
+import type { ContextLog } from '../../shared/application/context-log.ts';
+import { STUCK_ATTEMPTS, type OutboxMessage, type RetryBackoff } from '../domain/outbox-message.ts';
 import type { EventPublisher, PublishResult } from './event-publisher.ts';
+import type { OutboxMetrics } from './outbox-metrics.ts';
 import type { OutboxRepositories } from './outbox-repository.ts';
 
 /** The SQS batch limit. */
@@ -28,10 +32,8 @@ export interface PublishOutboxOptions {
   backoff: RetryBackoff;
 }
 
-/** Where the publisher reports the sends that failed. */
-export interface PublicationLog {
-  warn(message: string): void;
-}
+/** Where the publisher reports the sends that failed and the stuck messages. */
+export type PublicationLog = Pick<ContextLog, 'warn'>;
 
 export class PublishOutbox {
   constructor(
@@ -39,6 +41,7 @@ export class PublishOutbox {
     private readonly publisher: EventPublisher,
     private readonly options: PublishOutboxOptions,
     private readonly log: PublicationLog,
+    private readonly metrics: OutboxMetrics,
     private readonly now: () => Date = () => new Date(),
   ) {}
 
@@ -66,6 +69,14 @@ export class PublishOutbox {
         } else {
           message.scheduleRetry(at, this.options.backoff);
           await outbox.reschedule(message);
+          this.metrics.publishRetry();
+          if (message.attempts === STUCK_ATTEMPTS) {
+            this.log.warn(`outbox message failed ${STUCK_ATTEMPTS} attempts, still retrying`, {
+              messageId: message.id,
+              eventType: message.eventType,
+              attempts: message.attempts,
+            });
+          }
         }
       }
     });

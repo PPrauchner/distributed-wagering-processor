@@ -5,7 +5,9 @@
  * (`crash-after-send`) is replaced, after the lease, by another that resends
  * the same `eventId` and the same body — recorded from the real SQS client —;
  * two concurrent publishers lose nothing; a failed send is
- * rescheduled and delivered once SQS answers. Every test reads the events from
+ * rescheduled — counted in `outbox_publish_retries_total` — and delivered once
+ * SQS answers; the 10th failed attempt raises an alert with the message's id,
+ * and the message counts in `outbox_stuck_messages`. Every test reads the events from
  * a `wagering-events` FIFO queue of its own, with a random suffix, and waits by
  * condition, never by a fixed sleep.
  *
@@ -28,6 +30,7 @@ import {
 } from '@aws-sdk/client-sqs';
 import { createApp } from '../../../src/app.ts';
 import { loadConfig, type AppConfig } from '../../../src/config.ts';
+import { PrometheusMetrics } from '../../../src/health/infrastructure/prometheus-metrics.ts';
 import { PublishOutbox } from '../../../src/messaging/application/publish-outbox.ts';
 import { SqsEventPublisher } from '../../../src/messaging/infrastructure/sqs-event-publisher.ts';
 import { FaultPoint, SimulatedCrashError, type FaultInjection } from '../../../src/shared/application/fault-injector.ts';
@@ -107,11 +110,18 @@ async function startApp(appConfig: AppConfig): Promise<string> {
   return app.getUrl();
 }
 
-async function startPublisher(appConfig: AppConfig): Promise<PublishOutbox> {
-  const app = await createApp(appConfig);
+async function startPublisher(appConfig: AppConfig, logLines: string[] = []): Promise<PublishOutbox> {
+  const app = await createApp(appConfig, { logDestination: { write: (line: string) => void logLines.push(line) } });
   await app.init();
   publishers.push(app);
   return app.get(PublishOutbox);
+}
+
+/** The value of an unlabelled sample of the started publisher's metrics. */
+async function metricOf(name: string): Promise<number> {
+  const text = await publishers.at(-1)!.get(PrometheusMetrics).registry.metrics();
+  const line = text.split('\n').find((candidate) => candidate.startsWith(`${name} `));
+  return line === undefined ? Number.NaN : Number(line.split(' ')[1]);
 }
 
 function randomQueueName(): string {
@@ -397,6 +407,7 @@ async function recordingPublisher(appConfig: AppConfig, name: string, sends: Sen
     new SqsEventPublisher(recordingSqsClient(name, sends), appConfig.sqs.wageringEventsQueue),
     { leaseMs, backoff: { baseMs: retryBaseMs, maxMs: retryMaxMs } },
     { warn: () => undefined },
+    { publishRetry: () => undefined },
   );
 }
 
@@ -447,5 +458,32 @@ describe('a failed send', () => {
     });
 
     await receiveUntil(queueUrl, rescheduled.map((row) => row.id));
+  }, 60_000);
+
+  test('is counted; the 10th failed attempt raises an alert with the id and no payload, and the message is stuck', async () => {
+    const wallet = await createWallet('100.00');
+    // One failure away from stuck, due now.
+    await sql`update outbox_messages set attempts = 9, next_attempt_at = now() where wallet_id = ${wallet.id}`;
+    const ids = (await outboxOf(wallet.id)).map((row) => row.id);
+    const logLines: string[] = [];
+    // The queue does not exist: every send fails.
+    const publisher = await startPublisher(
+      withPublisher(config, { enabled: false, queue: randomQueueName(), retryBaseMs: 5000 }),
+      logLines,
+    );
+    const retriesBefore = await metricOf('outbox_publish_retries_total');
+
+    await waitUntil(async () => {
+      await publisher.publishDue();
+      return (await outboxOf(wallet.id)).every((row) => row.attempts === 10) ? true : undefined;
+    });
+
+    expect((await metricOf('outbox_publish_retries_total')) - retriesBefore).toBeGreaterThanOrEqual(ids.length);
+    const alerts = logLines
+      .map((line) => JSON.parse(line) as Record<string, unknown>)
+      .filter((entry) => entry.level === 40 && ids.includes(entry.messageId as string));
+    expect(alerts.map((entry) => entry.messageId).sort()).toEqual([...ids].sort());
+    expect(alerts.every((entry) => entry.attempts === 10 && !('payload' in entry))).toBe(true);
+    expect(await metricOf('outbox_stuck_messages')).toBeGreaterThanOrEqual(ids.length);
   }, 60_000);
 });
