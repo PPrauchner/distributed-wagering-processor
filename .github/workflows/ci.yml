@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    name: typecheck e suítes contra o Compose
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      # Mesma versão da imagem do app (Dockerfile: oven/bun:1.4.4-alpine).
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.4
+
+      - name: Instalar dependências
+        run: bun install --frozen-lockfile
+
+      # PostgreSQL, LocalStack com as filas, migrations e app — os serviços reais,
+      # sem mocks. Os testes conectam por 127.0.0.1 (defaults de src/config.ts).
+      - name: Subir o Compose
+        run: docker compose up -d --wait
+
+      - name: Typecheck
+        run: bun run typecheck
+
+      - name: Testes unitários
+        run: bun run test:unit
+
+      - name: Testes de integração
+        run: bun run test:integration
+
+      # Os processos do app escrevem seus logs em <tmpdir>/wagering-concurrency-logs;
+      # fixar o TMPDIR torna o caminho conhecido para a coleta em caso de falha.
+      - name: Testes de concorrência
+        env:
+          TMPDIR: ${{ runner.temp }}
+        run: bun run test:concurrency
+
+      - name: Coletar logs
+        if: failure()
+        env:
+          TMPDIR: ${{ runner.temp }}
+        run: |
+          mkdir -p ci-logs
+          docker compose logs --no-color --timestamps > ci-logs/docker-compose.log 2>&1 || true
+          if [ -d "$TMPDIR/wagering-concurrency-logs" ]; then
+            cp -r "$TMPDIR/wagering-concurrency-logs" ci-logs/
+          fi
+
+      - name: Publicar logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ci-logs/
+          if-no-files-found: ignore
+
+      - name: Derrubar o Compose
+        if: always()
+        run: docker compose down -v

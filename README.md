@@ -1,5 +1,7 @@
 # Distributed Wagering Processor
 
+[![CI](https://github.com/PPrauchner/distributed-wagering-processor/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/PPrauchner/distributed-wagering-processor/actions/workflows/ci.yml?query=branch%3Amain)
+
 Serviço que processa transações de apostas (`BET`, `WIN`, `LOSS`, `REFUND`,
 `ROLLBACK`) vindas de vários provedores, por HTTP e por SQS. Decisões, trade-offs,
 interpretações do enunciado e limitações estão em
@@ -171,6 +173,11 @@ submissão não admitida vai à DLQ com o atributo `failureCode`. Detalhes em
 | `bun run test` | `test:unit` + `test:integration` (~3 min) | sim |
 | `bun run test:concurrency` | os 8 cenários de concorrência do §13, com processos reais do app | sim |
 
+A CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) roda as quatro
+verificações — `typecheck`, `test:unit`, `test:integration` e `test:concurrency` —
+em todo push e pull request, contra o Compose real; em falha, os logs dos processos
+da concorrência e o `docker compose logs` ficam como artefato da execução.
+
 Para a integração e a concorrência, basta o PostgreSQL e o LocalStack do Compose
 (`docker compose up -d --wait`). O serviço `app` não é usado: a cada execução, o
 banco `wagering_test` é recriado e migrado, e cada teste cria filas próprias com
@@ -178,7 +185,7 @@ sufixo aleatório.
 
 ### `bun run test:concurrency`
 
-Roda à mão, antes da entrega, e não entra no `bun run test`. O app real roda em
+Não entra no `bun run test`: roda à mão e na CI. O app real roda em
 processos separados (`Bun.spawn` de `src/main.ts`), com tempos curtos por variável
 de ambiente. Toda espera é por condição com timeout, nunca por `sleep` fixo.
 
