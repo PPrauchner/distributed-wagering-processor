@@ -29,7 +29,9 @@ docker compose up -d --wait     # PostgreSQL (127.0.0.1:55432), LocalStack (:456
                                 # migrate) e app (:3000)
 docker compose up -d --wait --build   # idem, reconstruindo a imagem do app
 bun run typecheck               # tsc --noEmit (TypeScript 6.0)
-bun run test                    # unit + integration (exige o Compose de pé)
+bun run test                    # unit + integration (exige o Compose de pé); ~3 min
+                                # por execução — critério de "N execuções seguidas"
+                                # custa ~3N min
 bun run test:unit               # só domínio, sem I/O
 bun run test:integration        # app em processo contra PostgreSQL e LocalStack reais; recria o
                                 # banco <db>_test a cada execução

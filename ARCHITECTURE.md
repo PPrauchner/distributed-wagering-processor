@@ -140,31 +140,47 @@ Worker morto: o lease expira e outra instância assume. Ver
 
 ## Invariantes no schema
 
-| Tabela | Garantias |
-|---|---|
-| `wallets` | `CHECK (balance_amount >= 0)`, `CHECK (version >= 1)`, `CHECK (currency = balance_currency)`; `UNIQUE (player_id, currency)`; `UNIQUE (id, currency)` (alvo da FK de moeda); `UNIQUE (creation_idempotency_key)` (anulável) e `CHECK` de chave e hash da criação ambos nulos ou ambos preenchidos; `initial_balance` |
-| `wager_transactions` | `UNIQUE (provider_id, idempotency_key)`; `UNIQUE (provider_id, external_transaction_id)`; FK `wallet_id NOT NULL`; FK `reference_transaction_id` na própria tabela; índice único parcial da reversão; `CHECK`s de coerência (`REFUND`/`ROLLBACK` ⇒ referência externa preenchida, `BET`/`LOSS`/`OPENING` ⇒ nula, `WIN` livre; `PENDING_REFERENCE` só para `REFUND`, `ROLLBACK` e `WIN`; `PROCESSED` ⇔ `processed_at`; `REJECTED`/`FAILED` ⇔ `failure_code`; `failure_message` só com `failure_code`; `PROCESSED`/`REJECTED` ⇔ `balance_after` e `wallet_version_observed` preenchidos; `status <> 'PENDING'`); `amount > 0`, exceto `LOSS` (`>= 0`); `correlation_id NOT NULL`; índice parcial `WHERE status = 'PENDING_REFERENCE'` |
-| `wallet_ledger_entries` | `UNIQUE (transaction_id, wallet_id)`; `UNIQUE (wallet_id, wallet_version)`; FK composta e `CHECK` de moeda; `amount > 0`; `CHECK` da aritmética (`balance_after = balance_before ± amount` pela `direction`, saldos `>= 0`) |
-| `inbox_messages` | PK `(consumer_name, message_id)` |
-| `outbox_messages` | `wallet_id NOT NULL` (o `MessageGroupId`); índice parcial `WHERE published_at IS NULL` em `next_attempt_at`; `CHECK (attempts >= 0)`; sem FK |
-| `rejected_submissions` | append-only, sem FK nem unicidade (a PK é um UUID substituto); só `failure_code`, `channel` (`HTTP` ou `QUEUE`, por `CHECK`) e `received_at` obrigatórios — `correlation_id` e o resto anuláveis |
+O diagrama das tabelas e o mapa completo **invariante → nome da constraint,
+índice ou trigger → tabela → migration**, conferido no catálogo do PostgreSQL
+depois de aplicar as migrations, estão em [`docs/data-model.md`](docs/data-model.md).
+Em resumo, o banco garante sozinho:
 
-**Triggers:**
+- **Unicidade:** uma carteira por jogador e moeda; a chave de criação da
+  carteira; `(provider_id, idempotency_key)` e `(provider_id,
+  external_transaction_id)` por transação; um lançamento por transação e
+  carteira e um por versão da carteira; uma reversão processada por referência;
+  uma entrega por `(consumer_name, message_id)` na inbox.
+- **`CHECK`s:** saldo e saldo inicial `>= 0`, versão `>= 1`, moeda repetida
+  igual à da carteira, aritmética do lançamento, `amount > 0` (`LOSS` `>= 0`),
+  coerência tipo × referência × status e `status <> 'PENDING'`.
+- **FKs:** transação → carteira, referência → transação, lançamento →
+  transação e a FK composta `(wallet_id, currency)` → `wallets (id, currency)`,
+  que amarra a moeda do lançamento à da carteira. A FK composta
+  `wallet_ledger_entries_transaction_terms_fk`, `(transaction_id, wallet_id,
+  amount, currency)` → `wager_transactions`, amarra carteira, valor e moeda do
+  lançamento aos da transação. Inbox, outbox e `rejected_submissions` não têm
+  FK.
+- **Triggers:** livro-razão imutável; saldo ↔ livro-razão (*constraint trigger*
+  deferido, ver
+  [ADR 0003](docs/adr/0003-versao-da-carteira-como-sequencia-do-livro-razao.md));
+  transação terminal imutável; identidade da carteira imutável; auditoria
+  append-only. E dois *constraint triggers* deferidos no lançamento (0013):
+  `wallet_ledger_entries_transaction_coherence` — a transação do lançamento
+  está `PROCESSED` e não é `LOSS`, e a direção é a do tipo (`BET` ⇒ `DEBIT`;
+  `OPENING`, `WIN`, `REFUND` ⇒ `CREDIT`; `ROLLBACK` ⇒ inverso do lançamento da
+  referência, que precisa existir) —, deferido porque o worker de pendentes
+  pode atualizar a transação para `PROCESSED` depois de inserir o lançamento; e
+  `wallet_ledger_entries_balance_applied` — nenhum lançamento sem a mudança de
+  saldo: no commit, a carteira está numa versão ≥ à do lançamento e o de maior
+  versão termina no saldo dela, a volta do `wallets_balance_ledger`.
 
-- **Livro-razão imutável:** `UPDATE`, `DELETE` e `TRUNCATE` em
-  `wallet_ledger_entries` são recusados.
-- **Saldo ↔ livro-razão:** *constraint trigger* deferido em `wallets` exige, no
-  commit, um lançamento que leve do saldo antigo ao novo com a versão nova, e a
-  versão subindo exatamente 1 quando o saldo muda. Ver
-  [ADR 0003](docs/adr/0003-versao-da-carteira-como-sequencia-do-livro-razao.md).
-- **Transação terminal imutável:** em `wager_transactions`, linha em `PROCESSED`,
-  `REJECTED` ou `FAILED` não muda; colunas de identidade (chave, hash, valor, tipo,
-  carteira, `correlation_id`…) não mudam em estado nenhum; nenhuma linha é apagada.
-  O único `UPDATE` de status aceito parte de `PENDING_REFERENCE`.
-- **Identidade da carteira imutável:** em `wallets`, `player_id`, `currency`,
-  `initial_balance` e chave e hash da criação não mudam.
-- **Auditoria append-only:** `UPDATE`, `DELETE` e `TRUNCATE` em
-  `rejected_submissions` são recusados.
+**`UNIQUE` redundante:** a FK de termos do lançamento precisa de um alvo único
+com as quatro colunas, e `wager_transactions_ledger_terms_unique` `(id,
+wallet_id, amount, currency)` existe só para isso — a PK já garante a
+unicidade. O custo é um índice a mais em todo insert de transação; o ganho é o
+schema recusar sozinho um lançamento de valor, moeda ou carteira diferente dos
+da transação. A FK pode ser imediata porque essas colunas da transação nunca
+mudam (`wager_transactions_identity_immutable`).
 
 **Saldo máximo:** `99999999999999999.99`, o limite de `numeric(19,2)`. Não há
 `CHECK` próprio: o tipo da coluna já recusa o valor acima dele (`22003`) antes de
@@ -504,9 +520,25 @@ a falha transitória nunca vira `FAILED`, nem esgotada.
 
 ### Consumidor
 
-- Long polling de 20 s, lotes de até 10 mensagens processadas em paralelo,
-  visibilidade de 30 s. O agrupamento FIFO por carteira é otimização; a correção
-  vem do lock.
+- Long polling de 20 s, lotes de até 10 mensagens, visibilidade de 30 s. O lote é
+  particionado pelo `MessageGroupId` **recebido** (atributo de sistema pedido no
+  `ReceiveMessage`), nunca pelo `walletId` do corpo: dentro do grupo, as mensagens
+  rodam uma por vez, na ordem de entrega; grupos distintos rodam em paralelo;
+  mensagem sem grupo roda sozinha. Assim, um `ROLLBACK` que chega no mesmo lote
+  da sua `BET` encontra a referência e não cai em `PENDING_REFERENCE`. A correção
+  do saldo continua vindo do lock; o grupo garante a ordem.
+- **Mensagem do grupo sem `ack`** (retry transitório, carteira ainda inexistente,
+  ou erro inesperado que a deixa pendente): as seguintes do mesmo grupo no lote
+  não são iniciadas e voltam à fila junto com ela — com o mesmo atraso do retry,
+  ou, quando ela fica como está, com a visibilidade do lote. Não com visibilidade
+  0: o LocalStack 4.14 libera o grupo assim que qualquer mensagem dele fica
+  visível, mesmo com uma anterior ainda em voo, e a seguinte passaria à frente.
+  No SQS real, que segura o grupo enquanto a primeira está em voo, o efeito é o
+  mesmo.
+- **Contrato do produtor da fila de entrada:** `MessageGroupId` = `walletId` (a
+  unidade de concorrência do §8) e `MessageDeduplicationId` = `messageId` do
+  envelope. É o grupo que ordena as transações de uma carteira; outro
+  agrupamento perde essa ordem, sem afetar o saldo.
 - **Inbox:** `consumerName` = `wager-transactions-consumer`; `messageId` do
   envelope (não o `MessageId` do SQS); `payloadHash` pela mesma função do hash do
   payload, sobre `data`. Gravado na transação SQL de todo desfecho. Mesmo
@@ -564,7 +596,7 @@ a falha transitória nunca vira `FAILED`, nem esgotada.
   interrompe o long polling (`AbortSignal`) e os workers param de reivindicar;
   o consumidor espera as mensagens em andamento por até 20 s
   (`stop_grace_period` de 30 s no Compose) e devolve com visibilidade 0 as que
-  chegaram já no desligamento, sem iniciá-las; depois o Nest fecha HTTP e pool.
+  chegaram já no desligamento, ou que esperavam a vez no seu grupo, sem iniciá-las; depois o Nest fecha HTTP e pool.
   Se o prazo estourar, a transação SQL é atômica e a redelivery é segura; leases
   expiram. Um long polling interrompido depois de o SQS responder deixa suas
   mensagens invisíveis até a visibilidade expirar.
@@ -750,8 +782,10 @@ uma porta de identidade do provedor. O ponto de extensão no código:
   integration.
 - Isolamento sem limpeza: banco de teste recriado por execução, ids próprios por
   teste, filas com sufixo aleatório.
-- ≥ 3 instâncias são processos reais (`Bun.spawn`); no Compose, `--scale app=3`,
-  documentado no `README.md`. Falhas no ponto exato vêm da porta `FaultInjector`
+- ≥ 3 instâncias são processos reais (`Bun.spawn`); no Compose,
+  `APP_PORTS=3000-3002 docker compose up -d --wait --scale app=3` (uma porta do
+  host por réplica; sem `APP_PORTS`, uma instância em `:3000`), documentado no
+  `README.md`. Falhas no ponto exato vêm da porta `FaultInjector`
   (`shared/application`), oferecida pela unidade de trabalho: no-op por padrão,
   ativada só por `FAULT_INJECTION` (nomes de pontos separados por vírgula; nome
   desconhecido e `NODE_ENV=production` são recusados na partida). Pontos:
@@ -804,6 +838,8 @@ uma porta de identidade do provedor. O ponto de extensão no código:
   dos spans; pede coletor e visualizador no Compose.
 - **Resolver a pendente na chegada da referência**, reconciliação agendada e
   expurgo das linhas publicadas da outbox.
+- **Balanceador HTTP** (nginx) na frente das réplicas do Compose, com uma porta só
+  — ver [Limitações conhecidas](#limitações-conhecidas).
 
 ## Limitações conhecidas
 
@@ -835,5 +871,18 @@ uma porta de identidade do provedor. O ponto de extensão no código:
   créditos no teto de entrada — é rejeitado com `BALANCE_LIMIT_EXCEEDED`, e a
   carteira cheia só volta a receber crédito depois de um débito. Alargá-lo exige
   alargar a coluna.
+- No Compose, o HTTP não é balanceado: com `--scale app=3`, cada réplica fica numa
+  porta da faixa `APP_PORTS`, e quem chama só `:3000` fala com uma réplica. A fila
+  de entrada e a outbox são divididas entre as três; o balanceador fica como
+  evolução.
+- As mensagens que voltam à fila atrás de uma do mesmo grupo sem `ack` contam
+  como recebimento sem terem falhado: numa carteira disputada, podem chegar ao
+  limite de tentativas e ir à DLQ sem desfecho (`INFRA_RETRIES_EXHAUSTED`), de onde
+  são reprocessáveis.
+- No desligamento, as mensagens que esperavam a vez no seu grupo voltam com
+  visibilidade 0 enquanto a anterior ainda termina. No LocalStack 4.14, que libera
+  o grupo assim que uma mensagem dele fica visível, outra instância pode recebê-las
+  antes, e a ordem do grupo se inverte. No SQS real, o grupo fica bloqueado
+  enquanto a anterior está em voo.
 - A auditoria das submissões não admitidas é de melhor esforço: com o banco fora do
   ar, a resposta sai igual e a linha se perde (o erro é logado).

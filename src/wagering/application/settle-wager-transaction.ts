@@ -24,7 +24,6 @@ import {
 } from '../domain/wager-transaction-events.ts';
 import { WagerTransactionKind, WagerTransactionStatus, type WagerTransaction } from '../domain/wager-transaction.ts';
 import type { WagerTransactionRepository } from './wager-transaction-repository.ts';
-import { UnsupportedKindError } from './wagering-errors.ts';
 
 /** How a transaction citing a reference not there yet waits for it. */
 export interface ReferenceWaitPolicy {
@@ -44,7 +43,7 @@ export interface ReferenceWaitPolicy {
  * @param transactions - The repository of the unit of work holding the lock.
  * @param generateId - Generates the id of the ledger entry.
  * @returns The ledger entry to persist, when the balance moved.
- * @throws {@link UnsupportedKindError} If its kind is not processed.
+ * @throws {@link Error} If it is an `OPENING`, which only the wallet's opening records.
  */
 export async function settleOnWallet(
   transaction: WagerTransaction,
@@ -71,8 +70,12 @@ export async function settleOnWallet(
     case WagerTransactionKind.Refund:
     case WagerTransactionKind.Rollback:
       return applyDependentTransaction(transaction, wallet, await citedReference(transactions, transaction), ids);
-    default:
-      throw new UnsupportedKindError(transaction.kind);
+    case WagerTransactionKind.Opening:
+      throw new Error(`${transaction.kind} is internal: only the wallet's opening records it`);
+    default: {
+      const unhandled: never = transaction.kind;
+      throw new Error(`unknown wager transaction kind: ${String(unhandled)}`);
+    }
   }
 }
 

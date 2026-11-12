@@ -76,6 +76,7 @@ const ALL_MIGRATIONS = [
   'Migration0010InboxMessages',
   'Migration0011WagerTransactionReferenceSchedule',
   'Migration0012WalletCreationIdempotency',
+  'Migration0013WalletLedgerTransactionCoherence',
 ];
 const TABLES = [
   'wallets',

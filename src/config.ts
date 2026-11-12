@@ -48,7 +48,7 @@ export interface WagerTransactionsConsumerConfig {
   enabled: boolean;
   /** The long polling wait of each receive, 0 to 20 s. */
   waitTimeSeconds: number;
-  /** Messages per receive, 1 to 10, processed in parallel. */
+  /** Messages per receive, 1 to 10: each FIFO group in series, the groups in parallel. */
   batchSize: number;
   /** How long a received message stays invisible to the other consumers. */
   visibilityTimeoutSeconds: number;

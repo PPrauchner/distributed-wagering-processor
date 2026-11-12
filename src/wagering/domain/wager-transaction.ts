@@ -8,6 +8,7 @@
  */
 import type { FailureCode } from '../../shared/domain/failure-code.ts';
 import type { Money } from '../../shared/domain/money.ts';
+import { LedgerDirection } from '../../wallet/domain/wallet-ledger-entry.ts';
 import { referenceRetryDelayMs, type ReferenceRetryBackoff } from './reference-wait.ts';
 
 export enum WagerTransactionKind {
@@ -45,6 +46,20 @@ export interface CreateWagerTransactionProps {
   correlationId: string;
 }
 
+/** Persisted state of a transaction, rebuilt as is by {@link WagerTransaction.rehydrate}. */
+export interface WagerTransactionState extends CreateWagerTransactionProps {
+  createdAt: Date;
+  status: WagerTransactionStatus;
+  referenceTransactionId?: string;
+  failureCode?: FailureCode;
+  failureMessage?: string;
+  processedAt?: Date;
+  balanceAfter?: Money;
+  walletVersionObserved?: number;
+  attempts?: number;
+  nextAttemptAt?: Date;
+}
+
 /** What processing a transaction leaves on it. */
 export interface ProcessedOutcome {
   at: Date;
@@ -74,12 +89,7 @@ export class InvalidTransactionStateError extends Error {
   override readonly name = 'InvalidTransactionStateError';
 }
 
-const KINDS_REQUIRING_REFERENCE = new Set([WagerTransactionKind.Refund, WagerTransactionKind.Rollback]);
-const KINDS_WITHOUT_REFERENCE = new Set([
-  WagerTransactionKind.Opening,
-  WagerTransactionKind.Bet,
-  WagerTransactionKind.Loss,
-]);
+const MAX_IDENTIFIER_LENGTH = 255;
 const TERMINAL_STATUSES = new Set([
   WagerTransactionStatus.Processed,
   WagerTransactionStatus.Rejected,
@@ -120,28 +130,15 @@ export class WagerTransaction {
    *
    * @param props - The transaction as submitted.
    * @returns The new transaction.
-   * @throws {@link InvalidWagerTransactionError} If the amount is not positive
-   *   (zero is allowed only for `LOSS`), or the reference is missing on a
+   * @throws {@link InvalidWagerTransactionError} If an identifier — of the
+   *   provider, the transaction, the key, the player, the round, the game or the
+   *   reference — is empty or longer than 255 characters, the amount is not
+   *   positive (zero is allowed only for `LOSS`), or the reference is missing on a
    *   `REFUND`/`ROLLBACK`, present on an `OPENING`/`BET`/`LOSS`, or equal to
    *   the transaction's own external id.
    */
   static create(props: CreateWagerTransactionProps): WagerTransaction {
-    const hasReference = props.referenceExternalTransactionId !== undefined;
-    if (KINDS_REQUIRING_REFERENCE.has(props.kind) && !hasReference) {
-      throw new InvalidWagerTransactionError(`${props.kind} requires a reference`);
-    }
-    if (KINDS_WITHOUT_REFERENCE.has(props.kind) && hasReference) {
-      throw new InvalidWagerTransactionError(`${props.kind} does not take a reference`);
-    }
-    if (props.referenceExternalTransactionId === props.externalTransactionId) {
-      throw new InvalidWagerTransactionError(`${props.kind} cannot reference itself`);
-    }
-    const amountFloorOk =
-      props.kind === WagerTransactionKind.Loss ? !props.money.isNegative() : props.money.isPositive();
-    if (!amountFloorOk) {
-      throw new InvalidWagerTransactionError(`amount ${props.money} is not allowed for ${props.kind}`);
-    }
-    return new WagerTransaction(
+    const transaction = new WagerTransaction(
       props.id,
       props.providerId,
       props.externalTransactionId,
@@ -164,6 +161,37 @@ export class WagerTransaction {
       undefined,
       undefined,
       0,
+    );
+    transaction.assertCreatable();
+    return transaction;
+  }
+
+  /** Rebuilds persisted state; does not re-run the creation rules nor the transitions. */
+  static rehydrate(state: WagerTransactionState): WagerTransaction {
+    return new WagerTransaction(
+      state.id,
+      state.providerId,
+      state.externalTransactionId,
+      state.idempotencyKey,
+      state.payloadHash,
+      state.walletId,
+      state.playerId,
+      state.roundId,
+      state.gameId,
+      state.kind,
+      state.money,
+      state.referenceExternalTransactionId,
+      state.correlationId,
+      state.createdAt,
+      state.status,
+      state.referenceTransactionId,
+      state.failureCode,
+      state.processedAt,
+      state.balanceAfter,
+      state.walletVersionObserved,
+      state.failureMessage,
+      state.attempts,
+      state.nextAttemptAt,
     );
   }
 
@@ -290,6 +318,97 @@ export class WagerTransaction {
     return TERMINAL_STATUSES.has(this._status);
   }
 
+  /** Whether the kind undoes another transaction, so it must cite it: `REFUND` and `ROLLBACK`. */
+  requiresReference(): boolean {
+    return this.kind === WagerTransactionKind.Refund || this.kind === WagerTransactionKind.Rollback;
+  }
+
+  /** Whether the kind moves the balance; a `LOSS` only records it. */
+  affectsBalance(): boolean {
+    return this.kind !== WagerTransactionKind.Loss;
+  }
+
+  /**
+   * How the transaction moves its wallet's balance: a `BET` debits; an
+   * `OPENING`, a `WIN` and a `REFUND` credit; a `ROLLBACK` applies the inverse
+   * of its reference — undoing a debit credits it back, undoing a credit debits it.
+   *
+   * @param reference - The transaction it cites, resolved; only a `ROLLBACK`
+   *   needs it.
+   * @returns The direction of its ledger entry.
+   * @throws {@link InvalidTransactionStateError} If it does not move the
+   *   balance — check {@link WagerTransaction.affectsBalance} first —, or is a
+   *   `ROLLBACK` given no reference that moves it.
+   */
+  ledgerDirectionFor(reference?: WagerTransaction): LedgerDirection {
+    switch (this.kind) {
+      case WagerTransactionKind.Bet:
+        return LedgerDirection.Debit;
+      case WagerTransactionKind.Opening:
+      case WagerTransactionKind.Win:
+      case WagerTransactionKind.Refund:
+        return LedgerDirection.Credit;
+      case WagerTransactionKind.Rollback: {
+        if (reference === undefined) {
+          throw new InvalidTransactionStateError(`ROLLBACK ${this.id} has no reference to invert`);
+        }
+        const undone = reference.ledgerDirectionFor();
+        return undone === LedgerDirection.Debit ? LedgerDirection.Credit : LedgerDirection.Debit;
+      }
+      case WagerTransactionKind.Loss:
+        throw new InvalidTransactionStateError(`${this.kind} ${this.id} does not move the balance`);
+      default:
+        return assertNever(this.kind);
+    }
+  }
+
+  /**
+   * Whether a submission under this transaction's key carries its payload: a
+   * replay when it does, an idempotency conflict when it does not.
+   *
+   * @param payloadHash - The hash of the payload submitted.
+   */
+  matchesPayload(payloadHash: string): boolean {
+    return this.payloadHash === payloadHash;
+  }
+
+  /** The rules on the transaction as submitted: its identifiers, then the reference and amount floor of its kind. */
+  private assertCreatable(): void {
+    this.assertIdentifierLengths();
+    const hasReference = this.referenceExternalTransactionId !== undefined;
+    if (this.requiresReference() && !hasReference) {
+      throw new InvalidWagerTransactionError(`${this.kind} requires a reference`);
+    }
+    // Besides the kinds that undo one, only a `WIN` may cite a reference: its round's bet.
+    if (hasReference && !this.requiresReference() && this.kind !== WagerTransactionKind.Win) {
+      throw new InvalidWagerTransactionError(`${this.kind} does not take a reference`);
+    }
+    if (this.referenceExternalTransactionId === this.externalTransactionId) {
+      throw new InvalidWagerTransactionError(`${this.kind} cannot reference itself`);
+    }
+    const amountFloorOk = this.affectsBalance() ? this.money.isPositive() : !this.money.isNegative();
+    if (!amountFloorOk) {
+      throw new InvalidWagerTransactionError(`amount ${this.money} is not allowed for ${this.kind}`);
+    }
+  }
+
+  private assertIdentifierLengths(): void {
+    const identifiers: [string, string | undefined][] = [
+      ['providerId', this.providerId],
+      ['externalTransactionId', this.externalTransactionId],
+      ['idempotencyKey', this.idempotencyKey],
+      ['playerId', this.playerId],
+      ['roundId', this.roundId],
+      ['gameId', this.gameId],
+      ['referenceExternalTransactionId', this.referenceExternalTransactionId],
+    ];
+    for (const [name, value] of identifiers) {
+      if (value !== undefined && (value.length === 0 || value.length > MAX_IDENTIFIER_LENGTH)) {
+        throw new InvalidWagerTransactionError(`${name} must have between 1 and ${MAX_IDENTIFIER_LENGTH} characters`);
+      }
+    }
+  }
+
   private assertPendingReference(): void {
     if (this._status !== WagerTransactionStatus.PendingReference) {
       throw new InvalidTransactionStateError(`transaction ${this.id} is ${this._status}, not PENDING_REFERENCE`);
@@ -301,4 +420,8 @@ export class WagerTransaction {
       throw new InvalidTransactionStateError(`transaction ${this.id} is already ${this._status}`);
     }
   }
+}
+
+function assertNever(kind: never): never {
+  throw new Error(`unknown wager transaction kind: ${String(kind)}`);
 }

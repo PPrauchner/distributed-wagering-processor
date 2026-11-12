@@ -4,6 +4,41 @@ Serviço que processa transações de apostas (`BET`, `WIN`, `LOSS`, `REFUND`,
 `ROLLBACK`) vindas de vários provedores, por HTTP e por SQS. Decisões e trade-offs
 em [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
+## Várias instâncias
+
+Sem nada além do comando, o Compose sobe uma instância do app em `:3000`:
+
+```bash
+docker compose up -d --wait
+```
+
+Para subir três instâncias sobre o mesmo PostgreSQL e as mesmas filas, passe uma
+faixa de portas do host em `APP_PORTS`, uma porta por réplica:
+
+```bash
+APP_PORTS=3000-3002 docker compose up -d --wait --scale app=3
+```
+
+Cada réplica fica numa porta da faixa, mas não necessariamente na ordem das
+réplicas. Para descobrir qual está em qual porta, veja a coluna `PORTS` de
+`docker compose ps app`; cada uma responde em `http://127.0.0.1:<porta>/health/ready`.
+
+`--scale app=3` sem `APP_PORTS` falha: as réplicas disputam a mesma porta `3000` do
+host e só a primeira sobe. O HTTP não é balanceado — quem chama só `:3000` fala com
+uma réplica; a fila de entrada e a outbox, essas, são consumidas pelas três.
+
+## Enviando pela fila
+
+A fila de entrada é `wager-transactions.fifo`. Cada mensagem leva o envelope do
+§10 no corpo e, na chamada a `SendMessage`:
+
+- `MessageGroupId` = `walletId` — a unidade de concorrência: as transações de uma
+  carteira são processadas em série, na ordem de envio; carteiras distintas, em
+  paralelo;
+- `MessageDeduplicationId` = `messageId` do envelope.
+
+Detalhes em [`ARCHITECTURE.md` § Consumidor](ARCHITECTURE.md#consumidor).
+
 ## Testes
 
 Todas as suítes rodam contra o PostgreSQL e o LocalStack reais, sem mocks de banco

@@ -29,15 +29,6 @@ export class InternalKindNotAllowedError extends Error {
   }
 }
 
-/** A kind this service does not process yet. */
-export class UnsupportedKindError extends Error {
-  override readonly name = 'UnsupportedKindError';
-
-  constructor(kind: string) {
-    super(`${kind} is not supported yet`);
-  }
-}
-
 /** The idempotency key was already used by this provider with another payload. */
 export class IdempotencyConflictError extends Error {
   override readonly name = 'IdempotencyConflictError';
