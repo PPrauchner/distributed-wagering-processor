@@ -1,8 +1,10 @@
 /**
  * The ledger guaranteed by the schema, proven by raw SQL: entries are immutable,
  * every balance change is tied to an entry by the wallet version (ADR 0003), the
- * entry's arithmetic and currency hold, and a wallet's identity never changes.
- * The code path is not trusted to hold any of it.
+ * entry's arithmetic and currency hold, every entry is tied to an applied
+ * transaction of the same terms and direction, no entry stands without its
+ * balance change, and a wallet's identity never changes. The code path is not
+ * trusted to hold any of it.
  *
  * @packageDocumentation
  */
@@ -43,18 +45,40 @@ async function insertWallet(tx: SQL, balance: string, currency = 'BRL'): Promise
   return id;
 }
 
-async function insertTransaction(tx: SQL, walletId: string, amount: string, kind = 'OPENING'): Promise<string> {
+type Row = Record<string, string | number | Date | null>;
+
+/** A `PROCESSED` transaction in BRL; overrides make it anything else. */
+async function insertTransaction(
+  tx: SQL,
+  walletId: string,
+  amount: string,
+  kind = 'OPENING',
+  overrides: Row = {},
+): Promise<string> {
   const id = Bun.randomUUIDv7();
-  await tx`
-    insert into wager_transactions (
-      id, provider_id, external_transaction_id, idempotency_key, payload_hash, wallet_id, player_id,
-      round_id, game_id, kind, amount, currency, status, processed_at, balance_after_amount,
-      balance_after_currency, wallet_version_observed, correlation_id, created_at
-    ) values (
-      ${id}, 'internal', ${id}, ${id}, ${'0'.repeat(64)}, ${walletId}, 'player', 'round', 'game',
-      ${kind}, ${amount}, 'BRL', 'PROCESSED', now(), ${amount}, 'BRL', 1, 'corr', now()
-    )
-  `;
+  const row: Row = {
+    id,
+    provider_id: 'internal',
+    external_transaction_id: id,
+    idempotency_key: id,
+    payload_hash: '0'.repeat(64),
+    wallet_id: walletId,
+    player_id: 'player',
+    round_id: 'round',
+    game_id: 'game',
+    kind,
+    amount,
+    currency: 'BRL',
+    status: 'PROCESSED',
+    processed_at: new Date(),
+    balance_after_amount: amount,
+    balance_after_currency: 'BRL',
+    wallet_version_observed: 1,
+    correlation_id: 'corr',
+    created_at: new Date(),
+    ...overrides,
+  };
+  await tx`insert into wager_transactions ${tx(row)}`;
   return id;
 }
 
@@ -211,7 +235,12 @@ describe('entry arithmetic and currency', () => {
   function openWith(entry: Partial<EntryRow>, walletCurrency = 'BRL'): Promise<void> {
     return sql.begin(async (tx) => {
       const walletId = await insertWallet(tx, '100.00', walletCurrency);
-      const transactionId = await insertTransaction(tx, walletId, '100.00');
+      // The transaction follows the entry's currency: only the wallet's may differ.
+      const currency = entry.currency ?? 'BRL';
+      const transactionId = await insertTransaction(tx, walletId, '100.00', 'OPENING', {
+        currency,
+        balance_after_currency: currency,
+      });
       await insertEntry(tx, {
         walletId,
         transactionId,
@@ -230,7 +259,7 @@ describe('entry arithmetic and currency', () => {
     ['a zero amount', { amount: '0.00', after: '0.00' }, /wallet_ledger_entries_amount_positive/],
     ['a negative amount', { amount: '-100.00', direction: 'DEBIT' }, /wallet_ledger_entries_amount_positive/],
     ['a negative balance', { before: '-100.00', after: '0.00' }, /wallet_ledger_entries_arithmetic/],
-    ['an entry in another currency than the wallet', { currency: 'USD' }, /foreign key/],
+    ['an entry in another currency than the wallet', { currency: 'USD' }, /wallet_ledger_entries_wallet_currency_fk/],
     ['an unknown direction', { direction: 'SIDEWAYS' }, /wallet_ledger_entries_(direction|arithmetic)/],
   ])('%s fails', async (_case, entry, error) => {
     await expect(openWith(entry)).rejects.toThrow(error);
@@ -257,9 +286,204 @@ describe('entry arithmetic and currency', () => {
     const { walletId } = await openedWallet();
     const [opening] = await sql`select transaction_id from wallet_ledger_entries where wallet_id = ${walletId}`;
 
-    const attempt = credit(walletId, { to: '130.00', version: 2, entry: { transactionId: opening.transaction_id } });
+    // The opening's own terms, so only the second entry for it is wrong.
+    const attempt = credit(walletId, {
+      to: '200.00',
+      version: 2,
+      entry: { transactionId: opening.transaction_id, amount: '100.00' },
+    });
 
     await expect(attempt).rejects.toThrow(/wallet_ledger_entries_transaction_wallet_unique/);
+  });
+});
+
+const DIRECTION_OF: Record<string, string> = {
+  OPENING: 'CREDIT',
+  BET: 'DEBIT',
+  WIN: 'CREDIT',
+  LOSS: 'CREDIT',
+  REFUND: 'CREDIT',
+};
+
+interface Move {
+  kind: string;
+  /** Defaults to the kind's; required for a `ROLLBACK`. */
+  direction?: string;
+  amount?: string;
+  /** Overrides of the transaction row, coherent with its own CHECKs. */
+  transaction?: Row;
+}
+
+/**
+ * Applies a transaction to the wallet the way the use case does: the wallet
+ * moves by the entry's amount in its direction to the next version, and the
+ * transaction and its entry are written in the same SQL transaction.
+ *
+ * @returns The id of the transaction applied.
+ */
+function move(walletId: string, change: Move): Promise<string> {
+  const amount = change.amount ?? '30.00';
+  const direction = change.direction ?? DIRECTION_OF[change.kind]!;
+  const sign = direction === 'DEBIT' ? -1 : 1;
+  return sql.begin(async (tx) => {
+    const [before] = await tx`
+      select balance_amount::text as balance, version from wallets where id = ${walletId} for update
+    `;
+    const [after] = await tx`
+      update wallets set balance_amount = balance_amount + ${amount}::numeric * ${sign}, version = version + 1
+       where id = ${walletId}
+      returning balance_amount::text as balance, version
+    `;
+    const transactionId = await insertTransaction(tx, walletId, amount, change.kind, {
+      balance_after_amount: after.balance,
+      wallet_version_observed: after.version,
+      ...change.transaction,
+    });
+    await insertEntry(tx, {
+      walletId,
+      transactionId,
+      direction,
+      amount,
+      before: before.balance,
+      after: after.balance,
+      version: after.version,
+    });
+    return transactionId;
+  });
+}
+
+/** The reference columns of a `REFUND` or `ROLLBACK` of the given transaction. */
+function referencing(referenceId: string): Row {
+  return { reference_external_transaction_id: referenceId, reference_transaction_id: referenceId };
+}
+
+describe('the entry is tied to its transaction', () => {
+  const COHERENCE = 'wallet_ledger_entries_transaction_coherence';
+
+  test('every kind that moves the balance commits in its direction, reversals included', async () => {
+    const { walletId } = await openedWallet();
+
+    const bet = await move(walletId, { kind: 'BET' });
+    await move(walletId, { kind: 'REFUND', transaction: referencing(bet) });
+    const win = await move(walletId, { kind: 'WIN' });
+    await move(walletId, { kind: 'ROLLBACK', direction: 'DEBIT', transaction: referencing(win) });
+    const secondBet = await move(walletId, { kind: 'BET' });
+    await move(walletId, { kind: 'ROLLBACK', direction: 'CREDIT', transaction: referencing(secondBet) });
+
+    const [row] = await sql`select balance_amount::text as balance, version from wallets where id = ${walletId}`;
+    expect(row).toEqual({ balance: '100.00', version: 7 });
+  });
+
+  test.each([
+    ['REJECTED', { status: 'REJECTED', failure_code: 'INSUFFICIENT_FUNDS', processed_at: null }],
+    [
+      'FAILED',
+      {
+        status: 'FAILED',
+        failure_code: 'INFRA_UNEXPECTED',
+        processed_at: null,
+        balance_after_amount: null,
+        balance_after_currency: null,
+        wallet_version_observed: null,
+      },
+    ],
+    [
+      'PENDING_REFERENCE',
+      {
+        status: 'PENDING_REFERENCE',
+        processed_at: null,
+        balance_after_amount: null,
+        balance_after_currency: null,
+        wallet_version_observed: null,
+        next_attempt_at: new Date(),
+      },
+    ],
+  ])('an entry of a %s transaction fails on commit', async (status, transaction) => {
+    const { walletId } = await openedWallet();
+
+    const attempt = move(walletId, { kind: 'WIN', transaction: transaction as Row });
+
+    await expect(attempt).rejects.toThrow(new RegExp(`${COHERENCE}: .* is ${status}`));
+  });
+
+  test('an entry of a LOSS fails on commit', async () => {
+    const { walletId } = await openedWallet();
+
+    await expect(move(walletId, { kind: 'LOSS' })).rejects.toThrow(new RegExp(`${COHERENCE}: .* LOSS`));
+  });
+
+  test.each([
+    ['an amount', { amount: '40.00' }],
+    ['a currency', { currency: 'USD', balance_after_currency: 'USD' }],
+  ])('%s other than the transaction’s fails', async (_case, transaction) => {
+    const { walletId } = await openedWallet();
+
+    const attempt = move(walletId, { kind: 'WIN', transaction });
+
+    await expect(attempt).rejects.toThrow(/wallet_ledger_entries_transaction_terms_fk/);
+  });
+
+  test('a wallet other than the transaction’s fails', async () => {
+    const { walletId } = await openedWallet();
+    const { walletId: otherWalletId } = await openedWallet();
+
+    const attempt = move(walletId, { kind: 'WIN', transaction: { wallet_id: otherWalletId } });
+
+    await expect(attempt).rejects.toThrow(/wallet_ledger_entries_transaction_terms_fk/);
+  });
+
+  test.each([
+    ['BET', 'CREDIT'],
+    ['WIN', 'DEBIT'],
+    ['OPENING', 'DEBIT'],
+  ])('a %s written as a %s fails on commit', async (kind, direction) => {
+    const { walletId } = await openedWallet();
+
+    const attempt = move(walletId, { kind, direction });
+
+    await expect(attempt).rejects.toThrow(new RegExp(`${COHERENCE}: .* ${kind} .* ${direction}`));
+  });
+
+  test('a REFUND written as a DEBIT fails on commit', async () => {
+    const { walletId } = await openedWallet();
+    const bet = await move(walletId, { kind: 'BET' });
+
+    const attempt = move(walletId, { kind: 'REFUND', direction: 'DEBIT', transaction: referencing(bet) });
+
+    await expect(attempt).rejects.toThrow(new RegExp(`${COHERENCE}: .* REFUND .* DEBIT`));
+  });
+
+  test('a ROLLBACK in the direction of the entry it undoes fails on commit', async () => {
+    const { walletId } = await openedWallet();
+    const bet = await move(walletId, { kind: 'BET' });
+
+    const attempt = move(walletId, { kind: 'ROLLBACK', direction: 'DEBIT', transaction: referencing(bet) });
+
+    await expect(attempt).rejects.toThrow(new RegExp(`${COHERENCE}: .* ROLLBACK .* DEBIT`));
+  });
+
+  test('a ROLLBACK of a transaction without an entry fails on commit', async () => {
+    const { walletId } = await openedWallet();
+    const loss = await sql.begin((tx) =>
+      insertTransaction(tx, walletId, '30.00', 'LOSS', { balance_after_amount: '100.00' }),
+    );
+
+    const attempt = move(walletId, { kind: 'ROLLBACK', direction: 'CREDIT', transaction: referencing(loss) });
+
+    await expect(attempt).rejects.toThrow(new RegExp(`${COHERENCE}: .* no entry`));
+  });
+});
+
+describe('no entry without its balance change', () => {
+  test('an entry written without moving the wallet fails on commit', async () => {
+    const { walletId } = await openedWallet();
+
+    const attempt = sql.begin(async (tx) => {
+      const transactionId = await insertTransaction(tx, walletId, '30.00', 'WIN');
+      await insertEntry(tx, { walletId, transactionId, amount: '30.00', before: '100.00', after: '130.00', version: 2 });
+    });
+
+    await expect(attempt).rejects.toThrow(/wallet_ledger_entries_balance_applied/);
   });
 });
 
