@@ -41,8 +41,9 @@ bun run db:migrate up|down      # migrations por script Bun, sem o CLI do MikroO
 bun src/main.ts                 # app local, fora do Compose (PORT, DATABASE_URL)
 ```
 
-A conexão com o banco usa `127.0.0.1`, nunca `localhost` (ver ADR 0001). Os demais
-comandos (`test:load`) entram aqui quando forem criados.
+A conexão com o banco usa `127.0.0.1`, nunca `localhost` (ver ADR 0001). Não há
+`test:load`: o teste de carga é diferencial opcional e está declarado como limitação
+no `ARCHITECTURE.md`.
 
 ## Estrutura
 

@@ -317,8 +317,9 @@ Unicidade da reversão: índice único parcial em `reference_transaction_id` com
   Header presente e vazio → 400 `MISSING_IDEMPOTENCY_KEY`, como na submissão. Na
   corrida de duas criações com a mesma chave, qualquer violação de unicidade relê
   pela chave e compara o hash: uma resposta cria e as outras são replay. Sem o
-  header, vale o contrato do §9 sem mudança — obrigatório, um cliente que segue o
-  enunciado receberia 400. Em qualquer caso, carteira já existente para jogador e
+  header, a criação segue o §9 como está escrito: o enunciado não pede chave no
+  `POST /wallets`, e exigi-la faria um cliente que segue o enunciado receber 400 —
+  por isso o header aqui é opcional. Em qualquer caso, carteira já existente para jogador e
   moeda → 409 `WALLET_ALREADY_EXISTS` **com o `walletId`**, para que o provedor que
   perdeu o 201 descubra a carteira. A chave da criação é global, porque a carteira não
   tem provedor (limitação; com autenticação, seria por provedor).
@@ -426,12 +427,14 @@ Com mais de uma violação, prevalece a primeira, na mesma ordem nos dois canais
   Esse `23505` não é a resposta: qual índice o PostgreSQL checa primeiro numa
   corrida idêntica não é garantido. O use case relê na ordem das validações —
   chave, depois id externo —: mesma chave e mesmo hash → replay; mesma chave e
-  outro hash → `IDEMPOTENCY_CONFLICT`; outra chave → `EXTERNAL_ID_CONFLICT`. A
-  mesma chave com outro hash é `IDEMPOTENCY_CONFLICT`, e não `EXTERNAL_ID_CONFLICT`
-  como dizia a primeira redação da decisão (grill da seção 14, pergunta 10): assim o
-  desfecho é o mesmo que a validação antes do insert daria, e não depende de qual
-  índice estourou; corrigido no Agent Brief da #45. Na fila, os conflitos são erro
-  de negócio terminal.
+  outro hash → `IDEMPOTENCY_CONFLICT`; outra chave → `EXTERNAL_ID_CONFLICT`. Assim
+  o desfecho da corrida é o mesmo que a validação antes do insert daria, e não
+  depende de qual índice estourou. Na fila, os conflitos são erro de negócio
+  terminal.
+- **A chave é opaca.** O `Idempotency-Key` é a fonte da verdade e não é comparado
+  com o corpo: `"{providerId}:{externalTransactionId}"` é só o formato recomendado
+  pelo §9, não uma exigência. A coerência entre chave e operação vem das duas
+  unicidades acima.
 - **Camadas:** o inbox, por `(consumerName, messageId)`, protege contra a
   redelivery da fila; a chave de idempotência protege contra o reenvio do provedor,
   por qualquer canal.
@@ -1103,7 +1106,7 @@ maioria decidida nos grills do PRD (`docs/grills_logs/transversal/prd.md` e
   transação dependente, sem igualdade de valor e sem contar como desfazer; `LOSS`
   não leva referência — [Reembolso e reversão](#reembolso-e-reversão).
 - **Rodada sem máquina de estados:** `WIN` sem `BET`, ou `WIN` e `LOSS` na mesma
-  rodada, são aceitos — [Transições](#transições-da-transação-de-aposta).
+  rodada, são aceitos — [Reembolso e reversão](#reembolso-e-reversão).
 - **Rejeição × submissão não admitida** (§10): só a rejeição de regra de negócio
   cria transação de aposta `REJECTED`; payload inválido, conflito de chave e
   carteira inexistente não criam nada e são auditados à parte —
