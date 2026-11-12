@@ -119,11 +119,15 @@ describe('GET /metrics', () => {
       ['wager_transactions_consumer_retries_total', 'counter'],
       ['wager_transactions_dlq_messages_total', 'counter'],
       ['wager_transactions_dlq_depth', 'gauge'],
+      ['outbox_publish_retries_total', 'counter'],
+      ['outbox_stuck_messages', 'gauge'],
+      ['pending_reference_retries_total', 'counter'],
     ]) {
       expect(text).toContain(`# TYPE ${name} ${type}`);
     }
     // The known series exist at the start: a sample line, not only the TYPE.
     expect(text).toMatch(/^wager_transactions_total\{kind="WIN",status="REJECTED",channel="QUEUE"\} \d+$/m);
+    expect(text).toMatch(/^wager_transactions_total\{kind="REFUND",status="PROCESSED",channel="WORKER"\} \d+$/m);
     expect(text).toMatch(/^lock_conflicts_total\{reason="serialization_failure"\} \d+$/m);
     expect(text).toMatch(/^rejected_submissions_total\{failure_code="MESSAGE_ID_CONFLICT",channel="QUEUE"\} \d+$/m);
     expect(text).toMatch(/^inbox_duplicates_total 0$/m);
@@ -146,7 +150,7 @@ describe('GET /metrics', () => {
     expect(delta('wager_transactions_total', { ...HTTP_BET, status: 'PROCESSED' })).toBe(1);
     expect(delta('wager_transactions_total', { ...HTTP_BET, status: 'REJECTED' })).toBe(1);
     expect(delta('wager_transaction_idempotent_replays_total', { channel: 'HTTP' })).toBe(1);
-    expect(delta('wager_transaction_processing_seconds_count', HTTP_BET)).toBe(3);
+    expect(delta('wager_transaction_processing_seconds_count', { ...HTTP_BET, outcome: 'settled' })).toBe(3);
   });
 
   test('an idempotency conflict and a submission not admitted: counted, the second by code', async () => {
@@ -165,6 +169,8 @@ describe('GET /metrics', () => {
     expect(delta('wager_transaction_idempotency_conflicts_total', { channel: 'HTTP' })).toBe(1);
     expect(delta('rejected_submissions_total', { failure_code: 'IDEMPOTENCY_CONFLICT', channel: 'HTTP' })).toBe(1);
     expect(delta('rejected_submissions_total', { failure_code: 'WALLET_NOT_FOUND', channel: 'HTTP' })).toBe(1);
+    // Timed too, by how they ended.
+    expect(delta('wager_transaction_processing_seconds_count', { ...HTTP_BET, outcome: 'not_admitted' })).toBe(2);
   });
 
   test('the wallet locked by another session beyond the lock_timeout: a lock conflict by reason', async () => {
@@ -186,6 +192,16 @@ describe('GET /metrics', () => {
       sample(after, 'lock_conflicts_total', { reason: 'lock_timeout' }) -
         sample(before, 'lock_conflicts_total', { reason: 'lock_timeout' }),
     ).toBe(1);
+    // The error path is timed, with its outcome: past the 2 s lock timeout.
+    const transient = { ...HTTP_BET, outcome: 'transient' };
+    expect(
+      sample(after, 'wager_transaction_processing_seconds_count', transient) -
+        sample(before, 'wager_transaction_processing_seconds_count', transient),
+    ).toBe(1);
+    expect(
+      sample(after, 'wager_transaction_processing_seconds_bucket', { ...transient, le: '1' }) -
+        sample(before, 'wager_transaction_processing_seconds_bucket', { ...transient, le: '1' }),
+    ).toBe(0);
   }, 10_000);
 
   test('a reconciliation divergence: counted', async () => {

@@ -12,6 +12,7 @@ import type { FaultInjection } from '../../../src/shared/application/fault-injec
 import type { UnitOfWork } from '../../../src/shared/application/unit-of-work.ts';
 import { FailureCode } from '../../../src/shared/domain/failure-code.ts';
 import type { WalletRepositories } from '../../../src/wallet/application/wallet-repository.ts';
+import type { WageringMetrics } from '../../../src/wagering/application/wagering-metrics.ts';
 import { ResolvePendingReferences } from '../../../src/wagering/application/resolve-pending-references.ts';
 import type { WageringRepositories } from '../../../src/wagering/application/wager-transaction-repository.ts';
 import { WagerTransactionStatus, type WagerTransaction } from '../../../src/wagering/domain/wager-transaction.ts';
@@ -73,11 +74,21 @@ function logSpy(): ContextLog & { warnings: string[] } {
   };
 }
 
+const noMetrics: WageringMetrics = {
+  transactionSettled: () => undefined,
+  processingFailed: () => undefined,
+  idempotencyConflict: () => undefined,
+  lockConflict: () => undefined,
+  submissionNotAdmitted: () => undefined,
+  pendingReferenceResolved: () => undefined,
+  pendingReferenceRetried: () => undefined,
+};
+
 function resolver(unitOfWork: UnitOfWork<Repositories>, log: ContextLog): ResolvePendingReferences {
   return new ResolvePendingReferences(unitOfWork, () => 'generated-id', {
     leaseMs: 30_000,
     referenceWait: { ttlMs: 300_000, backoff: { baseMs: 1000, maxMs: 60_000 } },
-  }, log);
+  }, log, noMetrics);
 }
 
 describe('an unexpected error in resolving a pending reference', () => {
