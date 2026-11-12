@@ -2,8 +2,12 @@
  * Concurrency scenario 6 of §13, with real app processes: a publisher killed
  * between the send and `published_at` (`crash-after-send`), then two
  * publishers at once over the same outbox, while new events are written.
- * Every confirmed event reaches the events queue, none is lost, and what
- * arrives twice carries the same `eventId`. Ends checking the ledger
+ * The events the killed publisher sends are written before any publisher is
+ * on, and after the shared outbox is left with no row never claimed, so its
+ * one claim holds all of them. Every confirmed event reaches the
+ * events queue, nothing outside the outbox arrives, and every message carries
+ * its `eventId` as the FIFO deduplication id — which is what absorbs the
+ * resend of what the killed publisher sent. Ends checking the ledger
  * invariant of every wallet it touched.
  *
  * @packageDocumentation
@@ -30,15 +34,17 @@ import {
 afterEach(killAllInstances);
 afterAll(deleteScenarioQueues);
 
-function publisherOn(queues: ScenarioQueues, faults: string[] = []) {
+function instanceOn(queues: ScenarioQueues, publisher: boolean, faults: string[] = []) {
   return startInstance({
     inputQueue: queues.input.name,
     dlq: queues.dlq.name,
     eventsQueue: queues.events.name,
-    publisher: true,
+    publisher,
     faults,
   });
 }
+
+const publisherOn = (queues: ScenarioQueues, faults: string[] = []) => instanceOn(queues, true, faults);
 
 async function outboxOf(wallets: readonly TestWallet[]): Promise<{ id: string; published: boolean }[]> {
   return [
@@ -49,17 +55,41 @@ async function outboxOf(wallets: readonly TestWallet[]): Promise<{ id: string; p
   ];
 }
 
+/** Runs a plain publisher until no outbox row is left pending and never claimed. */
+async function drainUnclaimed(queues: ScenarioQueues): Promise<void> {
+  const drainer = await publisherOn(queues);
+  await waitUntil(
+    async () => {
+      const [{ count }] = await sql`
+        select count(*)::int as count from outbox_messages where published_at is null and next_attempt_at is null
+      `;
+      return count === 0 ? true : undefined;
+    },
+    60_000,
+    'no outbox row left unclaimed',
+  );
+  await drainer.kill();
+}
+
 describe('6. publishers over the same outbox', () => {
-  test('one killed after the send, then two at once: every event arrives, none is lost, duplicates share the eventId', async () => {
+  test('one killed after the send, then two at once: every confirmed event arrives, only outbox events arrive, each deduplicated by its eventId', async () => {
     const queues = await createScenarioQueues();
     const received: ReceivedEvent[] = [];
     const receivedIds = () => new Set(received.map((event) => event.eventId));
 
+    // The outbox is shared by the whole suite: rows never claimed, left by earlier
+    // scenarios, would go ahead of these in the dying publisher's one claim.
+    await drainUnclaimed(queues);
+
+    // The events are written with no publisher on, so none is claimed half-written.
+    const writer = await instanceOn(queues, false);
+    const first = await createWallet(writer.url, '100.00');
+    await submitUntilTerminal(writer.url, transactionOn(first, 'BET'));
+    await writer.kill();
+    const crashed = (await outboxOf([first])).map((row) => row.id);
+
     // A publisher that sends and dies before recording the publication.
     const dying = await publisherOn(queues, ['crash-after-send']);
-    const first = await createWallet(dying.url, '100.00');
-    await submitUntilTerminal(dying.url, transactionOn(first, 'BET'));
-    const crashed = (await outboxOf([first])).map((row) => row.id);
     await waitUntil(
       async () => {
         received.push(...(await receiveEvents(queues.events)));
