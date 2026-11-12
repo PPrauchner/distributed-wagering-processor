@@ -9,6 +9,8 @@ import { describe, expect, test } from 'bun:test';
 import { FailureCode } from '../../../src/shared/domain/failure-code.ts';
 import { Money } from '../../../src/shared/domain/money.ts';
 import {
+  EventOutcomeMismatchError,
+  WagerTransactionFailed,
   WagerTransactionPendingReference,
   WagerTransactionProcessed,
   WagerTransactionRejected,
@@ -124,6 +126,50 @@ describe('WagerTransactionRejected', () => {
 
   test('refuses a transaction that was not rejected', () => {
     expect(() => WagerTransactionRejected.from(bet(), context, { eventId: EVENT_ID, at: new Date() })).toThrow();
+  });
+});
+
+describe('WagerTransactionFailed', () => {
+  test('carries the failure code and when it failed, with nothing observed of the wallet', () => {
+    const transaction = bet();
+    transaction.fail(FailureCode.InfraInvariantViolation);
+    const at = new Date('2026-11-10T12:00:02.000Z');
+
+    const event = WagerTransactionFailed.from(transaction, context, { eventId: EVENT_ID, at });
+
+    expect(asJson(event)).toEqual({
+      eventId: EVENT_ID,
+      eventType: 'WagerTransactionFailed',
+      aggregateId: TRANSACTION_ID,
+      correlationId: 'corr-1',
+      causationId: TRANSACTION_ID,
+      occurredAt: '2026-11-10T12:00:02.000Z',
+      version: 1,
+      data: {
+        transactionId: TRANSACTION_ID,
+        providerId: 'provider-a',
+        externalTransactionId: 'bet-1',
+        walletId: WALLET_ID,
+        playerId: 'player-1',
+        roundId: 'round-1',
+        gameId: 'game-1',
+        kind: 'BET',
+        money: { amount: '25.00', currency: 'BRL' },
+        failureCode: 'INFRA_INVARIANT_VIOLATION',
+        failedAt: '2026-11-10T12:00:02.000Z',
+      },
+    });
+  });
+
+  test('refuses a transaction that did not fail', () => {
+    const rejected = bet();
+    rejected.reject({ code: FailureCode.InsufficientFunds, balanceAfter: brl('10.00'), walletVersionObserved: 3 });
+
+    for (const transaction of [bet(), rejected]) {
+      expect(() => WagerTransactionFailed.from(transaction, context, { eventId: EVENT_ID, at: new Date() })).toThrow(
+        EventOutcomeMismatchError,
+      );
+    }
   });
 });
 

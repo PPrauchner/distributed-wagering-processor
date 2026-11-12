@@ -4,7 +4,8 @@
  * transient failure comes back with its backoff and is processed later; five
  * receives of it end with no outcome in the DLQ, as `INFRA_RETRIES_EXHAUSTED`,
  * and the key stays free for the DLQ redrive or an HTTP resend; a
- * permanent error ends `FAILED` in the DLQ, and its redelivery has no effect;
+ * permanent error ends `FAILED` in the DLQ, with `WagerTransactionFailed` in
+ * the outbox, and its redelivery has no effect;
  * submissions not admitted go to the DLQ with their `failureCode` and a
  * `rejected_submissions` row — a `BET` sent before its wallet exists only once
  * its receives run out —; a batch keeps the order of its FIFO groups, a retry
@@ -450,16 +451,19 @@ describe('a permanent error', () => {
     await waitUntil(() => drained(queues.url));
 
     expect(letter.failureCode).toBe('INFRA_INVARIANT_VIOLATION');
-    expect(await transactionsOf(data)).toMatchObject([{ status: 'FAILED', failure_code: 'INFRA_INVARIANT_VIOLATION' }]);
+    const [failed] = await transactionsOf(data);
+    expect(failed).toMatchObject({ status: 'FAILED', failure_code: 'INFRA_INVARIANT_VIOLATION' });
     expect(await rejectedRows(messageId)).toEqual([]);
-    // Atomicity: the first unit of work left no event; the inbox holds only the
-    // row the second one — the FAILED write — recorded, processed.
-    expect(await outboxIds(wallet.id)).toEqual(outboxBefore);
+    // Atomicity: the first unit of work left no event; the second one — the
+    // FAILED write — left only WagerTransactionFailed, and the inbox row, processed.
+    expect(await outboxIds(wallet.id)).toHaveLength(outboxBefore.length + 1);
+    expect(await eventTypesOf(failed!.id)).toEqual(['WagerTransactionFailed']);
     expect(await inboxRowsOf(messageId)).toEqual([{ processed: true }]);
 
     await send(queues.url, data, { messageId });
     await waitUntil(() => drained(queues.url));
     expect(await transactionsOf(data)).toHaveLength(1);
+    expect(await eventTypesOf(failed!.id)).toEqual(['WagerTransactionFailed']);
     expect(await walletState(wallet.id)).toEqual({ balance_amount: '100.00', version: 1 });
   }, 60_000);
 });

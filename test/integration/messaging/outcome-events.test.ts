@@ -3,8 +3,9 @@
  * PostgreSQL: the opening with a balance and the processed `BET` write
  * `WagerTransactionProcessed` and `WalletBalanceChanged`, the rejected `BET`
  * only `WagerTransactionRejected` — in the SQL transaction of the outcome, so a
- * permanent error after the outbox was written leaves none. `FAILED`, replays
- * and submissions not admitted write nothing. Ends checking the ledger
+ * permanent error after the outbox was written leaves none of them, and the
+ * `FAILED` that follows writes only `WagerTransactionFailed`. Replays and
+ * submissions not admitted write nothing. Ends checking the ledger
  * invariant of every wallet it touched.
  *
  * @packageDocumentation
@@ -229,15 +230,16 @@ describe('the BET', () => {
     expect(await outboxOf(wallet.id)).toEqual(before);
   });
 
-  test('a permanent error after the outbox was written: FAILED, and no event of it', async () => {
+  test('a permanent error after the outbox was written: FAILED, with only WagerTransactionFailed', async () => {
     const faultyUrl = await startApp({ ...config, faultPoints: [FaultPoint.InvariantViolationBeforeCommit] });
     const wallet = await createWallet('100.00');
 
     const result = await submit(betOn(wallet), faultyUrl);
 
     expect(result.status).toBe('FAILED');
-    expect((await outboxOf(wallet.id)).map((row) => row.payload.causationId)).not.toContain(result.transactionId);
-    expect(await outboxOf(wallet.id)).toHaveLength(2);
+    const rows = (await outboxOf(wallet.id)).filter((row) => row.payload.causationId === result.transactionId);
+    expect(rows.map((row) => row.event_type)).toEqual(['WagerTransactionFailed']);
+    expect(await outboxOf(wallet.id)).toHaveLength(3);
   });
 
   test('a submission not admitted writes no event', async () => {
