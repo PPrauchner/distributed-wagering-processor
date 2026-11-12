@@ -286,12 +286,16 @@ fica só como rede de segurança. A `OPENING` não alcança o máximo: o
 valores do banco por `Money.fromPersisted`, sem esse teto, e reporta saldos de
 16 e 17 dígitos normalmente.
 
-Tempos que dependem de relógio — TTL das pendentes e leases dos workers — usam o
-`now()` do banco, nunca o relógio da instância: quem decide se um item está
-vencido é a própria query (a reivindicação filtra `next_attempt_at <= now()`; o
-TTL é `created_at + ttl <= now()`). O `OutboxMessage.isDue(now)` do domínio
-expressa a mesma regra, mas não decide nada em produção — só os testes de unidade
-o chamam.
+Quem decide se um item está vencido é a própria query, no `now()` do banco: a
+reivindicação filtra `next_attempt_at <= now()` e o TTL das pendentes é
+`created_at + ttl <= now()`. O lease dos workers também sai do banco
+(`next_attempt_at = now() + lease`). Os instantes gravados, porém, vêm do relógio
+da instância: o `created_at` da transação de aposta e o `next_attempt_at` dos
+retries (backoff da outbox e das referências pendentes) são calculados na
+aplicação. Com relógios defasados entre instância e banco, o TTL e o backoff
+andam junto com a defasagem. O `OutboxMessage.isDue(now)` do domínio expressa a
+mesma regra de vencimento, mas não decide nada em produção — só os testes de
+unidade o chamam.
 
 Unicidade da reversão: índice único parcial em `reference_transaction_id` com
 `WHERE status = 'PROCESSED' AND kind IN ('REFUND', 'ROLLBACK')` — ver
@@ -1068,7 +1072,9 @@ maioria decidida nos grills do PRD (`docs/grills_logs/transversal/prd.md` e
   consumidor deduplica por `eventId` e ordena por `walletVersion` os eventos que
   a carregam —
   [Publicador da outbox](#publicador-da-outbox).
-- **Prazo e leases pelo relógio do banco** (`now()`), nunca pelo da instância.
+- **Leases e comparação de vencimento pelo relógio do banco** (`now()`); os
+  instantes gravados (`created_at`, `next_attempt_at` dos retries) vêm da
+  instância — [Invariantes no schema](#invariantes-no-schema).
 - **Autenticação fora do escopo** (§2): guard no-op atrás de uma porta —
   [Autenticação](#autenticação).
 
@@ -1115,9 +1121,12 @@ maioria decidida nos grills do PRD (`docs/grills_logs/transversal/prd.md` e
 - Eventos são publicados pelo menos uma vez; duplicatas carregam o mesmo `eventId`
   e o mesmo corpo, e o consumidor deduplica por `eventId`.
 - Linhas publicadas da outbox não são expurgadas.
-- Vencimento é decidido pelo relógio do banco, na query: a reivindicação dos
+- Vencimento é comparado no relógio do banco, na query: a reivindicação dos
   workers (`next_attempt_at <= now()`) e o TTL das pendentes
-  (`created_at + ttl <= now()`). O `OutboxMessage.isDue` do domínio não é
+  (`created_at + ttl <= now()`). Os lados gravados dessa comparação — o
+  `created_at` da transação e o `next_attempt_at` dos retries — vêm do relógio
+  da instância, então uma defasagem entre instância e banco desloca o TTL e o
+  backoff na mesma medida; só o lease é todo do banco. O `OutboxMessage.isDue` do domínio não é
   consultado em produção — se divergir da query, vale a query. O `expiresAt` do
   `WagerTransactionPendingReference` é calculado na aplicação (criação + TTL) e
   é informativo.
