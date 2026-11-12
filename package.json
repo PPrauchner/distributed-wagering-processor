@@ -1,0 +1,33 @@
+{
+  "name": "distributed-wagering-processor",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "bun run test:unit && bun run test:integration",
+    "test:unit": "bun test test/unit",
+    "test:integration": "bun test --preload ./test/integration/setup.ts test/integration",
+    "test:concurrency": "bun test --preload ./test/integration/setup.ts --timeout 120000 test/concurrency",
+    "db:migrate": "bun src/database/migrate.ts"
+  },
+  "dependencies": {
+    "@aws-sdk/client-sqs": "^3.1165.0",
+    "@mikro-orm/core": "^7.2.8",
+    "@mikro-orm/migrations": "^7.2.8",
+    "@mikro-orm/nestjs": "^7.1.0",
+    "@mikro-orm/postgresql": "^7.2.8",
+    "@nestjs/common": "^12.4.2",
+    "@nestjs/core": "^12.4.2",
+    "@nestjs/platform-express": "^12.4.2",
+    "pino": "^9",
+    "prom-client": "^15",
+    "reflect-metadata": "^0.2.2",
+    "rxjs": "^7.8.2"
+  },
+  "devDependencies": {
+    "@nestjs/testing": "^12.4.2",
+    "@types/bun": "^1.4.4",
+    "typescript": "~6.0.3"
+  }
+}

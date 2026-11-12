@@ -1,0 +1,574 @@
+/**
+ * Transactions citing a reference not there yet, end to end against the real
+ * PostgreSQL (`ARCHITECTURE.md` § Referências fora de ordem): the arrival
+ * answers 202 `PENDING_REFERENCE` and writes `WagerTransactionPendingReference`,
+ * and only the worker resolves it — when its reference arrives, with the
+ * original correlation id; as `REFERENCE_NOT_FOUND` once the TTL is over; as
+ * `REFERENCE_NOT_PROCESSED` at once when the reference failed. Short TTL and
+ * intervals by configuration; waits are conditions with a timeout, never a
+ * fixed sleep. The loop of an instance resolves on its own and stops with the
+ * application. The worker counts what it does on the `WORKER` channel: each
+ * outcome, each reschedule, each lock conflict. Ends checking the ledger
+ * invariant of every wallet it touched.
+ *
+ * @packageDocumentation
+ */
+import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
+import type { INestApplication } from '@nestjs/common';
+import { SQL } from 'bun';
+import { createApp } from '../../../src/app.ts';
+import { loadConfig, type AppConfig } from '../../../src/config.ts';
+import { PrometheusMetrics } from '../../../src/health/infrastructure/prometheus-metrics.ts';
+import { MikroORM } from '@mikro-orm/postgresql';
+import { MikroOrmUnitOfWork, type Repositories } from '../../../src/database/mikro-orm-unit-of-work.ts';
+import type { ContextLog } from '../../../src/shared/application/context-log.ts';
+import { FaultPoint, SimulatedBugError } from '../../../src/shared/application/fault-injector.ts';
+import type { UnitOfWork } from '../../../src/shared/application/unit-of-work.ts';
+import { ResolvePendingReferences } from '../../../src/wagering/application/resolve-pending-references.ts';
+import { WAGERING_METRICS } from '../../../src/wagering/application/wagering-metrics.ts';
+import { expectLedgerConsistent } from '../ledger-invariant.ts';
+import { waitUntil } from '../../support/wait-until.ts';
+
+type JsonObject = Record<string, unknown>;
+
+interface TestWallet {
+  id: string;
+  playerId: string;
+}
+
+const TTL_MS = 1500;
+
+const apps: INestApplication[] = [];
+let config: AppConfig;
+let baseUrl: string;
+let worker: ResolvePendingReferences;
+let sql: SQL;
+const touchedWallets: string[] = [];
+
+async function startApp(appConfig: AppConfig): Promise<INestApplication> {
+  const app = await createApp(appConfig);
+  await app.listen(0, '127.0.0.1');
+  apps.push(app);
+  return app;
+}
+
+beforeAll(async () => {
+  const base = loadConfig();
+  config = {
+    ...base,
+    pendingReferences: { ...base.pendingReferences, ttlMs: TTL_MS, retryBaseMs: 20, retryMaxMs: 100 },
+  };
+  const app = await startApp(config);
+  baseUrl = await app.getUrl();
+  worker = app.get(ResolvePendingReferences);
+  sql = new SQL(config.databaseUrl);
+});
+
+afterAll(async () => {
+  await expectLedgerConsistent(sql, touchedWallets);
+  await Promise.all(apps.map((app) => app.close()));
+  await sql?.close();
+});
+
+async function createWallet(amount: string): Promise<TestWallet> {
+  const playerId = Bun.randomUUIDv7();
+  const response = await fetch(`${baseUrl}/wallets`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ playerId, initialBalance: { amount, currency: 'BRL' } }),
+  });
+  expect(response.status).toBe(201);
+  const { id } = (await response.json()) as { id: string };
+  touchedWallets.push(id);
+  return { id, playerId };
+}
+
+function transactionOn(wallet: TestWallet, kind: string, overrides: JsonObject = {}): JsonObject {
+  return {
+    providerId: 'provider-a',
+    externalTransactionId: Bun.randomUUIDv7(),
+    playerId: wallet.playerId,
+    walletId: wallet.id,
+    roundId: 'round-987',
+    gameId: 'fortune-chimp',
+    kind,
+    money: { amount: '25.00', currency: 'BRL' },
+    ...overrides,
+  };
+}
+
+/** A transaction citing `cited`, which may not exist yet. */
+function citing(wallet: TestWallet, kind: string, cited: JsonObject): JsonObject {
+  return transactionOn(wallet, kind, { referenceExternalTransactionId: cited.externalTransactionId, money: cited.money });
+}
+
+async function submit(
+  body: JsonObject,
+  correlationId = `corr-${body.externalTransactionId}`,
+): Promise<{ status: number; body: JsonObject }> {
+  const response = await fetch(`${baseUrl}/wagering/transactions`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'idempotency-key': `key-${body.externalTransactionId}`,
+      'x-correlation-id': correlationId,
+    },
+    body: JSON.stringify(body),
+  });
+  return { status: response.status, body: (await response.json()) as JsonObject };
+}
+
+/**
+ * The first app's unit of work, where the attempt on `target` runs `race`
+ * holding its wallet lock, then fails transiently — a real `lock_not_available`
+ * — unless `race` threw first. Every other item is resolved as usual.
+ */
+function racingUnitOfWork(target: string, race: () => Promise<void>): UnitOfWork<Repositories> {
+  const real = new MikroOrmUnitOfWork(apps[0]!.get(MikroORM).em, [FaultPoint.TransientFailureInResolution]);
+  return {
+    run: (work) =>
+      real.run((repositories) =>
+        work({
+          ...repositories,
+          faults: {
+            inject: async (point, context) => {
+              if (point !== FaultPoint.TransientFailureInResolution || context.transactionId !== target) return;
+              await race();
+              await repositories.faults.inject(point, context);
+            },
+          },
+        }),
+      ),
+  };
+}
+
+function logSpy(): ContextLog & { warnings: string[] } {
+  const warnings: string[] = [];
+  return {
+    warnings,
+    inContext: (_fields, work) => work(),
+    enrich: () => undefined,
+    info: () => undefined,
+    warn: (line) => void warnings.push(line),
+  };
+}
+
+/** Runs worker cycles until the transaction leaves `PENDING_REFERENCE`. */
+async function resolvedBy(resolver: ResolvePendingReferences, transactionId: unknown): Promise<JsonObject> {
+  return waitUntil(async () => {
+    await resolver.resolveDue();
+    const current = await row(transactionId);
+    return current.status === 'PENDING_REFERENCE' ? undefined : current;
+  });
+}
+
+/** Waits, on the database clock, until the transaction's TTL is over. */
+async function ttlOver(transactionId: unknown): Promise<void> {
+  await waitUntil(async () => {
+    const [found] = await sql`
+      select created_at + make_interval(secs => ${TTL_MS / 1000}) <= now() as over
+        from wager_transactions where id = ${transactionId as string}
+    `;
+    return found.over ? true : undefined;
+  });
+}
+
+async function walletRow(id: string): Promise<{ balance: string; version: number }> {
+  const [found] = await sql`select balance_amount::text as balance, version from wallets where id = ${id}`;
+  return found;
+}
+
+async function row(transactionId: unknown): Promise<JsonObject> {
+  const [found] = await sql`
+    select status, failure_code, attempts, next_attempt_at, created_at,
+           balance_after_amount::text as balance_after, wallet_version_observed
+      from wager_transactions where id = ${transactionId as string}
+  `;
+  return found;
+}
+
+async function eventsOf(transactionId: unknown): Promise<{ event_type: string; payload: JsonObject }[]> {
+  return sql`
+    select event_type, payload from outbox_messages
+     where payload->>'causationId' = ${transactionId as string}
+     order by event_type
+  `;
+}
+
+describe('the arrival of a transaction citing a reference not there yet', () => {
+  test.each(['REFUND', 'ROLLBACK', 'WIN'])(
+    'a %s: 202 PENDING_REFERENCE, scheduled, and WagerTransactionPendingReference expiring at creation + TTL',
+    async (kind) => {
+      const wallet = await createWallet('100.00');
+      const bet = transactionOn(wallet, 'BET');
+
+      const { status, body } = await submit(citing(wallet, kind, bet), 'corr-arrival');
+
+      expect(status).toBe(202);
+      expect(body).toMatchObject({ status: 'PENDING_REFERENCE', idempotentReplay: false });
+      const pending = await row(body.transactionId);
+      expect(pending).toMatchObject({ status: 'PENDING_REFERENCE', attempts: 0, balance_after: null });
+      expect(pending.next_attempt_at).toBeInstanceOf(Date);
+      const events = await eventsOf(body.transactionId);
+      expect(events.map((event) => event.event_type)).toEqual(['WagerTransactionPendingReference']);
+      const [event] = events;
+      expect(event!.payload).toMatchObject({
+        eventType: 'WagerTransactionPendingReference',
+        version: 1,
+        aggregateId: body.transactionId,
+        correlationId: 'corr-arrival',
+        causationId: body.transactionId,
+      });
+      const createdAt = (pending.created_at as Date).getTime();
+      expect(event!.payload.data).toMatchObject({
+        transactionId: body.transactionId,
+        walletId: wallet.id,
+        kind,
+        referenceExternalTransactionId: bet.externalTransactionId,
+        expiresAt: new Date(createdAt + TTL_MS).toISOString(),
+      });
+    },
+  );
+
+  test('one citing another pending transaction waits too', async () => {
+    const wallet = await createWallet('100.00');
+    const bet = transactionOn(wallet, 'BET');
+    const refund = citing(wallet, 'REFUND', bet);
+    await submit(refund);
+
+    const { status, body } = await submit(citing(wallet, 'ROLLBACK', refund));
+
+    expect(status).toBe(202);
+    expect(body).toMatchObject({ status: 'PENDING_REFERENCE' });
+  });
+
+  test('its replay writes no other event', async () => {
+    const wallet = await createWallet('100.00');
+    const refund = citing(wallet, 'REFUND', transactionOn(wallet, 'BET'));
+    const first = await submit(refund);
+
+    const replay = await submit(refund);
+
+    expect(replay).toEqual({ status: 202, body: { ...first.body, idempotentReplay: true } });
+    expect(await eventsOf(first.body.transactionId)).toHaveLength(1);
+  });
+});
+
+describe('the worker resolves a pending reference', () => {
+  test('its reference arrives: resolved with no resend, the outcome events carry the original correlation id', async () => {
+    const wallet = await createWallet('100.00');
+    const bet = transactionOn(wallet, 'BET');
+    const refund = citing(wallet, 'REFUND', bet);
+    const pending = await submit(refund, 'corr-original');
+    await submit(bet, 'corr-of-the-bet');
+
+    const resolved = await resolvedBy(worker, pending.body.transactionId);
+
+    expect(resolved).toMatchObject({ status: 'PROCESSED', balance_after: '100.00', wallet_version_observed: 3 });
+    expect(await walletRow(wallet.id)).toEqual({ balance: '100.00', version: 3 });
+    const events = await eventsOf(pending.body.transactionId);
+    expect(events.map((event) => event.event_type)).toEqual([
+      'WagerTransactionPendingReference',
+      'WagerTransactionProcessed',
+      'WalletBalanceChanged',
+    ]);
+    for (const event of events) {
+      expect(event.payload).toMatchObject({ correlationId: 'corr-original', causationId: pending.body.transactionId });
+    }
+  });
+
+  test('its replay answers the current state: 202 while pending, the terminal code once resolved', async () => {
+    const wallet = await createWallet('100.00');
+    const bet = transactionOn(wallet, 'BET');
+    const win = transactionOn(wallet, 'WIN', { referenceExternalTransactionId: bet.externalTransactionId });
+    const first = await submit(win);
+    expect((await submit(win)).status).toBe(202);
+    await submit(bet);
+    await resolvedBy(worker, first.body.transactionId);
+
+    const replay = await submit(win);
+
+    expect(replay).toEqual({
+      status: 200,
+      body: {
+        transactionId: first.body.transactionId,
+        status: 'PROCESSED',
+        balance: { amount: '100.00', currency: 'BRL' },
+        idempotentReplay: true,
+      },
+    });
+  });
+});
+
+describe('the worker turns a pending reference down', () => {
+  test('within the TTL with no reference: counted and rescheduled; past it: REJECTED REFERENCE_NOT_FOUND, with its event', async () => {
+    const wallet = await createWallet('100.00');
+    const rollback = citing(wallet, 'ROLLBACK', transactionOn(wallet, 'BET'));
+    const pending = await submit(rollback, 'corr-original');
+
+    const retried = await waitUntil(async () => {
+      await worker.resolveDue();
+      const current = await row(pending.body.transactionId);
+      return (current.attempts as number) >= 1 ? current : undefined;
+    });
+    expect(retried).toMatchObject({ status: 'PENDING_REFERENCE' });
+
+    const resolved = await resolvedBy(worker, pending.body.transactionId);
+
+    expect(resolved).toMatchObject({
+      status: 'REJECTED',
+      failure_code: 'REFERENCE_NOT_FOUND',
+      balance_after: '100.00',
+      wallet_version_observed: 1,
+    });
+    const events = await eventsOf(pending.body.transactionId);
+    expect(events.map((event) => event.event_type)).toEqual([
+      'WagerTransactionPendingReference',
+      'WagerTransactionRejected',
+    ]);
+    expect(events[1]!.payload).toMatchObject({
+      correlationId: 'corr-original',
+      data: { failureCode: 'REFERENCE_NOT_FOUND' },
+    });
+    expect(await submit(rollback)).toMatchObject({ status: 422, body: { failureCode: 'REFERENCE_NOT_FOUND' } });
+  });
+
+  test('its reference arrives REJECTED: REFERENCE_NOT_PROCESSED at once, without waiting for the TTL', async () => {
+    const wallet = await createWallet('10.00');
+    const bet = transactionOn(wallet, 'BET', { money: { amount: '50.00', currency: 'BRL' } });
+    const refund = await submit(citing(wallet, 'REFUND', bet));
+    expect((await submit(bet)).body).toMatchObject({ status: 'REJECTED', failureCode: 'INSUFFICIENT_FUNDS' });
+
+    const resolved = await resolvedBy(worker, refund.body.transactionId);
+
+    expect(resolved).toMatchObject({ status: 'REJECTED', failure_code: 'REFERENCE_NOT_PROCESSED' });
+    const [found] = await sql`
+      select created_at + make_interval(secs => ${TTL_MS / 1000}) > now() as within
+        from wager_transactions where id = ${refund.body.transactionId as string}
+    `;
+    expect(found.within).toBe(true);
+  });
+
+  test('its reference arrives FAILED: REFERENCE_NOT_PROCESSED', async () => {
+    const faulty = await startApp({ ...config, faultPoints: [FaultPoint.InvariantViolationBeforeCommit] });
+    const wallet = await createWallet('100.00');
+    const bet = transactionOn(wallet, 'BET');
+    const rollback = await submit(citing(wallet, 'ROLLBACK', bet));
+    const failedBet = await fetch(`${await faulty.getUrl()}/wagering/transactions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'idempotency-key': `key-${bet.externalTransactionId}` },
+      body: JSON.stringify(bet),
+    });
+    expect(await failedBet.json()).toMatchObject({ status: 'FAILED' });
+
+    const resolved = await resolvedBy(worker, rollback.body.transactionId);
+
+    expect(resolved).toMatchObject({ status: 'REJECTED', failure_code: 'REFERENCE_NOT_PROCESSED' });
+  });
+});
+
+describe('the worker under failure', () => {
+  test('a reference that arrived while the resolution failed transiently is resolved, even past the TTL', async () => {
+    const faultyApp = await startApp({ ...config, faultPoints: [FaultPoint.TransientFailureInResolution] });
+    const faulty = faultyApp.get(ResolvePendingReferences);
+    const wallet = await createWallet('100.00');
+    const bet = transactionOn(wallet, 'BET');
+    const refund = await submit(citing(wallet, 'REFUND', bet));
+    await submit(bet);
+    // The reference is there, yet every attempt fails transiently: counted, still pending.
+    await waitUntil(async () => {
+      await faulty.resolveDue();
+      const current = await row(refund.body.transactionId);
+      return (current.attempts as number) >= 2 ? current : undefined;
+    });
+    await ttlOver(refund.body.transactionId);
+    expect(await row(refund.body.transactionId)).toMatchObject({ status: 'PENDING_REFERENCE' });
+
+    const resolved = await resolvedBy(worker, refund.body.transactionId);
+
+    expect(resolved).toMatchObject({ status: 'PROCESSED', balance_after: '100.00' });
+  });
+
+  test('a permanent error in the resolution records FAILED, with WagerTransactionFailed and no event of the settlement', async () => {
+    const faultyApp = await startApp({ ...config, faultPoints: [FaultPoint.InvariantViolationBeforeCommit] });
+    const faulty = faultyApp.get(ResolvePendingReferences);
+    const wallet = await createWallet('100.00');
+    const bet = transactionOn(wallet, 'BET');
+    const refund = citing(wallet, 'REFUND', bet);
+    const pending = await submit(refund);
+    await submit(bet);
+
+    const resolved = await resolvedBy(faulty, pending.body.transactionId);
+
+    expect(resolved).toMatchObject({ status: 'FAILED', failure_code: 'INFRA_INVARIANT_VIOLATION', balance_after: null });
+    expect(await walletRow(wallet.id)).toEqual({ balance: '75.00', version: 2 });
+    const events = await eventsOf(pending.body.transactionId);
+    expect(events.map((event) => event.event_type)).toEqual([
+      'WagerTransactionFailed',
+      'WagerTransactionPendingReference',
+    ]);
+    expect(events[0]!.payload).toMatchObject({
+      correlationId: (events[1]!.payload as JsonObject).correlationId,
+      data: { failureCode: 'INFRA_INVARIANT_VIOLATION' },
+    });
+    expect((await submit(refund)).status).toBe(500);
+    expect(await eventsOf(pending.body.transactionId)).toHaveLength(2);
+  });
+
+  test.each(['transient', 'permanent'] as const)(
+    'a %s failure, the item resolved by another worker before it is recorded: left alone, with no alert',
+    async (failure) => {
+      const wallet = await createWallet('100.00');
+      const pending = await submit(citing(wallet, 'REFUND', transactionOn(wallet, 'BET')));
+      const target = pending.body.transactionId as string;
+      const attemptsBefore = (await row(target)).attempts;
+      const other = await sql.reserve();
+      const log = logSpy();
+      // The attempt on the target fails; meanwhile, another worker holds the item.
+      const racing = racingUnitOfWork(target, async () => {
+        await other`begin`;
+        await other`select id from wager_transactions where id = ${target} for update`;
+        if (failure === 'permanent') throw new SimulatedBugError(FaultPoint.TransientFailureInResolution);
+      });
+      const resolver = new ResolvePendingReferences(racing, () => Bun.randomUUIDv7(), {
+        leaseMs: 30_000,
+        referenceWait: { ttlMs: TTL_MS, backoff: { baseMs: 20, maxMs: 100 } },
+      }, log, apps[0]!.get(WAGERING_METRICS));
+      try {
+        await waitUntil(async () => {
+          const [due] = await sql`select next_attempt_at <= now() as due from wager_transactions where id = ${target}`;
+          return due.due ? true : undefined;
+        });
+        const cycle = resolver.resolveDue();
+        // The recording of the failure waits for the other worker, which resolves the item and commits.
+        await waitUntil(async () => {
+          const [waiting] = await sql`
+            select count(*)::int as n from pg_stat_activity
+             where datname = current_database() and wait_event_type = 'Lock' and query ilike '%wager_transactions%'
+          `;
+          return waiting.n > 0 ? true : undefined;
+        });
+        await other`update wager_transactions set status = 'FAILED', failure_code = 'INFRA_INVARIANT_VIOLATION' where id = ${target}`;
+        await other`commit`;
+        await cycle;
+      } finally {
+        other.release();
+      }
+
+      expect(await row(target)).toMatchObject({
+        status: 'FAILED',
+        failure_code: 'INFRA_INVARIANT_VIOLATION',
+        attempts: attemptsBefore,
+      });
+      expect((await eventsOf(target)).map((event) => event.event_type)).toEqual(['WagerTransactionPendingReference']);
+      expect(log.warnings).toEqual([]);
+    },
+  );
+
+  test('two workers over the same pending references: each resolved once', async () => {
+    const other = (await startApp(config)).get(ResolvePendingReferences);
+    const wallet = await createWallet('100.00');
+    const five = { amount: '5.00', currency: 'BRL' };
+    const bets = Array.from({ length: 6 }, () => transactionOn(wallet, 'BET', { money: five }));
+    const refunds: { status: number; body: JsonObject }[] = [];
+    for (const bet of bets) refunds.push(await submit(citing(wallet, 'REFUND', bet)));
+    for (const bet of bets) await submit(bet);
+
+    await waitUntil(async () => {
+      await Promise.all([worker.resolveDue(), other.resolveDue(), worker.resolveDue(), other.resolveDue()]);
+      const current = await Promise.all(refunds.map((refund) => row(refund.body.transactionId)));
+      return current.every((found) => found.status === 'PROCESSED') ? true : undefined;
+    });
+
+    expect(await walletRow(wallet.id)).toEqual({ balance: '100.00', version: 13 });
+    for (const refund of refunds) {
+      const [entries] = await sql`
+        select count(*)::int as n from wallet_ledger_entries where transaction_id = ${refund.body.transactionId as string}
+      `;
+      expect(entries.n).toBe(1);
+      const events = (await eventsOf(refund.body.transactionId)).map((event) => event.event_type);
+      expect(events.filter((type) => type === 'WagerTransactionProcessed')).toHaveLength(1);
+    }
+  });
+});
+
+describe('the worker loop of an instance', () => {
+  test('resolves a pending reference on its own once the reference arrives, and stops with the application', async () => {
+    const pendingReferences = { ...config.pendingReferences, enabled: true, pollIntervalMs: 50 };
+    const running = await createApp({ ...config, pendingReferences });
+    await running.init();
+    try {
+      const wallet = await createWallet('100.00');
+      const bet = transactionOn(wallet, 'BET');
+      const rollback = await submit(citing(wallet, 'ROLLBACK', bet));
+      await submit(bet);
+
+      const resolved = await waitUntil(async () => {
+        const current = await row(rollback.body.transactionId);
+        return current.status === 'PENDING_REFERENCE' ? undefined : current;
+      });
+
+      expect(resolved).toMatchObject({ status: 'PROCESSED', balance_after: '100.00' });
+    } finally {
+      await running.close();
+    }
+  });
+});
+
+describe('the worker metrics', () => {
+  /** One sample of the first app's metrics — the worker's —, by name and exact labels; 0 when absent. */
+  async function sample(name: string, labels: Record<string, string> = {}): Promise<number> {
+    const text = await apps[0]!.get(PrometheusMetrics).registry.metrics();
+    const wanted = Object.entries(labels);
+    for (const line of text.split('\n')) {
+      const match = /^([a-zA-Z_:][\w:]*)(?:\{(.*)\})? (\S+)$/.exec(line);
+      if (!match || match[1] !== name) continue;
+      const found = Object.fromEntries([...(match[2] ?? '').matchAll(/(\w+)="([^"]*)"/g)].map((m) => [m[1], m[2]]));
+      if (Object.keys(found).length !== wanted.length) continue;
+      if (wanted.every(([key, value]) => found[key] === value)) return Number(match[3]);
+    }
+    return 0;
+  }
+
+  test('a reschedule and then the outcome: counted, the outcome on the WORKER channel', async () => {
+    const wallet = await createWallet('100.00');
+    const bet = transactionOn(wallet, 'BET');
+    const refund = await submit(citing(wallet, 'REFUND', bet));
+    const resolvedLabels = { kind: 'REFUND', status: 'PROCESSED', channel: 'WORKER' };
+    const retriesBefore = await sample('pending_reference_retries_total');
+    const resolvedBefore = await sample('wager_transactions_total', resolvedLabels);
+
+    await waitUntil(async () => {
+      await worker.resolveDue();
+      return ((await row(refund.body.transactionId)).attempts as number) >= 1 ? true : undefined;
+    });
+    expect((await sample('pending_reference_retries_total')) - retriesBefore).toBeGreaterThanOrEqual(1);
+
+    await submit(bet);
+    await resolvedBy(worker, refund.body.transactionId);
+
+    expect((await sample('wager_transactions_total', resolvedLabels)) - resolvedBefore).toBeGreaterThanOrEqual(1);
+  });
+
+  test('its wallet locked past the lock_timeout: a lock conflict, and the item rescheduled', async () => {
+    const wallet = await createWallet('100.00');
+    const refund = await submit(citing(wallet, 'REFUND', transactionOn(wallet, 'BET')));
+    const lockBefore = await sample('lock_conflicts_total', { reason: 'lock_timeout' });
+    const retriesBefore = await sample('pending_reference_retries_total');
+    const holder = await sql.reserve();
+    try {
+      await holder`begin`;
+      await holder`select id from wallets where id = ${wallet.id} for update`;
+      await waitUntil(async () => {
+        await worker.resolveDue();
+        return (await sample('lock_conflicts_total', { reason: 'lock_timeout' })) > lockBefore ? true : undefined;
+      });
+    } finally {
+      await holder`rollback`;
+      holder.release();
+    }
+
+    expect((await sample('pending_reference_retries_total')) - retriesBefore).toBeGreaterThanOrEqual(1);
+    expect(await row(refund.body.transactionId)).toMatchObject({ status: 'PENDING_REFERENCE' });
+  }, 15_000);
+});

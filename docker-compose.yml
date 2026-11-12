@@ -1,0 +1,72 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: wagering
+      POSTGRES_PASSWORD: wagering
+      POSTGRES_DB: wagering
+    ports:
+      - "55432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U wagering -d wagering"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  # Migrations num serviço de execução única: com várias instâncias do app, elas
+  # rodam uma vez só, antes de qualquer instância subir.
+  migrate:
+    build: .
+    image: distributed-wagering-processor:local
+    command: ["bun", "src/database/migrate.ts", "up"]
+    environment:
+      DATABASE_URL: postgresql://wagering:wagering@postgres:5432/wagering
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  app:
+    build: .
+    image: distributed-wagering-processor:local
+    # SIGTERM drena as mensagens em andamento por até 20 s; 30 s antes do SIGKILL.
+    stop_grace_period: 30s
+    environment:
+      DATABASE_URL: postgresql://wagering:wagering@postgres:5432/wagering
+      PORT: "3000"
+      SQS_ENDPOINT: http://localstack:4566
+    # Uma instância em :3000 por padrão; com `--scale app=N`, APP_PORTS dá uma faixa
+    # (ex.: 3000-3002) e cada réplica fica numa porta dela (ver README).
+    ports:
+      - "${APP_PORTS:-3000}:3000"
+    # `--wait` espera a prontidão de fato (banco e filas), não só o processo.
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:3000/health/ready"]
+      interval: 3s
+      timeout: 5s
+      retries: 20
+      start_period: 5s
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      localstack:
+        condition: service_healthy
+
+  localstack:
+    # 4.14.0 é a última versão que roda sem conta/token (ver ARCHITECTURE.md
+    # § Limitações conhecidas).
+    image: localstack/localstack:4.14.0
+    environment:
+      SERVICES: sqs
+    ports:
+      - "4566:4566"
+    volumes:
+      # Cria wager-transactions.fifo, sua DLQ e wagering-events.fifo na subida.
+      - ./localstack/init/ready.d:/etc/localstack/init/ready.d:ro
+    healthcheck:
+      # Saudável só depois das filas: a de eventos é a última criada.
+      test: ["CMD-SHELL", "awslocal sqs get-queue-url --queue-name wagering-events.fifo > /dev/null"]
+      interval: 3s
+      timeout: 3s
+      retries: 40

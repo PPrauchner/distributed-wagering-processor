@@ -22,9 +22,28 @@ está em `docs/Desafio.md`. Ele é a especificação: em dúvida, vale o que est
 
 ## Comandos
 
-Ainda não há scaffold. Instalação de dependências: `bun install --frozen-lockfile`.
-Os demais comandos (dev, testes de unidade/integração/concorrência, `test:load`,
-migrations) entram aqui quando forem criados.
+```bash
+bun install --frozen-lockfile   # dependências
+docker compose up -d --wait     # PostgreSQL (127.0.0.1:55432), LocalStack (:4566)
+                                # com as filas criadas, migrations (serviço
+                                # migrate) e app (:3000)
+docker compose up -d --wait --build   # idem, reconstruindo a imagem do app
+bun run typecheck               # tsc --noEmit (TypeScript 6.0)
+bun run test                    # unit + integration (exige o Compose de pé); ~3 min
+                                # por execução — critério de "N execuções seguidas"
+                                # custa ~3N min
+bun run test:unit               # domínio, aplicação e interface com fakes, sem I/O
+bun run test:integration        # app em processo contra PostgreSQL e LocalStack reais; recria o
+                                # banco <db>_test a cada execução
+bun run test:concurrency        # os 8 cenários do §13, com processos reais do app;
+                                # à mão, fora do `test` (exige o Compose de pé)
+bun run db:migrate up|down      # migrations por script Bun, sem o CLI do MikroORM
+bun src/main.ts                 # app local, fora do Compose (PORT, DATABASE_URL)
+```
+
+A conexão com o banco usa `127.0.0.1`, nunca `localhost` (ver ADR 0001). Não há
+`test:load`: o teste de carga é diferencial opcional e está declarado como limitação
+no `ARCHITECTURE.md`.
 
 ## Estrutura
 
@@ -33,6 +52,11 @@ migrations) entram aqui quando forem criados.
 `application/` (use cases e portas), `infrastructure/` (MikroORM, SQS, migrations)
 e `interface/` (controllers HTTP e handlers da fila). A dependência aponta só para
 dentro.
+
+Fora dos módulos fica só a raiz de composição — `main.ts`, `app.ts`, `config.ts`,
+`database/` (MikroORM, `UnitOfWork`, migrations, tradução de erros do banco) e
+`http/` (filtro de erros) —, que importa os módulos e nunca é importada por eles.
+Ver `ARCHITECTURE.md` § Organização do código.
 
 Entregáveis exigidos na raiz: `README.md` (setup e comandos) e `ARCHITECTURE.md`
 (decisões, trade-offs, limitações).

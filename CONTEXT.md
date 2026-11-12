@@ -12,6 +12,11 @@ Fornecedor de jogos que envia transações de aposta. Quem chama a API é sempre
 provedor.
 _Avoid_: fornecedor, parceiro, integrador, usuário
 
+**Identidade do provedor** (`ProviderIdentity`):
+O provedor como o qual uma requisição HTTP está autenticada. O `providerId` que a
+requisição declara tem de ser o dela; a fila, canal interno, não tem identidade.
+_Avoid_: usuário logado, sessão, credencial
+
 **Jogador** (`playerId`):
 A pessoa dona de carteiras, identificada pelo provedor.
 _Avoid_: usuário, cliente
@@ -30,8 +35,14 @@ O saldo de um jogador numa moeda. Há no máximo uma carteira por jogador e moed
 _Avoid_: conta, wallet (em texto pt-BR)
 
 **Saldo** (`balance`):
-O valor disponível guardado na carteira.
+O valor disponível guardado na carteira. Fica entre zero e o **saldo máximo**.
 _Avoid_: saldo atual, crédito
+
+**Saldo máximo**:
+O maior saldo que uma carteira pode ter: `99999999999999999.99`, o limite da
+coluna. Um crédito que o ultrapassaria é rejeitado (`BALANCE_LIMIT_EXCEEDED`),
+nunca truncado.
+_Avoid_: limite, teto (sozinhos)
 
 **Valor** (`Money`):
 Uma quantia exata numa moeda.
@@ -60,8 +71,9 @@ A comparação entre o saldo de uma carteira e seu saldo reconstruído.
 _Avoid_: auditoria, conciliação
 
 **Divergência**:
-Diferença não nula encontrada numa reconciliação; é sinalizada, nunca corrigida em
-silêncio.
+O que uma reconciliação acha de errado: diferença não nula entre o saldo e o saldo
+reconstruído, buraco na sequência de versões do livro-razão, ou lançamento acima da
+versão da carteira. É sinalizada, nunca corrigida em silêncio.
 _Avoid_: erro de saldo, inconsistência
 
 ### Transações
@@ -87,7 +99,8 @@ saldo.
 _Avoid_: derrota
 
 **Aguardando referência** (`PENDING_REFERENCE`):
-Situação da transação dependente cuja referência ainda não chegou.
+Situação da transação cuja referência ainda não chegou — uma transação dependente,
+ou um ganho que cita sua aposta.
 _Avoid_: órfã, pendente (sozinho)
 
 **Reembolso** (`REFUND`):
@@ -104,8 +117,10 @@ Transação de aposta que exige uma referência — o reembolso e a reversão.
 _Avoid_: transação de reversão, estorno
 
 **Referência** (`referenceExternalTransactionId`):
-A transação de aposta que uma transação dependente desfaz. Uma referência só pode
-ser desfeita uma vez, qualquer que seja o tipo da transação dependente.
+A transação de aposta que outra cita: a que uma transação dependente desfaz, ou a
+aposta da rodada que um ganho cita, opcionalmente. Uma referência só pode ser
+desfeita uma vez, qualquer que seja o tipo da transação dependente; citá-la num
+ganho não a desfaz.
 _Avoid_: transação original, transação pai
 
 ### Identidade e idempotência
@@ -164,9 +179,17 @@ Desfecho terminal de uma transação que não pôde ser avaliada por um erro per
 de infraestrutura. Não houve julgamento de negócio.
 _Avoid_: rejeição, erro
 
+**Submissão não admitida**:
+Submissão de um provedor que nunca chegou a ser uma transação de aposta — payload
+inválido, carteira inexistente, conflito de idempotência, id externo reusado com
+outra chave. Fica registrada para auditoria, mas não tem desfecho nem
+`transactionId`.
+_Avoid_: rejeição, recusa, transação rejeitada
+
 **Falha transitória**:
 Indisponibilidade passageira que impede o processamento sem gerar desfecho; a
-transação é tentada de novo.
+transação é tentada de novo. Esgotadas as tentativas, a submissão também termina
+sem desfecho — nunca vira **Falha** — e pode ser reenviada com a mesma chave.
 _Avoid_: falha (sozinho, neste sentido)
 
 **Código de falha** (`failureCode`):

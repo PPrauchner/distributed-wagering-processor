@@ -1,0 +1,106 @@
+/**
+ * Errors the wagering use cases raise for a submission that does not become a
+ * transaction — refused before or without one (`ARCHITECTURE.md` § Submissões
+ * não admitidas). A rejection is not among them: it is a transaction outcome.
+ * Those raised after the payload is hashed carry the hash, for the audit.
+ *
+ * @packageDocumentation
+ */
+import { InboxRedeliveryError } from '../../messaging/application/inbox-repository.ts';
+
+/** The submission has no idempotency key, or an empty one. */
+export class MissingIdempotencyKeyError extends Error {
+  override readonly name = 'MissingIdempotencyKeyError';
+
+  constructor() {
+    super('the Idempotency-Key header is required');
+  }
+}
+
+/** A well-formed `OPENING` from outside: it is internal only. */
+export class InternalKindNotAllowedError extends Error {
+  override readonly name = 'InternalKindNotAllowedError';
+
+  constructor(
+    kind: string,
+    readonly payloadHash?: string,
+  ) {
+    super(`${kind} is internal and cannot be submitted`);
+  }
+}
+
+/** The idempotency key was already used by this provider with another payload. */
+export class IdempotencyConflictError extends Error {
+  override readonly name = 'IdempotencyConflictError';
+
+  constructor(
+    providerId: string,
+    idempotencyKey: string,
+    readonly payloadHash?: string,
+  ) {
+    super(`idempotency key "${idempotencyKey}" of provider "${providerId}" was used with another payload`);
+  }
+}
+
+/** The external transaction id was already used by this provider with another key. */
+export class ExternalIdConflictError extends Error {
+  override readonly name = 'ExternalIdConflictError';
+
+  constructor(
+    providerId: string,
+    externalTransactionId: string,
+    readonly payloadHash?: string,
+  ) {
+    super(
+      `external transaction id "${externalTransactionId}" of provider "${providerId}" was used with another idempotency key`,
+    );
+  }
+}
+
+/**
+ * Raised by the unit of work when the commit hits the provider's idempotency
+ * key: a concurrent submission of the same key won the race, outside the
+ * wallet lock. The use case reads it back — replay or conflict.
+ */
+export class DuplicateIdempotencyKeyError extends Error {
+  override readonly name = 'DuplicateIdempotencyKeyError';
+}
+
+/**
+ * Raised by the unit of work when the commit hits the provider's external id: a
+ * concurrent submission won the race, outside the wallet lock. The use case
+ * reads it back like a duplicate key — replay, idempotency conflict or
+ * external id conflict —, whichever index PostgreSQL checked first.
+ */
+export class DuplicateExternalIdError extends Error {
+  override readonly name = 'DuplicateExternalIdError';
+}
+
+/** The wallet a submission names does not exist; no transaction is created. */
+export class SubmissionWalletNotFoundError extends Error {
+  override readonly name = 'SubmissionWalletNotFoundError';
+
+  constructor(
+    walletId: string,
+    readonly payloadHash?: string,
+  ) {
+    super(`wallet not found: ${walletId}`);
+  }
+}
+
+/**
+ * A redelivery the inbox refused, of a message whose submission was recorded
+ * `FAILED`: nothing was recorded this time, but the message still belongs in
+ * the DLQ, with the code it failed with — its send there may be what failed.
+ */
+export class FailedRedeliveryError extends InboxRedeliveryError {
+  override readonly name: string = 'FailedRedeliveryError';
+
+  constructor(
+    messageId: string,
+    readonly failureCode: string,
+    options?: ErrorOptions,
+  ) {
+    super(`messageId "${messageId}" was already recorded FAILED ${failureCode}`, options);
+  }
+}
