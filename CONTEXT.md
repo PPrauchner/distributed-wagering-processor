@@ -71,8 +71,9 @@ A comparação entre o saldo de uma carteira e seu saldo reconstruído.
 _Avoid_: auditoria, conciliação
 
 **Divergência**:
-Diferença não nula encontrada numa reconciliação; é sinalizada, nunca corrigida em
-silêncio.
+O que uma reconciliação acha de errado: diferença não nula entre o saldo e o saldo
+reconstruído, buraco na sequência de versões do livro-razão, ou lançamento acima da
+versão da carteira. É sinalizada, nunca corrigida em silêncio.
 _Avoid_: erro de saldo, inconsistência
 
 ### Transações
