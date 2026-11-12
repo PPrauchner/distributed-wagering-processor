@@ -5,7 +5,12 @@
  * @packageDocumentation
  */
 import { describe, expect, test } from 'bun:test';
-import { CurrencyMismatchError, InvalidMoneyError, Money } from '../../../src/shared/domain/money.ts';
+import {
+  CurrencyMismatchError,
+  InvalidMoneyError,
+  Money,
+  type MoneyProps,
+} from '../../../src/shared/domain/money.ts';
 
 describe('Money.from', () => {
   test('keeps the decimal string and currency exactly as received', () => {
@@ -32,6 +37,37 @@ describe('Money.from', () => {
     ['1000000000000000.00'], // 16 integer digits
   ])('rejects the malformed amount %p', (amount) => {
     expect(() => Money.from({ amount, currency: 'BRL' })).toThrow(InvalidMoneyError);
+  });
+
+  // The wire contract is typed, but the domain cannot trust a caller that bypassed
+  // it: the regex alone would coerce these to strings and let `25.25` through.
+  test.each([[25.25], [25], [null], [undefined], [{}], [['25.00']], [{ toString: () => '25.00' }]])(
+    'rejects the non-string amount %p',
+    (amount) => {
+      expect(() =>
+        Money.from({ amount, currency: 'BRL' } as unknown as MoneyProps),
+      ).toThrow(InvalidMoneyError);
+    },
+  );
+
+  test.each([[123], [null], [undefined], [{}], [['BRL']], [{ toString: () => 'BRL' }]])(
+    'rejects the non-string currency %p',
+    (currency) => {
+      expect(() =>
+        Money.from({ amount: '1.00', currency } as unknown as MoneyProps),
+      ).toThrow(InvalidMoneyError);
+    },
+  );
+
+  test('serializes the amount of any valid value as a string', () => {
+    const values = [
+      Money.from({ amount: '25.25', currency: 'BRL' }),
+      Money.fromPersisted({ amount: '-12.34', currency: 'USD' }),
+      Money.zero('EUR'),
+      Money.from({ amount: '0.10', currency: 'BRL' }).add(Money.from({ amount: '0.20', currency: 'BRL' })),
+    ];
+
+    for (const value of values) expect(typeof value.toJSON().amount).toBe('string');
   });
 
   test('rejects a negative amount', () => {
