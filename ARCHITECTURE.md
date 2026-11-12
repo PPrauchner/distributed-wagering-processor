@@ -813,8 +813,13 @@ latência da pendente é limitada pelo intervalo do worker.
   worker, sem limite de tentativas — o TTL já limita a vida da pendente; permanente
   grava `FAILED` (`INFRA_INVARIANT_VIOLATION` ou `INFRA_UNEXPECTED`) numa segunda
   unidade de trabalho, com `WagerTransactionFailed` e alerta. O desfecho é gravado na transação SQL que trava a
-  carteira, e o item é relido sob lock: se outro worker já o resolveu, sai sem
-  efeito.
+  carteira e, depois dela, a linha do item, relido sob esses locks. O
+  reagendamento após erro transitório e a gravação da falha permanente releem o
+  item sob o lock da sua linha (`FOR UPDATE`, com o mesmo `lock_timeout`) e só
+  gravam se ele ainda estiver `PENDING_REFERENCE`. Em qualquer dos caminhos, se
+  outro worker já o resolveu — lease expirado no meio da tentativa —, sai sem
+  efeito: sem sobrescrever o desfecho, sem `INFRA_INVARIANT_VIOLATION` do trigger
+  de imutabilidade e sem alerta.
 - **Agendamento:** `attempts` e `next_attempt_at` em `wager_transactions`; a
   chegada grava `attempts = 0` e `next_attempt_at` pelo backoff, com o
   `WagerTransactionPendingReference` na mesma transação SQL. A reivindicação é um

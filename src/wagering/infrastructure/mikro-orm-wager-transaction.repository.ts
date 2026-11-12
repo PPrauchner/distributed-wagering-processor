@@ -4,6 +4,7 @@
  *
  * @packageDocumentation
  */
+import { LockMode } from '@mikro-orm/core';
 import type { EntityManager } from '@mikro-orm/postgresql';
 import type {
   PendingReferenceClaim,
@@ -11,11 +12,19 @@ import type {
 } from '../application/wager-transaction-repository.ts';
 import { WagerTransaction } from '../domain/wager-transaction.ts';
 
+// The wallet's lock_timeout (ADR 0002), for the units of work whose first lock is the transaction's.
+const LOCK_TIMEOUT = '2s';
+
 export class MikroOrmWagerTransactionRepository implements WagerTransactionRepository {
   constructor(private readonly em: EntityManager) {}
 
   findById(id: string): Promise<WagerTransaction | null> {
     return this.em.findOne(WagerTransaction, { id });
+  }
+
+  async findByIdForUpdate(id: string): Promise<WagerTransaction | null> {
+    await this.em.execute(`set local lock_timeout = '${LOCK_TIMEOUT}'`);
+    return this.em.findOne(WagerTransaction, { id }, { lockMode: LockMode.PESSIMISTIC_WRITE });
   }
 
   findByIdempotencyKey(providerId: string, idempotencyKey: string): Promise<WagerTransaction | null> {
