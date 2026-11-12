@@ -39,6 +39,11 @@ import { captureNestLogs } from '../../support/nest-log-capture.ts';
 
 const WALLET_ID = '01890a5d-ac96-774b-bcce-b302099a8057';
 const MESSAGE_ID = 'message-1';
+
+/** What the fake DLQ throws when it fails: a name the log must carry. */
+class DlqUnavailableError extends Error {
+  override readonly name = 'DlqUnavailableError';
+}
 const DELIVERY_ID = 'delivery-1';
 
 const DATA = {
@@ -110,7 +115,7 @@ function harness(
   };
   const deadLetters: DeadLetterQueue = {
     send: async (letter) => {
-      if (options.dlqFails) throw new Error('DLQ unavailable');
+      if (options.dlqFails) throw new DlqUnavailableError('DLQ unavailable');
       h.deadLetters.push(letter);
     },
   };
@@ -328,7 +333,7 @@ describe('a permanent error', () => {
 
     const lines = await captureNestLogs(async () => void (await h.consumer.handle(messageOf())));
 
-    expect(lines.join(' ')).toContain('Error');
+    expect(lines.join(' ')).toContain('queue message left unacknowledged: DlqUnavailableError');
     expect(lines.join(' ')).not.toContain('DLQ unavailable');
   });
 });
