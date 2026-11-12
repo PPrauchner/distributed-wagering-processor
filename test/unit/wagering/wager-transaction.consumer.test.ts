@@ -1,7 +1,8 @@
 /**
  * Unit tests for `WagerTransactionConsumer` on its failure path: what each
  * outcome or error of the use case does to the message — `ack`, a retry with
- * `min(2^receiveCount s, ceiling)` of visibility, `FAILED` + DLQ, or the DLQ
+ * `min(2^receiveCount s, ceiling)` of visibility, `FAILED` + DLQ — an error
+ * that escapes unclassified as `INFRA_UNEXPECTED` —, or the DLQ
  * as a submission not admitted, with its `rejected_submissions` row — a
  * transient failure out of receives included —, the batch processed one
  * message at a time within each FIFO group and the groups in parallel, and the
@@ -285,6 +286,32 @@ describe('a permanent error', () => {
     await h.consumer.handle(messageOf(2));
 
     expect(h.acknowledged).toEqual([]);
+  });
+
+  test('an unclassified error the use case recorded FAILED INFRA_UNEXPECTED goes to the DLQ with that code, then the ack', async () => {
+    const h = harness({ execute: async () => outcome('FAILED', FailureCode.InfraUnexpected) });
+
+    await h.consumer.handle(messageOf());
+
+    expect(h.deadLetters).toMatchObject([
+      { failureCode: FailureCode.InfraUnexpected, groupId: WALLET_ID, deduplicationId: DELIVERY_ID },
+    ]);
+    expect(h.acknowledged).toEqual(['receipt-1']);
+    expect(h.visibility).toEqual([]);
+    expect(h.rejected).toEqual([]);
+  });
+
+  test('an unclassified error that escapes the use case still goes to the DLQ as INFRA_UNEXPECTED, then the ack', async () => {
+    const h = harness({ execute: failWith(new TypeError('cannot read properties of undefined')) });
+
+    await h.consumer.handle(messageOf());
+
+    expect(h.deadLetters).toMatchObject([
+      { failureCode: FailureCode.InfraUnexpected, groupId: WALLET_ID, deduplicationId: DELIVERY_ID },
+    ]);
+    expect(h.dlqCodes).toEqual([FailureCode.InfraUnexpected]);
+    expect(h.acknowledged).toEqual(['receipt-1']);
+    expect(h.rejected).toEqual([]);
   });
 
   test('a DLQ that fails leaves the message unacknowledged', async () => {

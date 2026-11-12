@@ -13,7 +13,10 @@
  *   comes back after `min(2^receiveCount s, ceiling)`; on the last receive, it
  *   ends with no outcome, as a submission not admitted — `INFRA_RETRIES_EXHAUSTED`,
  *   or `WALLET_NOT_FOUND` for the wallet —, and its key stays free;
- * - `FAILED`: sent to the DLQ with its code, then `ack`;
+ * - `FAILED` — an error nobody classified included, recorded `INFRA_UNEXPECTED`
+ *   by the use case —: sent to the DLQ with its code, then `ack`; an error that
+ *   escapes the use case unclassified goes there too, as `INFRA_UNEXPECTED`,
+ *   never left for the native redrive;
  * - a submission not admitted: sent to the DLQ with its code and recorded in
  *   `rejected_submissions`, then `ack`.
  *
@@ -228,12 +231,11 @@ export class WagerTransactionConsumer implements OnApplicationBootstrap, BeforeA
     }
     const notAdmitted = NOT_ADMITTED.find(([type]) => error instanceof type);
     if (notAdmitted) return this.notAdmitted(message, facts, notAdmitted[1], payloadHashOf(error));
-    // Even the `FAILED` could not be recorded: the DLQ is all that is left.
-    if (error instanceof PermanentFailureError) {
-      await this.deadLetter(message, facts, error.failureCode);
-      return this.acknowledge(message);
-    }
-    throw error;
+    // Even the `FAILED` could not be recorded — or an error nobody classified,
+    // which another delivery would only repeat: the DLQ is all that is left.
+    const failureCode = error instanceof PermanentFailureError ? error.failureCode : FailureCode.InfraUnexpected;
+    await this.deadLetter(message, facts, failureCode);
+    return this.acknowledge(message);
   }
 
   private async retry(message: ReceivedMessage, failureCode: string): Promise<Settlement> {
