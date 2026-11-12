@@ -65,6 +65,33 @@ Colocá-los em `shared/` faria `shared` depender de `wallet` (e, depois, de
 que os módulos importam, nunca o contrário. A raiz de composição pode importar
 qualquer módulo; nenhum módulo a importa.
 
+Entre os módulos, a direção é **`health` → `wagering` → `wallet` → `messaging` →
+`shared`**: cada um importa só os que estão à sua direita. O teste
+`test/unit/module-dependencies.test.ts` confere isso nos imports de cada arquivo.
+
+- **`health` é o módulo mais externo.** Além das sondas e dos endpoints de
+  saúde e de métricas, ele adapta as portas de métricas que os outros módulos
+  declaram (`WAGERING_METRICS`, `WALLET_METRICS`, `OUTBOX_METRICS`…) à
+  implementação Prometheus: é global e as liga por token. Por isso conhece todos
+  os módulos, e nenhum o conhece.
+- **Porta da abertura.** `wagering → wallet` é inevitável — a transação de aposta
+  liquida na carteira. A volta fecharia um ciclo: criar uma carteira com saldo
+  inicial grava a `OPENING`, que é uma transação de aposta. Por isso `wallet`
+  declara a porta `OpeningRecorder` (token `OPENING_RECORDER`), que recebe os
+  repositórios da unidade de trabalho da criação; `wagering` a implementa
+  (`RecordOpening`: cria a `OPENING` já `PROCESSED`, adiciona ao repositório e
+  enfileira o `WagerTransactionProcessed`), e a raiz a entrega ao
+  `WalletModule.forRoot`. A criação de carteira e o `POST /wallets` continuam em
+  `wallet`, que grava o lançamento `CREDIT` e enfileira o `WalletBalanceChanged`
+  na mesma unidade de trabalho. No mapeamento do lançamento, `transaction_id` é
+  coluna escalar, não relação do ORM: a FK continua no banco, checada no commit
+  (ver Invariantes no schema).
+- **Opções por módulo.** Cada módulo configurável declara seu tipo de opções e o
+  recebe em `forRoot(options)` — `WageringModuleOptions`,
+  `MessagingModuleOptions`, `HealthModuleOptions`, `WalletModuleOptions` — e só o
+  que usa. A raiz (`app.ts`) traduz o `AppConfig` lido do ambiente para cada um;
+  nenhum módulo importa `config.ts`.
+
 ## Persistência e ORM
 
 **MikroORM 7**, com as classes de domínio mapeadas por `defineEntity` na
@@ -158,8 +185,11 @@ Em resumo, o banco garante sozinho:
   que amarra a moeda do lançamento à da carteira. A FK composta
   `wallet_ledger_entries_transaction_terms_fk`, `(transaction_id, wallet_id,
   amount, currency)` → `wager_transactions`, amarra carteira, valor e moeda do
-  lançamento aos da transação. Inbox, outbox e `rejected_submissions` não têm
-  FK.
+  lançamento aos da transação. As duas FKs do lançamento para a transação são
+  checadas no commit (`DEFERRABLE INITIALLY DEFERRED`, 0014): o mapeamento do
+  lançamento tem `transaction_id` como coluna escalar (ver Organização do
+  código), e o flush do ORM não ordena mais o insert da transação antes do dele.
+  Inbox, outbox e `rejected_submissions` não têm FK.
 - **Triggers:** livro-razão imutável; saldo ↔ livro-razão (*constraint trigger*
   deferido, ver
   [ADR 0003](docs/adr/0003-versao-da-carteira-como-sequencia-do-livro-razao.md));
