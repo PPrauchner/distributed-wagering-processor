@@ -426,8 +426,12 @@ Com mais de uma violação, prevalece a primeira, na mesma ordem nos dois canais
   Esse `23505` não é a resposta: qual índice o PostgreSQL checa primeiro numa
   corrida idêntica não é garantido. O use case relê na ordem das validações —
   chave, depois id externo —: mesma chave e mesmo hash → replay; mesma chave e
-  outro hash → `IDEMPOTENCY_CONFLICT`; outra chave → `EXTERNAL_ID_CONFLICT`. Na
-  fila, os conflitos são erro de negócio terminal.
+  outro hash → `IDEMPOTENCY_CONFLICT`; outra chave → `EXTERNAL_ID_CONFLICT`. A
+  mesma chave com outro hash é `IDEMPOTENCY_CONFLICT`, e não `EXTERNAL_ID_CONFLICT`
+  como dizia a primeira redação da decisão (grill da seção 14, pergunta 10): assim o
+  desfecho é o mesmo que a validação antes do insert daria, e não depende de qual
+  índice estourou; corrigido no Agent Brief da #45. Na fila, os conflitos são erro
+  de negócio terminal.
 - **Camadas:** o inbox, por `(consumerName, messageId)`, protege contra a
   redelivery da fila; a chave de idempotência protege contra o reenvio do provedor,
   por qualquer canal.
