@@ -216,7 +216,8 @@ pendentes e publicador da outbox) reivindicam itens com um **lease** numa transa
 SQL curta e separada (`FOR UPDATE SKIP LOCKED` + `next_attempt_at = now() + lease`,
 com commit). O worker de referências pendentes processa cada item numa unidade de
 trabalho própria, que começa pela carteira; **o publicador da outbox não trava a
-carteira** — nenhuma das suas transações SQL toca `wallets` (emenda do ADR 0002).
+carteira** — nenhuma das suas transações SQL toca `wallets` (ADR 0002,
+decisão do publicador da outbox).
 A gravação de `FAILED` do use case (segunda unidade de trabalho, depois do rollback
 de um erro permanente) insere a transação de aposta, cuja FK `wallet_id` toma
 `FOR KEY SHARE` na carteira: por isso começa pelo lock da carteira, com o mesmo
