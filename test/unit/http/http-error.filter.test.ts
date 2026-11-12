@@ -13,6 +13,7 @@ import {
   TransientFailureError,
 } from '../../../src/shared/application/infrastructure-failures.ts';
 import { FailureCode } from '../../../src/shared/domain/failure-code.ts';
+import { captureNestLogs } from '../../support/nest-log-capture.ts';
 
 interface Answer {
   status?: number;
@@ -48,6 +49,17 @@ describe('HttpErrorFilter', () => {
       body: { failureCode: 'TRANSIENT_LOCK_TIMEOUT', message: expect.any(String) },
       headers: { 'Retry-After': '7' },
     });
+  });
+
+  test("a transient failure is logged by its code and its cause's name, never the cause's message", async () => {
+    const cause = new Error('update wallets set balance = 123.45');
+
+    const lines = await captureNestLogs(async () => {
+      await answerTo(new TransientFailureError(FailureCode.TransientUnavailable, { cause }));
+    });
+
+    expect(lines.join(' ')).toContain('TRANSIENT_UNAVAILABLE');
+    expect(lines.join(' ')).not.toContain('123.45');
   });
 
   test('a permanent failure without a transaction → 500 with its code', async () => {
